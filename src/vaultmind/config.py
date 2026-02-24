@@ -48,6 +48,7 @@ class EmbeddingConfig(BaseSettings):
     model: str = "text-embedding-3-small"
     dimensions: int = 1536
     batch_size: int = 64
+    cache_enabled: bool = True
 
 
 class ChromaConfig(BaseSettings):

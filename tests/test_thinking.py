@@ -118,7 +118,9 @@ class TestLoadFromStoreOnCacheMiss:
 
         # Verify LLM received prior history in messages
         call_args = llm_client.complete.call_args
-        messages: list[Message] = call_args.kwargs.get("messages", call_args.args[0] if call_args.args else [])
+        messages: list[Message] = call_args.kwargs.get(
+            "messages", call_args.args[0] if call_args.args else []
+        )
         # First two messages should be the prior turn
         assert messages[0].role == "user"
         assert messages[1].role == "assistant"
