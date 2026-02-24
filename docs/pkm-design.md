@@ -6,27 +6,27 @@ Build a **personal knowledge operating system** around Obsidian as the source of
 
 ### Core Principles
 
-| Principle | Implication |
-|---|---|
-| Obsidian is the canonical store | All other systems are indexes or interfaces into the vault |
-| Markdown-native | Every note is a `.md` file; metadata lives in YAML frontmatter |
-| Local-first, sync-second | Vault lives on disk; sync is a transport layer, not a dependency |
-| Agents are readers/writers | Claude, Telegram bot, and future agents interact via the same vault API |
-| Knowledge graph is emergent | Graph structure is extracted from notes, not imposed top-down |
+| Principle                       | Implication                                                             |
+| ------------------------------- | ----------------------------------------------------------------------- |
+| Obsidian is the canonical store | All other systems are indexes or interfaces into the vault              |
+| Markdown-native                 | Every note is a `.md` file; metadata lives in YAML frontmatter          |
+| Local-first, sync-second        | Vault lives on disk; sync is a transport layer, not a dependency        |
+| Agents are readers/writers      | Claude, Telegram bot, and future agents interact via the same vault API |
+| Knowledge graph is emergent     | Graph structure is extracted from notes, not imposed top-down           |
 
 ---
 
 ## 2. Requirements Matrix
 
-| Requirement | Solution Layer | Tool/Tech |
-|---|---|---|
-| PKM core (notes, links, tags) | Obsidian Desktop + Mobile | Obsidian |
-| Full mobile access | Telegram Bot | `aiogram` + self-hosted bot |
-| Extended memory (life logging) | Quick capture + periodic review templates | Telegram → vault pipeline |
-| Claude / agent connectivity | MCP Server + REST API | Custom MCP server over vault |
-| Knowledge graphs | Entity extraction + graph DB | `NetworkX` (lightweight) or Neo4j (if scaling) |
-| Thinking partner | RAG-augmented LLM conversation | Claude API + vector search |
-| Cross-device sync | Git-based sync | `obsidian-git` plugin + private repo |
+| Requirement                    | Solution Layer                            | Tool/Tech                                      |
+| ------------------------------ | ----------------------------------------- | ---------------------------------------------- |
+| PKM core (notes, links, tags)  | Obsidian Desktop + Mobile                 | Obsidian                                       |
+| Full mobile access             | Telegram Bot                              | `aiogram` + self-hosted bot                    |
+| Extended memory (life logging) | Quick capture + periodic review templates | Telegram → vault pipeline                      |
+| Claude / agent connectivity    | MCP Server + REST API                     | Custom MCP server over vault                   |
+| Knowledge graphs               | Entity extraction + graph DB              | `NetworkX` (lightweight) or Neo4j (if scaling) |
+| Thinking partner               | RAG-augmented LLM conversation            | Claude API + vector search                     |
+| Cross-device sync              | Git-based sync                            | `obsidian-git` plugin + private repo           |
 
 ---
 
@@ -121,16 +121,16 @@ source: telegram | manual | agent
 
 **Essential Obsidian Plugins:**
 
-| Plugin | Purpose |
-|---|---|
-| `obsidian-git` | Auto-commit + push/pull on interval |
-| `dataview` | Query notes as a database |
-| `templater` | Dynamic templates for daily notes, captures |
-| `periodic-notes` | Daily/weekly/monthly review structure |
+| Plugin           | Purpose                                                |
+| ---------------- | ------------------------------------------------------ |
+| `obsidian-git`   | Auto-commit + push/pull on interval                    |
+| `dataview`       | Query notes as a database                              |
+| `templater`      | Dynamic templates for daily notes, captures            |
+| `periodic-notes` | Daily/weekly/monthly review structure                  |
 | `local-rest-api` | HTTP API for external tool access (alternative to MCP) |
-| `excalidraw` | Visual thinking, diagrams within vault |
-| `kanban` | Project/task management boards |
-| `graph-analysis` | Enhanced graph metrics (betweenness, clusters) |
+| `excalidraw`     | Visual thinking, diagrams within vault                 |
+| `kanban`         | Project/task management boards                         |
+| `graph-analysis` | Enhanced graph metrics (betweenness, clusters)         |
 
 ### 4.2 Sync Layer
 
@@ -161,17 +161,17 @@ This is your primary mobile interface. Design it as a full PKM client, not just 
 
 **Command Interface:**
 
-| Command | Function | Example |
-|---|---|---|
-| `/capture <text>` or just send text | Quick note to inbox | "Meeting with Raj about SahAI demo at 3pm" |
-| `/think <topic>` | Start thinking partner session | `/think architecture for drift detection in Pramana` |
-| `/recall <query>` | Semantic search over vault | `/recall what did I decide about CAIRN's context layer?` |
-| `/graph <entity>` | Show entity connections | `/graph CAIRN` → returns connected concepts, notes |
-| `/daily` | Get/create today's daily note | Returns summary + open items |
-| `/review` | Weekly review prompts | Guided reflection questions with context |
-| `/link <note> <note>` | Create bidirectional link | `/link CAIRN "context-aware retrieval"` |
-| `/tag <query>` | Browse by tag | `/tag #project` |
-| voice message | Transcribe → capture | Whisper API → structured note |
+| Command                             | Function                       | Example                                                  |
+| ----------------------------------- | ------------------------------ | -------------------------------------------------------- |
+| `/capture <text>` or just send text | Quick note to inbox            | "Meeting with Raj about SahAI demo at 3pm"               |
+| `/think <topic>`                    | Start thinking partner session | `/think architecture for drift detection in Pramana`     |
+| `/recall <query>`                   | Semantic search over vault     | `/recall what did I decide about CAIRN's context layer?` |
+| `/graph <entity>`                   | Show entity connections        | `/graph CAIRN` → returns connected concepts, notes       |
+| `/daily`                            | Get/create today's daily note  | Returns summary + open items                             |
+| `/review`                           | Weekly review prompts          | Guided reflection questions with context                 |
+| `/link <note> <note>`               | Create bidirectional link      | `/link CAIRN "context-aware retrieval"`                  |
+| `/tag <query>`                      | Browse by tag                  | `/tag #project`                                          |
+| voice message                       | Transcribe → capture           | Whisper API → structured note                            |
 
 **Thinking Partner Mode (`/think`):**
 
@@ -293,6 +293,7 @@ EDGE_TYPES = [
 **Why NetworkX over Neo4j for v1:** You're a solo user. NetworkX + JSON persistence gives you zero-infra graph operations, in-process queries, and trivial backup (it's just a file in the vault). If you hit scale limits or need multi-hop Cypher queries, Neo4j Community Edition is the upgrade path.
 
 **Automated graph enrichment:** Run a nightly job that:
+
 1. Scans all notes modified in the last 24h
 2. Extracts entities via Claude (structured output)
 3. Updates the graph
@@ -305,16 +306,16 @@ Expose vault operations as an MCP server so Claude Desktop, Claude Code, or any 
 
 **MCP Tools to expose:**
 
-| Tool | Description |
-|---|---|
-| `vault_search` | Semantic search over vault via ChromaDB |
-| `vault_read` | Read a specific note by path |
-| `vault_write` | Create or update a note |
-| `vault_list` | List notes by folder, tag, or type |
-| `graph_query` | Query knowledge graph (neighbors, paths, clusters) |
-| `graph_entity` | Get all info about a specific entity |
-| `daily_summary` | Get today's daily note + open tasks |
-| `capture` | Quick-capture a note to inbox |
+| Tool            | Description                                        |
+| --------------- | -------------------------------------------------- |
+| `vault_search`  | Semantic search over vault via ChromaDB            |
+| `vault_read`    | Read a specific note by path                       |
+| `vault_write`   | Create or update a note                            |
+| `vault_list`    | List notes by folder, tag, or type                 |
+| `graph_query`   | Query knowledge graph (neighbors, paths, clusters) |
+| `graph_entity`  | Get all info about a specific entity               |
+| `daily_summary` | Get today's daily note + open tasks                |
+| `capture`       | Quick-capture a note to inbox                      |
 
 This means when you're working in Claude Code on a project, you can say "check my notes on CAIRN's architecture" and Claude will pull the relevant context directly from your vault.
 
@@ -324,17 +325,17 @@ This means when you're working in Claude Code on a project, you can say "check m
 
 Before building everything custom, evaluate **[Khoj](https://khoj.dev)** — an open-source AI personal assistant that already solves 60-70% of this:
 
-| Feature | Khoj Coverage | Custom Extension Needed |
-|---|---|---|
-| Obsidian plugin + sync | ✅ Native | — |
-| Telegram bot | ✅ Built-in | Customize commands |
-| RAG over notes | ✅ Core feature | Tune chunking + embeddings |
-| Claude API support | ✅ Supported | — |
-| Web UI | ✅ Built-in | — |
-| Knowledge graph | ❌ Not native | Full custom build |
-| MCP server | ❌ Not native | Full custom build |
-| Thinking partner mode | ⚠️ Partial (chat) | Custom system prompts + session mgmt |
-| Voice capture | ⚠️ Partial | Whisper integration |
+| Feature                | Khoj Coverage     | Custom Extension Needed              |
+| ---------------------- | ----------------- | ------------------------------------ |
+| Obsidian plugin + sync | ✅ Native         | —                                    |
+| Telegram bot           | ✅ Built-in       | Customize commands                   |
+| RAG over notes         | ✅ Core feature   | Tune chunking + embeddings           |
+| Claude API support     | ✅ Supported      | —                                    |
+| Web UI                 | ✅ Built-in       | —                                    |
+| Knowledge graph        | ❌ Not native     | Full custom build                    |
+| MCP server             | ❌ Not native     | Full custom build                    |
+| Thinking partner mode  | ⚠️ Partial (chat) | Custom system prompts + session mgmt |
+| Voice capture          | ⚠️ Partial        | Whisper integration                  |
 
 **Recommended approach:** Deploy Khoj for the Obsidian sync + Telegram + RAG baseline, then build the knowledge graph and MCP layers as custom extensions that plug into the same vault.
 
@@ -420,42 +421,42 @@ This gets you to a usable system in days rather than weeks, with a clear extensi
 
 ## 7. Tech Stack Summary
 
-| Layer | Technology | Why |
-|---|---|---|
-| PKM Core | Obsidian | Best-in-class markdown PKM, massive ecosystem |
-| Sync | Git (`obsidian-git`) | Free, transparent, developer-native |
-| Server | Ubuntu VPS (Hetzner/DO) | Cheap, reliable, full control |
-| Telegram Bot | `aiogram 3.x` (or Khoj built-in) | Async, modern, well-maintained |
-| Vector Store | ChromaDB | Lightweight, embedded, good enough for personal scale |
-| Knowledge Graph | NetworkX + JSON | Zero-infra, in-process, upgradable to Neo4j |
-| LLM | Claude API (Sonnet for fast, Opus for deep) | Best reasoning for thinking partner mode |
-| Embeddings | `text-embedding-3-small` or `voyage-3-lite` | Good quality/cost ratio |
-| Transcription | Whisper (local or API) | Voice → text for mobile capture |
-| Agent Integration | Custom MCP Server | Native Claude tool access |
-| Container | Docker Compose | Single `docker-compose up` for entire server stack |
+| Layer             | Technology                                  | Why                                                   |
+| ----------------- | ------------------------------------------- | ----------------------------------------------------- |
+| PKM Core          | Obsidian                                    | Best-in-class markdown PKM, massive ecosystem         |
+| Sync              | Git (`obsidian-git`)                        | Free, transparent, developer-native                   |
+| Server            | Ubuntu VPS (Hetzner/DO)                     | Cheap, reliable, full control                         |
+| Telegram Bot      | `aiogram 3.x` (or Khoj built-in)            | Async, modern, well-maintained                        |
+| Vector Store      | ChromaDB                                    | Lightweight, embedded, good enough for personal scale |
+| Knowledge Graph   | NetworkX + JSON                             | Zero-infra, in-process, upgradable to Neo4j           |
+| LLM               | Claude API (Sonnet for fast, Opus for deep) | Best reasoning for thinking partner mode              |
+| Embeddings        | `text-embedding-3-small` or `voyage-3-lite` | Good quality/cost ratio                               |
+| Transcription     | Whisper (local or API)                      | Voice → text for mobile capture                       |
+| Agent Integration | Custom MCP Server                           | Native Claude tool access                             |
+| Container         | Docker Compose                              | Single `docker-compose up` for entire server stack    |
 
 ---
 
 ## 8. Key Design Decisions & Trade-offs
 
-| Decision | Chosen | Alternative | Rationale |
-|---|---|---|---|
-| Sync mechanism | Git | Syncthing, Obsidian Sync | Developer-native, free, webhook-able, audit trail |
-| Vector DB | ChromaDB | Qdrant, Weaviate, Pinecone | Embedded, zero-infra, sufficient for ~100K notes |
-| Graph DB | NetworkX | Neo4j, ArangoDB | No separate service to manage; JSON backup is a vault file |
-| Bot framework | aiogram | python-telegram-bot | Async-native, cleaner API, better middleware |
-| Khoj vs custom | Khoj as base + extensions | Full custom | 70% solved out of box; extend where needed |
-| Embedding model | OpenAI/Voyage | Local (e5, BGE) | Quality matters more than cost at personal scale |
+| Decision        | Chosen                    | Alternative                | Rationale                                                  |
+| --------------- | ------------------------- | -------------------------- | ---------------------------------------------------------- |
+| Sync mechanism  | Git                       | Syncthing, Obsidian Sync   | Developer-native, free, webhook-able, audit trail          |
+| Vector DB       | ChromaDB                  | Qdrant, Weaviate, Pinecone | Embedded, zero-infra, sufficient for ~100K notes           |
+| Graph DB        | NetworkX                  | Neo4j, ArangoDB            | No separate service to manage; JSON backup is a vault file |
+| Bot framework   | aiogram                   | python-telegram-bot        | Async-native, cleaner API, better middleware               |
+| Khoj vs custom  | Khoj as base + extensions | Full custom                | 70% solved out of box; extend where needed                 |
+| Embedding model | OpenAI/Voyage             | Local (e5, BGE)            | Quality matters more than cost at personal scale           |
 
 ---
 
 ## 9. Risk Mitigation
 
-| Risk | Mitigation |
-|---|---|
-| Vault grows too large for ChromaDB | Incremental indexing + metadata filtering. Upgrade path: Qdrant |
-| Git conflicts from simultaneous edits | Single-user system; `obsidian-git` handles gracefully |
-| Khoj doesn't meet needs | Core vault + RAG layer is portable; swap Khoj for custom bot |
-| Claude API costs for thinking partner | Use Sonnet for retrieval/routing, Opus only for deep thinking |
-| Voice transcription quality | Whisper large-v3 locally on VPS; or use API for reliability |
-| Knowledge graph gets noisy | Confidence scores on entity extraction; periodic manual curation via review workflow |
+| Risk                                  | Mitigation                                                                           |
+| ------------------------------------- | ------------------------------------------------------------------------------------ |
+| Vault grows too large for ChromaDB    | Incremental indexing + metadata filtering. Upgrade path: Qdrant                      |
+| Git conflicts from simultaneous edits | Single-user system; `obsidian-git` handles gracefully                                |
+| Khoj doesn't meet needs               | Core vault + RAG layer is portable; swap Khoj for custom bot                         |
+| Claude API costs for thinking partner | Use Sonnet for retrieval/routing, Opus only for deep thinking                        |
+| Voice transcription quality           | Whisper large-v3 locally on VPS; or use API for reliability                          |
+| Knowledge graph gets noisy            | Confidence scores on entity extraction; periodic manual curation via review workflow |

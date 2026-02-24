@@ -32,7 +32,7 @@ connecting Claude and other agents directly to your notes.
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/yourusername/vaultmind.git
+git clone https://github.com/Mathews-Tom/vaultmind.git
 cd vaultmind
 uv sync --extra dev
 ```

@@ -42,7 +42,7 @@ class OllamaClient:
         try:
             response = self._client.chat.completions.create(
                 model=model,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_tokens,
                 messages=api_messages,  # type: ignore[arg-type]
             )
         except OpenAIError as e:

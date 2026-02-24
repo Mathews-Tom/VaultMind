@@ -200,6 +200,7 @@ class VaultParser:
             "00-inbox": NoteType.FLEETING,
             "01-daily": NoteType.DAILY,
             "02-projects": NoteType.PROJECT,
+            "03-areas": NoteType.AREA,
             "04-resources": NoteType.LITERATURE,
             "06-templates": NoteType.TEMPLATE,
         }
