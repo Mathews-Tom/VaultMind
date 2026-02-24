@@ -19,6 +19,7 @@ class NoteType(StrEnum):
     PERMANENT = "permanent"
     DAILY = "daily"
     PROJECT = "project"
+    AREA = "area"
     PERSON = "person"
     CONCEPT = "concept"
     TEMPLATE = "template"
