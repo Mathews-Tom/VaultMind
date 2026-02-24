@@ -47,3 +47,17 @@ htmlcov/
 
 # Ruff
 .ruff_cache/
+
+# Agentic Systems
+.agent
+.claude/
+.gemini
+.opencode/
+.serena/
+
+# Developer workspace (Sage-Dev generated files)
+.docs/
+.sage/
+
+# macOS
+.DS_Store
