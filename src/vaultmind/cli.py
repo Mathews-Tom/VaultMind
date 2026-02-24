@@ -25,6 +25,7 @@ from rich.logging import RichHandler
 from vaultmind import __version__
 
 if TYPE_CHECKING:
+    from vaultmind.indexer.embedding_cache import EmbeddingCache
     from vaultmind.llm.client import LLMClient
 
 console = Console()
@@ -52,6 +53,19 @@ def _require_llm_key(settings: object) -> None:
         env_var = f"VAULTMIND_{provider.upper()}_API_KEY"
         console.print(f"[red]✗[/red] {provider.capitalize()} API key not set. Set {env_var}.")
         sys.exit(1)
+
+
+def _create_embedding_cache(settings: object) -> EmbeddingCache | None:
+    """Create an EmbeddingCache if caching is enabled, otherwise return None."""
+    from vaultmind.config import VAULTMIND_HOME, Settings
+    from vaultmind.indexer.embedding_cache import EmbeddingCache
+
+    assert isinstance(settings, Settings)
+    if not settings.embedding.cache_enabled:
+        return None
+
+    cache_path = VAULTMIND_HOME / "data" / "embedding_cache.db"
+    return EmbeddingCache(cache_path)
 
 
 def _create_llm_client(settings: object) -> LLMClient:
@@ -141,8 +155,9 @@ def index(ctx: click.Context) -> None:
         )
         sys.exit(1)
 
+    cache = _create_embedding_cache(settings)
     parser = VaultParser(settings.vault)
-    embedder = Embedder(settings.embedding, api_key)
+    embedder = Embedder(settings.embedding, api_key, cache=cache)
     store = VaultStore(settings.chroma, embedder)
 
     with console.status("Parsing vault..."):
@@ -152,6 +167,17 @@ def index(ctx: click.Context) -> None:
         count = store.index_notes(notes, parser)
 
     console.print(f"[green]✓[/green] Indexed {count} chunks from {len(notes)} notes")
+
+    if cache is not None:
+        from vaultmind.indexer.embedding_cache import EmbeddingCache
+
+        assert isinstance(cache, EmbeddingCache)
+        cs = cache.stats()
+        console.print(
+            f"  Embedding cache: {cs['total_entries']} entries, "
+            f"{cs['total_size_bytes'] / 1024:.1f} KB"
+        )
+        cache.close()
 
 
 @cli.command()
@@ -177,8 +203,9 @@ def bot(ctx: click.Context) -> None:
     # Initialize components
     is_openai = settings.embedding.provider == "openai"
     embed_key = settings.openai_api_key if is_openai else settings.voyage_api_key
+    cache = _create_embedding_cache(settings)
     parser = VaultParser(settings.vault)
-    embedder = Embedder(settings.embedding, embed_key)
+    embedder = Embedder(settings.embedding, embed_key, cache=cache)
     store = VaultStore(settings.chroma, embedder)
     graph = KnowledgeGraph(settings.graph)
 
@@ -290,8 +317,9 @@ def mcp_serve(ctx: click.Context) -> None:
 
     is_openai = settings.embedding.provider == "openai"
     api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
+    cache = _create_embedding_cache(settings)
     parser = VaultParser(settings.vault)
-    embedder = Embedder(settings.embedding, api_key)
+    embedder = Embedder(settings.embedding, api_key, cache=cache)
     store = VaultStore(settings.chroma, embedder)
     graph = KnowledgeGraph(settings.graph)
 
@@ -350,6 +378,19 @@ def stats(ctx: click.Context) -> None:
         console.print(f"  Density: {gs['density']:.3f}")
         console.print(f"  Components: {gs['components']}")
         console.print(f"  Orphans: {gs['orphans']}")
+
+    from vaultmind.config import VAULTMIND_HOME
+
+    cache_db = VAULTMIND_HOME / "data" / "embedding_cache.db"
+    if cache_db.exists():
+        from vaultmind.indexer.embedding_cache import EmbeddingCache
+
+        cache = EmbeddingCache(cache_db)
+        cs = cache.stats()
+        console.print("\n[bold]Embedding Cache:[/bold]")
+        console.print(f"  Entries: {cs['total_entries']}")
+        console.print(f"  Size: {cs['total_size_bytes'] / 1024:.1f} KB")
+        cache.close()
 
 
 if __name__ == "__main__":

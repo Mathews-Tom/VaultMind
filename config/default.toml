@@ -17,6 +17,7 @@ provider = "openai"           # "openai" or "voyage"
 model = "text-embedding-3-small"
 dimensions = 1536
 batch_size = 64
+cache_enabled = true
 
 [chroma]
 persist_dir = "~/.vaultmind/data/chromadb"
