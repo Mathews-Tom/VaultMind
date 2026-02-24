@@ -1,3 +1,7 @@
+[![VaultMind](assets/banner.png)](https://github.com/Mathews-Tom/VaultMind)
+
+---
+
 # VaultMind
 
 AI-powered personal knowledge management built on Obsidian.
@@ -133,12 +137,12 @@ uv run vaultmind mcp-serve      # MCP server for Claude Desktop/Code
 
 Set `[llm].provider` in `config/default.toml` and the matching API key in `.env`.
 
-| Provider | Config | Model examples |
-|----------|--------|----------------|
+| Provider  | Config                   | Model examples                                       |
+| --------- | ------------------------ | ---------------------------------------------------- |
 | Anthropic | `provider = "anthropic"` | `claude-sonnet-4-20250514`, `claude-opus-4-20250514` |
-| OpenAI | `provider = "openai"` | `gpt-4.1`, `gpt-4.1-mini` |
-| Gemini | `provider = "gemini"` | `gemini-2.5-flash`, `gemini-2.5-pro` |
-| Ollama | `provider = "ollama"` | `llama3.3`, `qwen3`, `deepseek-r1` |
+| OpenAI    | `provider = "openai"`    | `gpt-4.1`, `gpt-4.1-mini`                            |
+| Gemini    | `provider = "gemini"`    | `gemini-2.5-flash`, `gemini-2.5-pro`                 |
+| Ollama    | `provider = "ollama"`    | `llama3.3`, `qwen3`, `deepseek-r1`                   |
 
 Ollama requires no API key. Set `ollama_base_url` if not running on `localhost:11434`.
 
@@ -148,16 +152,16 @@ Ollama requires no API key. Set `ollama_base_url` if not running on `localhost:1
 
 Plain text messages are classified automatically — no command prefix needed:
 
-| You send | What happens |
-|----------|--------------|
-| `note: buy groceries` | Captured to inbox (prefix stripped) |
-| `save: meeting notes...` | Captured to inbox (prefix stripped) |
-| Multiline paste (3+ lines) | Captured to inbox (pasted content = intentional) |
-| Long text (500+ chars) | Captured to inbox |
-| "Hi", "thanks", "ok" | Static greeting response (no LLM call) |
-| "What did I write about X?" | Vault-context-aware answer via LLM |
-| "Tell me about my projects" | Conversational response with vault context |
-| Follow-up after `/think` | Continues thinking session (sticky) |
+| You send                    | What happens                                     |
+| --------------------------- | ------------------------------------------------ |
+| `note: buy groceries`       | Captured to inbox (prefix stripped)              |
+| `save: meeting notes...`    | Captured to inbox (prefix stripped)              |
+| Multiline paste (3+ lines)  | Captured to inbox (pasted content = intentional) |
+| Long text (500+ chars)      | Captured to inbox                                |
+| "Hi", "thanks", "ok"        | Static greeting response (no LLM call)           |
+| "What did I write about X?" | Vault-context-aware answer via LLM               |
+| "Tell me about my projects" | Conversational response with vault context       |
+| Follow-up after `/think`    | Continues thinking session (sticky)              |
 
 Capture prefixes: `note:`, `save:`, `capture:`, `remember:`, `jot:`, `log:`
 
@@ -165,19 +169,19 @@ Set `capture_all = true` in `[routing]` config to restore old behavior (all text
 
 ### Commands
 
-| Command | Description |
-|---------|-------------|
-| `/recall <query>` | Semantic search over vault |
-| `/think <topic>` | Start thinking partner session |
-| `/think explore: <topic>` | Divergent ideation mode |
-| `/think critique: <topic>` | Stress-test an idea |
-| `/think synthesize: <topic>` | Connect dots across domains |
-| `/think plan: <topic>` | Create execution plan |
-| `/graph <entity>` | Query knowledge graph |
-| `/daily` | Get/create today's daily note |
-| `/review` | Weekly review with graph insights |
-| `/stats` | Vault and graph statistics |
-| Send voice | Transcribe and capture (requires whisper extra) |
+| Command                      | Description                                     |
+| ---------------------------- | ----------------------------------------------- |
+| `/recall <query>`            | Semantic search over vault                      |
+| `/think <topic>`             | Start thinking partner session                  |
+| `/think explore: <topic>`    | Divergent ideation mode                         |
+| `/think critique: <topic>`   | Stress-test an idea                             |
+| `/think synthesize: <topic>` | Connect dots across domains                     |
+| `/think plan: <topic>`       | Create execution plan                           |
+| `/graph <entity>`            | Query knowledge graph                           |
+| `/daily`                     | Get/create today's daily note                   |
+| `/review`                    | Weekly review with graph insights               |
+| `/stats`                     | Vault and graph statistics                      |
+| Send voice                   | Transcribe and capture (requires whisper extra) |
 
 ## MCP Integration
 
@@ -188,7 +192,13 @@ For Claude Desktop, add to `~/Library/Application Support/Claude/claude_desktop_
   "mcpServers": {
     "vaultmind": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/vaultmind", "vaultmind", "mcp-serve"]
+      "args": [
+        "run",
+        "--directory",
+        "/path/to/vaultmind",
+        "vaultmind",
+        "mcp-serve"
+      ]
     }
   }
 }
@@ -220,7 +230,7 @@ Notes use YAML frontmatter:
 
 ```yaml
 ---
-type: project          # fleeting | literature | permanent | daily | project | person | concept
+type: project # fleeting | literature | permanent | daily | project | person | concept
 tags: [python, ai]
 created: 2026-01-15
 entities: [CAIRN, MCP]
@@ -232,11 +242,11 @@ status: active
 
 Layered config system:
 
-| Layer | File | Purpose |
-|-------|------|---------|
-| Settings | `config/default.toml` | All non-secret config (paths, models, thresholds) |
-| Secrets | `.env` | API keys, bot token |
-| Overrides | Environment variables | `VAULTMIND_*` prefix overrides any setting |
+| Layer     | File                  | Purpose                                           |
+| --------- | --------------------- | ------------------------------------------------- |
+| Settings  | `config/default.toml` | All non-secret config (paths, models, thresholds) |
+| Secrets   | `.env`                | API keys, bot token                               |
+| Overrides | Environment variables | `VAULTMIND_*` prefix overrides any setting        |
 
 Key config sections: `[vault]`, `[llm]`, `[telegram]`, `[routing]`, `[embedding]`, `[chroma]`, `[graph]`, `[mcp]`.
 The `[routing]` section controls message routing behavior — `chat_model`, `chat_max_tokens`, `vault_context_enabled`, and the `capture_all` escape hatch.
@@ -294,18 +304,18 @@ uv run ruff format src/ tests/
 
 ## Tech Stack
 
-| Layer | Technology |
-|-------|------------|
-| Language | Python 3.12+ |
-| LLM | Anthropic, OpenAI, Gemini, Ollama (provider-agnostic) |
-| Embeddings | OpenAI / Voyage |
-| Vector Store | ChromaDB |
-| Knowledge Graph | NetworkX |
-| Telegram Bot | aiogram 3.x |
-| Agent Protocol | MCP |
-| CLI | Click + Rich |
-| Config | Pydantic Settings + TOML |
-| Packaging | Hatch + uv |
+| Layer           | Technology                                            |
+| --------------- | ----------------------------------------------------- |
+| Language        | Python 3.12+                                          |
+| LLM             | Anthropic, OpenAI, Gemini, Ollama (provider-agnostic) |
+| Embeddings      | OpenAI / Voyage                                       |
+| Vector Store    | ChromaDB                                              |
+| Knowledge Graph | NetworkX                                              |
+| Telegram Bot    | aiogram 3.x                                           |
+| Agent Protocol  | MCP                                                   |
+| CLI             | Click + Rich                                          |
+| Config          | Pydantic Settings + TOML                              |
+| Packaging       | Hatch + uv                                            |
 
 ## License
 
