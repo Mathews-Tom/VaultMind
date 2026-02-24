@@ -386,7 +386,7 @@ class CommandHandlers:
 
         # Sticky thinking sessions — continue if active
         user_id = message.from_user.id if message.from_user else 0
-        if user_id in self.thinking._sessions:
+        if self.thinking.has_active_session(user_id):
             await self.handle_think(message, text)
             return
 
