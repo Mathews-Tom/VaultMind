@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import frontmatter
 
@@ -187,7 +187,7 @@ class VaultParser:
 
         return sections
 
-    def _infer_type(self, meta: dict, rel_path: Path) -> NoteType:
+    def _infer_type(self, meta: dict[str, Any], rel_path: Path) -> NoteType:
         """Infer note type from frontmatter or folder structure."""
         if "type" in meta:
             try:

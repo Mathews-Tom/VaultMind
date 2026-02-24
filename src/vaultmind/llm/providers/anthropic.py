@@ -38,7 +38,7 @@ class AnthropicClient:
             kwargs["system"] = system
 
         try:
-            response = self._client.messages.create(**kwargs)  # type: ignore[arg-type]
+            response = self._client.messages.create(**kwargs)  # type: ignore[arg-type,call-overload,unused-ignore]
         except anthropic.APIError as e:
             raise LLMError(str(e), provider="anthropic", original=e) from e
 

@@ -40,7 +40,7 @@ def create_mcp_server(
 
     server = Server("vaultmind")
 
-    @server.list_tools()
+    @server.list_tools()  # type: ignore[misc,untyped-decorator,unused-ignore]
     async def list_tools() -> list[Tool]:
         return [
             Tool(
@@ -192,7 +192,7 @@ def create_mcp_server(
             ),
         ]
 
-    @server.call_tool()
+    @server.call_tool()  # type: ignore[misc,untyped-decorator,unused-ignore]
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         try:
             result = _dispatch_tool(

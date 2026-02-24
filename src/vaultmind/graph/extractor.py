@@ -96,7 +96,7 @@ class EntityExtractor:
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
 
-            result = json.loads(raw)
+            result: dict[str, Any] = json.loads(raw)
             logger.debug(
                 "Extracted %d entities, %d relationships from %s",
                 len(result.get("entities", [])),

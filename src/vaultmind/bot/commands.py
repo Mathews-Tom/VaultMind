@@ -505,7 +505,7 @@ class CommandHandlers:
             return
 
         start_date, end_date = self._resolve_date_range(query)
-        if start_date is None:
+        if start_date is None or end_date is None:
             await message.answer(
                 "Could not parse a date from that. "
                 "Try: `2026-02-20`, `yesterday`, `last week`, `over the weekend`",
@@ -892,7 +892,7 @@ class CommandHandlers:
         # Semantic search fallback
         results = self.store.search(query, n_results=1)
         if results:
-            note_path = results[0]["metadata"].get("note_path", "")
+            note_path: str = results[0]["metadata"].get("note_path", "")
             if note_path:
                 candidate = self.vault_root / note_path
                 if candidate.is_file():
