@@ -15,6 +15,8 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from vaultmind.vault.security import PathTraversalError, validate_vault_path
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -235,14 +237,20 @@ def _dispatch_tool(
         return {"results": results, "count": len(results)}
 
     elif name == "vault_read":
-        filepath = vault_path / args["path"]
+        try:
+            filepath = validate_vault_path(args["path"], vault_path)
+        except PathTraversalError as e:
+            return {"error": f"Path not allowed: {e.user_path}"}
         if not filepath.exists():
             return {"error": f"Note not found: {args['path']}"}
         content = filepath.read_text(encoding="utf-8")
         return {"path": args["path"], "content": content}
 
     elif name == "vault_write":
-        filepath = vault_path / args["path"]
+        try:
+            filepath = validate_vault_path(args["path"], vault_path)
+        except PathTraversalError as e:
+            return {"error": f"Path not allowed: {e.user_path}"}
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(args["content"], encoding="utf-8")
         # Re-index the note
@@ -254,7 +262,10 @@ def _dispatch_tool(
         return {"status": "ok", "path": args["path"]}
 
     elif name == "vault_list":
-        folder = vault_path / args.get("folder", "")
+        try:
+            folder = validate_vault_path(args.get("folder", ""), vault_path)
+        except PathTraversalError as e:
+            return {"error": f"Path not allowed: {e.user_path}"}
         if not folder.exists():
             return {"error": f"Folder not found: {args.get('folder', '')}"}
         notes = []
