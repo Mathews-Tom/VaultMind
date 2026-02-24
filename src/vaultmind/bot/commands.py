@@ -418,9 +418,7 @@ class CommandHandlers:
         # Build vault context (reuse ThinkingPartner's method)
         vault_context = ""
         if routing_cfg.vault_context_enabled:
-            vault_context = self.thinking._build_vault_context(
-                text, self.store, self.graph
-            )
+            vault_context = self.thinking._build_vault_context(text, self.store, self.graph)
 
         # Select model and system prompt
         model = routing_cfg.chat_model or self.settings.llm.fast_model
@@ -466,10 +464,7 @@ class CommandHandlers:
         # Knowledge graph
         try:
             gs = self.graph.stats
-            checks.append(
-                f"✅ **Knowledge Graph:** {gs['nodes']} nodes, "
-                f"{gs['edges']} edges"
-            )
+            checks.append(f"✅ **Knowledge Graph:** {gs['nodes']} nodes, {gs['edges']} edges")
         except Exception as e:
             checks.append(f"❌ **Knowledge Graph:** {e}")
 
@@ -518,28 +513,18 @@ class CommandHandlers:
             )
             return
 
-        await message.answer(
-            f"🔍 Searching notes from {start_date} to {end_date}..."
-        )
+        await message.answer(f"🔍 Searching notes from {start_date} to {end_date}...")
 
         # Scan vault for notes within the date range
         notes = self._find_notes_by_date(start_date, end_date)
 
         if not notes:
-            await message.answer(
-                f"No notes found between {start_date} and {end_date}."
-            )
+            await message.answer(f"No notes found between {start_date} and {end_date}.")
             return
 
-        lines = [
-            f"📅 **Notes from {start_date} to {end_date}** "
-            f"({len(notes)} found)\n"
-        ]
+        lines = [f"📅 **Notes from {start_date} to {end_date}** ({len(notes)} found)\n"]
         for i, (rel_path, title, created) in enumerate(notes[:20], 1):
-            lines.append(
-                f"**{i}.** {title}\n"
-                f"  `{rel_path}` — {created}"
-            )
+            lines.append(f"**{i}.** {title}\n  `{rel_path}` — {created}")
 
         if len(notes) > 20:
             lines.append(f"\n_...and {len(notes) - 20} more_")
@@ -547,9 +532,7 @@ class CommandHandlers:
         for chunk in self._split_message("\n".join(lines), max_len=4000):
             await message.answer(chunk, parse_mode="Markdown")
 
-    def _resolve_date_range(
-        self, query: str
-    ) -> tuple[str | None, str | None]:
+    def _resolve_date_range(self, query: str) -> tuple[str | None, str | None]:
         """Parse a date range from user input — tries formats then LLM."""
         today = datetime.now()
 
@@ -589,17 +572,11 @@ class CommandHandlers:
         # Fall back to LLM for complex expressions
         return self._llm_resolve_date(query, today)
 
-    def _llm_resolve_date(
-        self, query: str, today: datetime
-    ) -> tuple[str | None, str | None]:
+    def _llm_resolve_date(self, query: str, today: datetime) -> tuple[str | None, str | None]:
         """Use LLM to parse complex natural language date expressions."""
-        model = (
-            self.settings.routing.chat_model
-            or self.settings.llm.fast_model
-        )
+        model = self.settings.routing.chat_model or self.settings.llm.fast_model
         user_msg = (
-            f"Today is {today.strftime('%A, %Y-%m-%d')}. "
-            f"Parse this date expression: \"{query}\""
+            f'Today is {today.strftime("%A, %Y-%m-%d")}. Parse this date expression: "{query}"'
         )
         try:
             response = self.llm_client.complete(
@@ -614,9 +591,7 @@ class CommandHandlers:
             logger.warning("LLM date resolution failed: %s", e)
             return None, None
 
-    def _find_notes_by_date(
-        self, start: str, end: str
-    ) -> list[tuple[str, str, str]]:
+    def _find_notes_by_date(self, start: str, end: str) -> list[tuple[str, str, str]]:
         """Scan vault for notes created within a date range.
 
         Returns list of (relative_path, title, created_date) tuples.
@@ -625,21 +600,20 @@ class CommandHandlers:
 
         for md_file in self.vault_root.rglob("*.md"):
             rel = md_file.relative_to(self.vault_root)
-            if any(
-                part in self.settings.vault.excluded_folders
-                for part in rel.parts
-            ):
+            if any(part in self.settings.vault.excluded_folders for part in rel.parts):
                 continue
 
             try:
                 note = self.parser.parse_file(md_file)
                 created = note.created.strftime("%Y-%m-%d")
                 if start <= created <= end:
-                    results.append((
-                        str(rel),
-                        note.title,
-                        note.created.strftime("%Y-%m-%d %H:%M"),
-                    ))
+                    results.append(
+                        (
+                            str(rel),
+                            note.title,
+                            note.created.strftime("%Y-%m-%d %H:%M"),
+                        )
+                    )
             except Exception:
                 continue
 
@@ -694,23 +668,23 @@ class CommandHandlers:
 
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🗑 Confirm Delete",
-                    callback_data=f"delete_confirm:{rel_path}",
-                ),
-                InlineKeyboardButton(
-                    text="❌ Cancel",
-                    callback_data="delete_cancel",
-                ),
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🗑 Confirm Delete",
+                        callback_data=f"delete_confirm:{rel_path}",
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Cancel",
+                        callback_data="delete_cancel",
+                    ),
+                ]
             ]
-        ])
+        )
 
         await message.answer(
-            f"⚠️ **Delete note?**\n\n"
-            f"`{rel_path}`\n\n"
-            f"_{preview}_",
+            f"⚠️ **Delete note?**\n\n`{rel_path}`\n\n_{preview}_",
             parse_mode="Markdown",
             reply_markup=keyboard,
         )
@@ -725,7 +699,7 @@ class CommandHandlers:
             return
 
         if data.startswith("delete_confirm:"):
-            rel_path = data[len("delete_confirm:"):]
+            rel_path = data[len("delete_confirm:") :]
             filepath = self.vault_root / rel_path
 
             if not filepath.exists():
@@ -781,14 +755,8 @@ class CommandHandlers:
 
         await message.answer("✏️ Generating edit...")
 
-        model = (
-            self.settings.routing.chat_model
-            or self.settings.llm.fast_model
-        )
-        user_msg = (
-            f"**Note content:**\n```\n{original}\n```\n\n"
-            f"**Edit instruction:** {instruction}"
-        )
+        model = self.settings.routing.chat_model or self.settings.llm.fast_model
+        user_msg = f"**Note content:**\n```\n{original}\n```\n\n**Edit instruction:** {instruction}"
 
         try:
             response = self.llm_client.complete(
@@ -821,23 +789,23 @@ class CommandHandlers:
 
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Apply Edit",
-                    callback_data=f"edit_confirm:{user_id}",
-                ),
-                InlineKeyboardButton(
-                    text="❌ Discard",
-                    callback_data=f"edit_cancel:{user_id}",
-                ),
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Apply Edit",
+                        callback_data=f"edit_confirm:{user_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Discard",
+                        callback_data=f"edit_cancel:{user_id}",
+                    ),
+                ]
             ]
-        ])
+        )
 
         await message.answer(
-            f"✏️ **Proposed edit for** `{rel_path}`:\n\n"
-            f"```\n{preview}\n```\n\n"
-            "Apply this edit?",
+            f"✏️ **Proposed edit for** `{rel_path}`:\n\n```\n{preview}\n```\n\nApply this edit?",
             parse_mode="Markdown",
             reply_markup=keyboard,
         )

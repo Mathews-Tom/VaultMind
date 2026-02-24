@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path  # noqa: TC003 — Pydantic needs Path at runtime
 
 from pydantic import BaseModel, Field, computed_field
 

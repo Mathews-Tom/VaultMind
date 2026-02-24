@@ -5,12 +5,20 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
-from watchdog.events import FileCreatedEvent, FileDeletedEvent, FileModifiedEvent, FileSystemEventHandler
+from watchdog.events import (
+    FileCreatedEvent,
+    FileDeletedEvent,
+    FileModifiedEvent,
+    FileSystemEventHandler,
+)
 from watchdog.observers import Observer
 
-from vaultmind.config import VaultConfig
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from vaultmind.config import VaultConfig
 
 logger = logging.getLogger(__name__)
 
