@@ -17,7 +17,8 @@ connecting Claude and other agents directly to your notes.
 - **Mobile-first capture** — Telegram bot gives full PKM access from your phone
 - **Agent-native** — Claude Desktop/Code and other AI agents read/write your vault via MCP
 - **Multi-provider LLM** — Anthropic, OpenAI, Gemini, or Ollama for thinking + extraction
-- **Secure by default** — path traversal protection on all vault operations
+- **Secure by default** — path traversal protection, input sanitization, injection detection on all vault operations
+- **Smart caching** — SQLite-backed embedding cache eliminates redundant API calls during re-indexing
 - **Your data, your infra** — self-hosted, local-first, no cloud dependency
 
 ## Quick Start
@@ -100,6 +101,7 @@ Creates the `~/.vaultmind/` directory structure:
 │   └── _meta/
 └── data/
     ├── chromadb/
+    ├── embedding_cache.db
     ├── knowledge_graph.json
     └── sessions.db
 ```

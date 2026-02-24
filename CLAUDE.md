@@ -9,14 +9,19 @@ AI-powered personal knowledge management built on Obsidian. Turns an Obsidian va
 ```
 src/vaultmind/
 ├── vault/       # Markdown parser, models, file watcher, path security
-├── indexer/     # Embedding pipeline + ChromaDB vector store
+├── indexer/     # Embedding pipeline + ChromaDB vector store + embedding cache
 ├── graph/       # NetworkX knowledge graph + LLM entity extraction
 ├── bot/         # Telegram bot (aiogram 3.x) — commands, router, thinking partner
-│   ├── commands.py    # All command handler logic
-│   ├── router.py      # Heuristic message classifier (Intent enum)
+│   ├── commands.py      # Thin facade delegating to handlers/ package
+│   ├── handlers/        # Decomposed handler modules (capture, recall, think, etc.)
+│   │   ├── context.py   # HandlerContext dataclass shared by all handlers
+│   │   ├── utils.py     # Shared utilities (_is_authorized, _split_message, etc.)
+│   │   └── *.py         # Individual handler modules (capture, recall, think, graph, etc.)
+│   ├── router.py        # Heuristic message classifier (Intent enum)
+│   ├── sanitize.py      # Input sanitization (length limits, null bytes, injection detection)
 │   ├── session_store.py # SQLite-backed thinking session persistence
-│   ├── telegram.py    # aiogram Router, handler registration, callback queries
-│   └── thinking.py    # Multi-turn thinking partner (RAG + graph)
+│   ├── telegram.py      # aiogram Router, handler registration, callback queries
+│   └── thinking.py      # Multi-turn thinking partner (RAG + graph)
 ├── llm/         # Provider-agnostic LLM abstraction (Protocol-based)
 │   ├── client.py        # LLMClient Protocol, Message, LLMResponse, factory
 │   └── providers/       # Anthropic, OpenAI, Gemini, Ollama implementations
@@ -90,4 +95,7 @@ The `llm/` package uses a `Protocol`-based abstraction. Gemini and Ollama reuse 
 - Natural language date resolution: common keywords handled locally, complex expressions fall back to LLM
 - Path traversal protection via `vault/security.py` — all user-supplied paths validated before filesystem access
 - Thinking sessions persisted to SQLite (`~/.vaultmind/data/sessions.db`) with `(user_id, session_name)` composite key for future named sessions
+- Embedding cache (`indexer/embedding_cache.py`) — SQLite-backed, content-hash keyed with `(content_hash, provider, model)` composite key, eliminates redundant API calls during re-indexing
+- Bot handlers decomposed into `handlers/` package — `HandlerContext` dataclass shared state, `commands.py` is a thin facade preserving the public interface
+- Input sanitization (`bot/sanitize.py`) — null byte stripping, length limits per operation, log-only injection detection (never blocks)
 - posthog pinned to `<4` — chromadb uses the 3-arg `capture()` API removed in posthog 4.x+
