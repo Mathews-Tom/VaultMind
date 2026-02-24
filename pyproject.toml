@@ -52,9 +52,9 @@ all = ["vaultmind[mcp,whisper,dev]"]
 vaultmind = "vaultmind.cli:cli"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/vaultmind"
-Repository = "https://github.com/yourusername/vaultmind"
-Issues = "https://github.com/yourusername/vaultmind/issues"
+Homepage = "https://github.com/Mathews-Tom/vaultmind"
+Repository = "https://github.com/Mathews-Tom/vaultmind"
+Issues = "https://github.com/Mathews-Tom/vaultmind/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vaultmind"]
