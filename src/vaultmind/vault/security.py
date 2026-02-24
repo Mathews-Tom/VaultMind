@@ -14,9 +14,7 @@ class PathTraversalError(ValueError):
     def __init__(self, user_path: str, vault_root: Path) -> None:
         self.user_path = user_path
         self.vault_root = vault_root
-        super().__init__(
-            f"Path traversal blocked: '{user_path}' escapes vault root '{vault_root}'"
-        )
+        super().__init__(f"Path traversal blocked: '{user_path}' escapes vault root '{vault_root}'")
 
 
 def validate_vault_path(user_path: str, vault_root: Path) -> Path:
