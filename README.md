@@ -17,6 +17,7 @@ connecting Claude and other agents directly to your notes.
 - **Mobile-first capture** — Telegram bot gives full PKM access from your phone
 - **Agent-native** — Claude Desktop/Code and other AI agents read/write your vault via MCP
 - **Multi-provider LLM** — Anthropic, OpenAI, Gemini, or Ollama for thinking + extraction
+- **Secure by default** — path traversal protection on all vault operations
 - **Your data, your infra** — self-hosted, local-first, no cloud dependency
 
 ## Quick Start
@@ -99,7 +100,8 @@ Creates the `~/.vaultmind/` directory structure:
 │   └── _meta/
 └── data/
     ├── chromadb/
-    └── knowledge_graph.json
+    ├── knowledge_graph.json
+    └── sessions.db
 ```
 
 ### 5. Index your vault
@@ -172,7 +174,7 @@ Set `capture_all = true` in `[routing]` config to restore old behavior (all text
 | Command                      | Description                                     |
 | ---------------------------- | ----------------------------------------------- |
 | `/recall <query>`            | Semantic search over vault                      |
-| `/think <topic>`             | Start thinking partner session                  |
+| `/think <topic>`             | Start thinking partner session (persists across restarts) |
 | `/think explore: <topic>`    | Divergent ideation mode                         |
 | `/think critique: <topic>`   | Stress-test an idea                             |
 | `/think synthesize: <topic>` | Connect dots across domains                     |
@@ -230,7 +232,7 @@ Notes use YAML frontmatter:
 
 ```yaml
 ---
-type: project # fleeting | literature | permanent | daily | project | person | concept
+type: project # fleeting | literature | permanent | daily | project | area | person | concept
 tags: [python, ai]
 created: 2026-01-15
 entities: [CAIRN, MCP]

@@ -8,12 +8,13 @@ AI-powered personal knowledge management built on Obsidian. Turns an Obsidian va
 
 ```
 src/vaultmind/
-├── vault/       # Markdown parser, models, file watcher
+├── vault/       # Markdown parser, models, file watcher, path security
 ├── indexer/     # Embedding pipeline + ChromaDB vector store
 ├── graph/       # NetworkX knowledge graph + LLM entity extraction
 ├── bot/         # Telegram bot (aiogram 3.x) — commands, router, thinking partner
 │   ├── commands.py    # All command handler logic
 │   ├── router.py      # Heuristic message classifier (Intent enum)
+│   ├── session_store.py # SQLite-backed thinking session persistence
 │   ├── telegram.py    # aiogram Router, handler registration, callback queries
 │   └── thinking.py    # Multi-turn thinking partner (RAG + graph)
 ├── llm/         # Provider-agnostic LLM abstraction (Protocol-based)
@@ -87,4 +88,6 @@ The `llm/` package uses a `Protocol`-based abstraction. Gemini and Ollama reuse 
 - Smart message routing: heuristic-first classification in `bot/router.py` (zero LLM cost for greetings/capture), LLM only for questions/conversational
 - Delete/edit commands use aiogram inline keyboards for confirmation flow (callback queries)
 - Natural language date resolution: common keywords handled locally, complex expressions fall back to LLM
+- Path traversal protection via `vault/security.py` — all user-supplied paths validated before filesystem access
+- Thinking sessions persisted to SQLite (`~/.vaultmind/data/sessions.db`) with `(user_id, session_name)` composite key for future named sessions
 - posthog pinned to `<4` — chromadb uses the 3-arg `capture()` API removed in posthog 4.x+
