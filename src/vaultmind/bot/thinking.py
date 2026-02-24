@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from vaultmind.llm.client import LLMError, Message
 
 if TYPE_CHECKING:
+    from vaultmind.bot.session_store import SessionStore
     from vaultmind.config import LLMConfig, TelegramConfig
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
@@ -57,11 +58,13 @@ class ThinkingPartner:
         llm_config: LLMConfig,
         telegram_config: TelegramConfig,
         llm_client: LLMClient,
+        session_store: SessionStore | None = None,
     ) -> None:
         self.llm_config = llm_config
         self.session_ttl = telegram_config.thinking_session_ttl
         self._client = llm_client
-        # In-memory session store: user_id -> session
+        self._store = session_store
+        # In-memory hot cache over SQLite
         self._sessions: dict[int, _ThinkingSession] = {}
 
     async def think(
@@ -102,6 +105,9 @@ class ThinkingPartner:
 
             # Update session history
             session.add_turn(topic, reply)
+
+            if self._store is not None:
+                self._store.save(user_id, session.history)
 
             return reply
 
@@ -188,24 +194,57 @@ class ThinkingPartner:
 
     def _get_session(self, user_id: int) -> _ThinkingSession:
         """Get or create a thinking session for a user."""
-        # Clean expired sessions
         now = time.time()
+
+        # Clean expired sessions from cache
         expired = [
             uid for uid, s in self._sessions.items() if now - s.last_active > self.session_ttl
         ]
         for uid in expired:
             del self._sessions[uid]
 
-        if user_id not in self._sessions:
-            self._sessions[user_id] = _ThinkingSession()
+        # Clean expired sessions from SQLite
+        if self._store is not None:
+            self._store.cleanup_expired(self.session_ttl)
 
-        session = self._sessions[user_id]
-        session.last_active = now
+        # Check in-memory cache
+        if user_id in self._sessions:
+            session = self._sessions[user_id]
+            session.last_active = now
+            return session
+
+        # Check SQLite
+        if self._store is not None:
+            history = self._store.load(user_id)
+            if history is not None:
+                session = _ThinkingSession()
+                session.history = history
+                session.last_active = now
+                self._sessions[user_id] = session
+                return session
+
+        # Create new session
+        session = _ThinkingSession()
+        self._sessions[user_id] = session
         return session
 
     def clear_session(self, user_id: int) -> None:
         """Clear a user's thinking session."""
         self._sessions.pop(user_id, None)
+        if self._store is not None:
+            self._store.delete(user_id)
+
+    def has_active_session(self, user_id: int) -> bool:
+        """Check if a user has an active (non-expired) thinking session."""
+        now = time.time()
+        if user_id in self._sessions:
+            session = self._sessions[user_id]
+            if now - session.last_active <= self.session_ttl:
+                return True
+            del self._sessions[user_id]
+        if self._store is not None:
+            return self._store.has_session(user_id)
+        return False
 
 
 class _ThinkingSession:

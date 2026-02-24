@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from vaultmind.bot.router import Intent, MessageRouter
 from vaultmind.llm.client import LLMError
 from vaultmind.llm.client import Message as LLMMessage
+from vaultmind.vault.security import PathTraversalError, validate_vault_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -385,7 +386,7 @@ class CommandHandlers:
 
         # Sticky thinking sessions — continue if active
         user_id = message.from_user.id if message.from_user else 0
-        if user_id in self.thinking._sessions:
+        if self.thinking.has_active_session(user_id):
             await self.handle_think(message, text)
             return
 
@@ -700,7 +701,14 @@ class CommandHandlers:
 
         if data.startswith("delete_confirm:"):
             rel_path = data[len("delete_confirm:") :]
-            filepath = self.vault_root / rel_path
+            try:
+                filepath = validate_vault_path(rel_path, self.vault_root)
+            except PathTraversalError:
+                await callback.message.edit_text(  # type: ignore[union-attr]
+                    "Path not allowed.",
+                )
+                await callback.answer()
+                return
 
             if not filepath.exists():
                 await callback.message.edit_text(  # type: ignore[union-attr]
@@ -833,7 +841,15 @@ class CommandHandlers:
                 await callback.answer()
                 return
 
-            filepath = self.vault_root / pending["path"]
+            try:
+                filepath = validate_vault_path(pending["path"], self.vault_root)
+            except PathTraversalError:
+                await callback.message.edit_text(  # type: ignore[union-attr]
+                    "Path not allowed.",
+                )
+                await callback.answer()
+                return
+
             if not filepath.exists():
                 await callback.message.edit_text(  # type: ignore[union-attr]
                     f"Note no longer exists: `{pending['path']}`",
@@ -871,13 +887,13 @@ class CommandHandlers:
         4. Semantic search (first result)
         """
         # Exact path
-        candidate = self.vault_root / query
+        candidate = validate_vault_path(query, self.vault_root)
         if candidate.is_file():
             return candidate
 
         # With .md
         if not query.endswith(".md"):
-            candidate = self.vault_root / (query + ".md")
+            candidate = validate_vault_path(query + ".md", self.vault_root)
             if candidate.is_file():
                 return candidate
 
@@ -894,7 +910,7 @@ class CommandHandlers:
         if results:
             note_path: str = results[0]["metadata"].get("note_path", "")
             if note_path:
-                candidate = self.vault_root / note_path
+                candidate = validate_vault_path(note_path, self.vault_root)
                 if candidate.is_file():
                     return candidate
 

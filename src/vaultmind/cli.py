@@ -182,11 +182,16 @@ def bot(ctx: click.Context) -> None:
     store = VaultStore(settings.chroma, embedder)
     graph = KnowledgeGraph(settings.graph)
 
+    from vaultmind.bot.session_store import SessionStore
+    from vaultmind.config import VAULTMIND_HOME
+
     llm_client = _create_llm_client(settings)
+    session_store = SessionStore(VAULTMIND_HOME / "data" / "sessions.db")
     thinking = ThinkingPartner(
         settings.llm,
         settings.telegram,
         llm_client,
+        session_store=session_store,
     )
 
     handlers = CommandHandlers(
