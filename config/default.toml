@@ -1,0 +1,59 @@
+# VaultMind Configuration
+#
+# This file holds ALL non-secret settings.
+# Secrets (API keys, bot token) go in .env — see .env.example.
+
+[vault]
+path = "~/.vaultmind/vault"
+inbox_folder = "00-inbox"
+daily_folder = "01-daily"
+templates_folder = "06-templates"
+meta_folder = "_meta"
+sync_interval_seconds = 300
+excluded_folders = [".obsidian", ".git", ".trash"]
+
+[embedding]
+provider = "openai"           # "openai" or "voyage"
+model = "text-embedding-3-small"
+dimensions = 1536
+batch_size = 64
+
+[chroma]
+persist_dir = "~/.vaultmind/data/chromadb"
+collection_name = "vault_chunks"
+distance_fn = "cosine"
+
+[graph]
+persist_path = "~/.vaultmind/data/knowledge_graph.json"
+extraction_model = ""         # Empty = use llm.thinking_model
+min_confidence = 0.7
+enrichment_schedule = "0 3 * * *"
+
+[llm]
+provider = "openai"        # "anthropic", "openai", "gemini", "ollama"
+thinking_model = "gpt-5.2"
+fast_model = "gpt-4.1"
+max_context_notes = 8
+max_tokens = 4096
+ollama_base_url = "http://localhost:11434"
+
+# Provider-specific model examples:
+#   anthropic:  claude-sonnet-4-20250514, claude-opus-4-20250514
+#   openai:     gpt-4.1, gpt-4.1-mini
+#   gemini:     gemini-2.5-flash, gemini-2.5-pro
+#   ollama:     llama3.3, qwen3, deepseek-r1
+
+[telegram]
+thinking_session_ttl = 3600
+
+[routing]
+chat_model = ""                   # Empty = use llm.fast_model
+chat_max_tokens = 1024
+vault_context_enabled = true
+max_context_chunks = 4
+capture_all = false               # true = old behavior (all text → capture)
+
+[mcp]
+enabled = false
+host = "127.0.0.1"
+port = 8765

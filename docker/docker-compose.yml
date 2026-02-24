@@ -1,0 +1,59 @@
+services:
+  vaultmind-bot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: vaultmind-bot
+    command: ["bot"]
+    volumes:
+      - ../vault:/app/vault                # Mount your Obsidian vault
+      - vaultmind-data:/app/data           # Persistent ChromaDB + graph data
+      - ../config:/app/config:ro           # Configuration
+    environment:
+      - VAULTMIND_VAULT__PATH=/app/vault
+      - VAULTMIND_CHROMA__PERSIST_DIR=/app/data/chromadb
+      - VAULTMIND_GRAPH__PERSIST_PATH=/app/data/knowledge_graph.json
+      - VAULTMIND_ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - VAULTMIND_OPENAI_API_KEY=${OPENAI_API_KEY}
+      - VAULTMIND_TELEGRAM__BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+    restart: unless-stopped
+
+  # Optional: standalone indexer that watches for vault changes
+  vaultmind-indexer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: vaultmind-indexer
+    command: ["index"]
+    volumes:
+      - ../vault:/app/vault
+      - vaultmind-data:/app/data
+      - ../config:/app/config:ro
+    environment:
+      - VAULTMIND_VAULT__PATH=/app/vault
+      - VAULTMIND_CHROMA__PERSIST_DIR=/app/data/chromadb
+      - VAULTMIND_OPENAI_API_KEY=${OPENAI_API_KEY}
+    profiles: ["indexer"]
+
+  # Optional: MCP server for agent integration
+  vaultmind-mcp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: vaultmind-mcp
+    command: ["mcp-serve"]
+    volumes:
+      - ../vault:/app/vault
+      - vaultmind-data:/app/data
+      - ../config:/app/config:ro
+    environment:
+      - VAULTMIND_VAULT__PATH=/app/vault
+      - VAULTMIND_CHROMA__PERSIST_DIR=/app/data/chromadb
+      - VAULTMIND_GRAPH__PERSIST_PATH=/app/data/knowledge_graph.json
+      - VAULTMIND_OPENAI_API_KEY=${OPENAI_API_KEY}
+    ports:
+      - "8765:8765"
+    profiles: ["mcp"]
+
+volumes:
+  vaultmind-data:

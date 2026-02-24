@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vaultmind"
+version = "0.1.0"
+description = "AI-powered personal knowledge management system built on Obsidian"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+authors = [{ name = "Tom" }]
+keywords = ["pkm", "obsidian", "knowledge-graph", "rag", "telegram", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "aiogram>=3.10,<4",
+    "anthropic>=0.40,<1",
+    "chromadb>=0.5,<1",
+    "posthog>=2.4,<4",
+    "click>=8.1,<9",
+    "networkx>=3.2,<4",
+    "openai>=1.50,<2",
+    "pydantic>=2.5,<3",
+    "pydantic-settings>=2.1,<3",
+    "python-frontmatter>=1.1,<2",
+    "rich>=13.7,<14",
+    "watchdog>=4.0,<5",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0,<2"]
+whisper = ["openai-whisper>=20231117"]
+dev = [
+    "pytest>=8.0,<9",
+    "pytest-asyncio>=0.23,<1",
+    "pytest-cov>=5.0,<6",
+    "ruff>=0.5,<1",
+    "mypy>=1.10,<2",
+    "pre-commit>=3.7,<4",
+]
+all = ["vaultmind[mcp,whisper,dev]"]
+
+[project.scripts]
+vaultmind = "vaultmind.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/vaultmind"
+Repository = "https://github.com/yourusername/vaultmind"
+Issues = "https://github.com/yourusername/vaultmind/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vaultmind"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
