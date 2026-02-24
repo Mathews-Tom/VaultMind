@@ -16,12 +16,16 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 from rich.console import Console
 from rich.logging import RichHandler
 
 from vaultmind import __version__
+
+if TYPE_CHECKING:
+    from vaultmind.llm.client import LLMClient
 
 console = Console()
 
@@ -50,7 +54,7 @@ def _require_llm_key(settings: object) -> None:
         sys.exit(1)
 
 
-def _create_llm_client(settings: object) -> object:
+def _create_llm_client(settings: object) -> LLMClient:
     """Create an LLM client from settings."""
     from vaultmind.config import Settings
     from vaultmind.llm import create_llm_client

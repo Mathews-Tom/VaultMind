@@ -5,12 +5,20 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
-from watchdog.events import FileCreatedEvent, FileDeletedEvent, FileModifiedEvent, FileSystemEventHandler
+from watchdog.events import (
+    FileCreatedEvent,
+    FileDeletedEvent,
+    FileModifiedEvent,
+    FileSystemEventHandler,
+)
 from watchdog.observers import Observer
 
-from vaultmind.config import VaultConfig
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from vaultmind.config import VaultConfig
 
 logger = logging.getLogger(__name__)
 
@@ -75,20 +83,22 @@ class VaultWatcher:
             excluded_folders=config.excluded_folders,
             on_change=on_change,
         )
-        self._observer: Observer | None = None
+        self._observer: Observer | None = None  # type: ignore[valid-type]
 
     def start(self) -> None:
         """Start watching the vault directory (non-blocking)."""
         self._observer = Observer()
-        self._observer.schedule(self.handler, str(self.config.path), recursive=True)
-        self._observer.start()
+        self._observer.schedule(  # type: ignore[no-untyped-call]
+            self.handler, str(self.config.path), recursive=True
+        )
+        self._observer.start()  # type: ignore[no-untyped-call]
         logger.info("Watching vault at %s", self.config.path)
 
     def stop(self) -> None:
         """Stop the watcher."""
         if self._observer:
-            self._observer.stop()
-            self._observer.join()
+            self._observer.stop()  # type: ignore[attr-defined]
+            self._observer.join()  # type: ignore[attr-defined]
             logger.info("Vault watcher stopped")
 
     async def run_async(self) -> None:

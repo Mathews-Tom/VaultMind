@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path  # noqa: TC003 — Pydantic needs Path at runtime
+from typing import Any
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -37,7 +38,7 @@ class Note(BaseModel):
     source: str = "manual"
     created: datetime = Field(default_factory=datetime.now)
     modified: datetime = Field(default_factory=datetime.now)
-    frontmatter: dict = Field(default_factory=dict)
+    frontmatter: dict[str, Any] = Field(default_factory=dict)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -87,7 +88,7 @@ class NoteChunk(BaseModel):
         """Unique identifier for this chunk."""
         return f"{self.note_path}::{self.chunk_idx}"
 
-    def to_chroma_metadata(self) -> dict:
+    def to_chroma_metadata(self) -> dict[str, str | int]:
         """Convert to ChromaDB-compatible metadata dict."""
         return {
             "note_path": self.note_path,

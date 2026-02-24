@@ -5,12 +5,16 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
-from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import frontmatter
 
-from vaultmind.config import VaultConfig
 from vaultmind.vault.models import Note, NoteChunk, NoteType
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from vaultmind.config import VaultConfig
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +131,9 @@ class VaultParser:
                                 note_title=note.title,
                                 chunk_idx=len(chunks),
                                 heading=heading,
-                                content=f"{heading}\n\n{current_chunk}" if heading else current_chunk,
+                                content=(
+                                    f"{heading}\n\n{current_chunk}" if heading else current_chunk
+                                ),
                                 note_type=note.note_type,
                                 tags=note.tags,
                                 entities=note.entities,
@@ -181,7 +187,7 @@ class VaultParser:
 
         return sections
 
-    def _infer_type(self, meta: dict, rel_path: Path) -> NoteType:
+    def _infer_type(self, meta: dict[str, Any], rel_path: Path) -> NoteType:
         """Infer note type from frontmatter or folder structure."""
         if "type" in meta:
             try:

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VaultMind Icon</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #1a1a1a;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+  }
+
+  .canvas {
+    width: 512px;
+    height: 512px;
+    background: #0c0a1a;
+    position: relative;
+    overflow: hidden;
+  }
+</style>
+</head>
+<body>
+
+<div class="canvas">
+  <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" width="512" height="512">
+    <defs>
+      <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#0c0a1a"/>
+        <stop offset="50%" stop-color="#13102a"/>
+        <stop offset="100%" stop-color="#0e0c20"/>
+      </linearGradient>
+      <linearGradient id="brainLeft" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#a78bfa"/>
+        <stop offset="100%" stop-color="#7c3aed"/>
+      </linearGradient>
+      <linearGradient id="brainRight" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#60a5fa"/>
+        <stop offset="100%" stop-color="#3b82f6"/>
+      </linearGradient>
+      <linearGradient id="lockGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#d4a03c"/>
+        <stop offset="100%" stop-color="#c49232"/>
+      </linearGradient>
+      <linearGradient id="shackleGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#d4a03c" stop-opacity="0.9"/>
+        <stop offset="100%" stop-color="#b8860b" stop-opacity="0.7"/>
+      </linearGradient>
+      <filter id="glow">
+        <feGaussianBlur stdDeviation="6" result="blur"/>
+        <feMerge>
+          <feMergeNode in="blur"/>
+          <feMergeNode in="SourceGraphic"/>
+        </feMerge>
+      </filter>
+      <filter id="nodeGlow">
+        <feGaussianBlur stdDeviation="3" result="blur"/>
+        <feMerge>
+          <feMergeNode in="blur"/>
+          <feMergeNode in="SourceGraphic"/>
+        </feMerge>
+      </filter>
+
+      <!-- Subtle grid pattern -->
+      <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+        <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#a78bfa" stroke-width="0.3" opacity="0.15"/>
+      </pattern>
+    </defs>
+
+    <!-- Background -->
+    <rect width="512" height="512" fill="url(#bgGrad)"/>
+    <rect width="512" height="512" fill="url(#grid)"/>
+
+    <!-- Subtle radial glow behind brain -->
+    <circle cx="256" cy="232" r="200" fill="none" stroke="#6366f1" stroke-width="0.5" opacity="0.08"/>
+    <circle cx="256" cy="232" r="160" fill="none" stroke="#6366f1" stroke-width="0.5" opacity="0.06"/>
+    <radialGradient id="centerGlow">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.12"/>
+      <stop offset="60%" stop-color="#6366f1" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="transparent" stop-opacity="0"/>
+    </radialGradient>
+    <circle cx="256" cy="232" r="180" fill="url(#centerGlow)"/>
+
+    <!-- Network connection lines from brain to outer nodes -->
+    <g stroke="#60a5fa" stroke-width="1" opacity="0.18">
+      <line x1="200" y1="165" x2="100" y2="100"/>
+      <line x1="312" y1="165" x2="412" y2="100"/>
+      <line x1="175" y1="230" x2="75" y2="260"/>
+      <line x1="337" y1="230" x2="437" y2="260"/>
+      <line x1="200" y1="310" x2="110" y2="390"/>
+      <line x1="312" y1="310" x2="402" y2="390"/>
+      <line x1="100" y1="100" x2="60" y2="60"/>
+      <line x1="412" y1="100" x2="452" y2="60"/>
+      <line x1="75" y1="260" x2="45" y2="310"/>
+      <line x1="437" y1="260" x2="467" y2="310"/>
+    </g>
+
+    <!-- Outer network nodes -->
+    <g filter="url(#nodeGlow)">
+      <circle cx="100" cy="100" r="5" fill="#a78bfa" opacity="0.5"/>
+      <circle cx="412" cy="100" r="5" fill="#60a5fa" opacity="0.5"/>
+      <circle cx="75" cy="260" r="4" fill="#a78bfa" opacity="0.4"/>
+      <circle cx="437" cy="260" r="4" fill="#60a5fa" opacity="0.4"/>
+      <circle cx="110" cy="390" r="4" fill="#a78bfa" opacity="0.4"/>
+      <circle cx="402" cy="390" r="4" fill="#60a5fa" opacity="0.4"/>
+      <circle cx="60" cy="60" r="3" fill="#7c3aed" opacity="0.3"/>
+      <circle cx="452" cy="60" r="3" fill="#3b82f6" opacity="0.3"/>
+      <circle cx="45" cy="310" r="3" fill="#7c3aed" opacity="0.3"/>
+      <circle cx="467" cy="310" r="3" fill="#3b82f6" opacity="0.3"/>
+    </g>
+
+    <!-- Brain — centered at (256, 232) -->
+    <g transform="translate(256,232)" filter="url(#glow)">
+      <!-- Left hemisphere outline -->
+      <path d="
+        M -8,-105
+        C -42,-103 -72,-88 -90,-62
+        C -108,-36 -112,-6 -108,20
+        C -112,24 -120,28 -124,42
+        C -128,56 -122,70 -108,76
+        C -108,86 -102,100 -86,105
+        C -70,110 -44,109 -26,103
+        C -18,100 -11,94 -8,87
+      " fill="none" stroke="url(#brainLeft)" stroke-width="3.5" stroke-linecap="round"/>
+
+      <!-- Right hemisphere outline -->
+      <path d="
+        M 8,-105
+        C 42,-103 72,-88 90,-62
+        C 108,-36 112,-6 108,20
+        C 112,24 120,28 124,42
+        C 128,56 122,70 108,76
+        C 108,86 102,100 86,105
+        C 70,110 44,109 26,103
+        C 18,100 11,94 8,87
+      " fill="none" stroke="url(#brainRight)" stroke-width="3.5" stroke-linecap="round"/>
+
+      <!-- Brain folds — left -->
+      <path d="M -18,-85 C -50,-72 -78,-48 -82,-18" fill="none" stroke="#a78bfa" stroke-width="2" opacity="0.45" stroke-linecap="round"/>
+      <path d="M -22,-55 C -55,-42 -85,-15 -90,12" fill="none" stroke="#a78bfa" stroke-width="2" opacity="0.35" stroke-linecap="round"/>
+      <path d="M -24,-25 C -58,-10 -95,15 -98,42" fill="none" stroke="#a78bfa" stroke-width="1.5" opacity="0.28" stroke-linecap="round"/>
+      <path d="M -20,15 C -58,28 -85,52 -85,72" fill="none" stroke="#a78bfa" stroke-width="1.5" opacity="0.22" stroke-linecap="round"/>
+
+      <!-- Brain folds — right -->
+      <path d="M 18,-85 C 50,-72 78,-48 82,-18" fill="none" stroke="#60a5fa" stroke-width="2" opacity="0.45" stroke-linecap="round"/>
+      <path d="M 22,-55 C 55,-42 85,-15 90,12" fill="none" stroke="#60a5fa" stroke-width="2" opacity="0.35" stroke-linecap="round"/>
+      <path d="M 24,-25 C 58,-10 95,15 98,42" fill="none" stroke="#60a5fa" stroke-width="1.5" opacity="0.28" stroke-linecap="round"/>
+      <path d="M 20,15 C 58,28 85,52 85,72" fill="none" stroke="#60a5fa" stroke-width="1.5" opacity="0.22" stroke-linecap="round"/>
+
+      <!-- Central division -->
+      <line x1="0" y1="-100" x2="0" y2="90" stroke="#7c3aed" stroke-width="1.5" opacity="0.3"/>
+
+      <!-- Corpus callosum -->
+      <path d="M -35,-68 C -8,-64 8,-64 35,-68" fill="none" stroke="#7c3aed" stroke-width="1" opacity="0.25"/>
+      <path d="M -42,-32 C -8,-28 8,-28 42,-32" fill="none" stroke="#7c3aed" stroke-width="1" opacity="0.25"/>
+      <path d="M -46,2 C -8,6 8,6 46,2" fill="none" stroke="#7c3aed" stroke-width="1" opacity="0.25"/>
+      <path d="M -38,40 C -8,44 8,44 38,40" fill="none" stroke="#7c3aed" stroke-width="1" opacity="0.25"/>
+
+      <!-- Inner brain nodes -->
+      <circle cx="-50" cy="-50" r="4" fill="#a78bfa" opacity="0.65"/>
+      <circle cx="50" cy="-50" r="4" fill="#60a5fa" opacity="0.65"/>
+      <circle cx="-58" cy="18" r="3.5" fill="#a78bfa" opacity="0.5"/>
+      <circle cx="58" cy="18" r="3.5" fill="#60a5fa" opacity="0.5"/>
+      <circle cx="-42" cy="68" r="3" fill="#a78bfa" opacity="0.4"/>
+      <circle cx="42" cy="68" r="3" fill="#60a5fa" opacity="0.4"/>
+    </g>
+
+    <!-- Vault lock — centered in brain -->
+    <g transform="translate(256,232)">
+      <!-- Lock shackle (arc) -->
+      <path d="M -14,-18 C -14,-36 -10,-48 0,-48 C 10,-48 14,-36 14,-18"
+        fill="none" stroke="url(#shackleGrad)" stroke-width="3.5" stroke-linecap="round"/>
+
+      <!-- Lock body -->
+      <rect x="-18" y="-18" width="36" height="30" rx="4" ry="4"
+        fill="url(#lockGrad)" opacity="0.85"/>
+
+      <!-- Keyhole -->
+      <circle cx="0" cy="-8" r="5" fill="#0c0a1a" opacity="0.9"/>
+      <rect x="-2.5" y="-6" width="5" height="12" rx="1" fill="#0c0a1a" opacity="0.9"/>
+    </g>
+
+    <!-- "VM" text below -->
+    <text x="256" y="430" text-anchor="middle"
+      font-family="'Georgia', 'Times New Roman', serif"
+      font-size="48" font-weight="700" letter-spacing="6">
+      <tspan fill="#a78bfa">V</tspan><tspan fill="#60a5fa">M</tspan>
+    </text>
+
+    <!-- Bottom accent line -->
+    <rect x="0" y="509" width="512" height="3">
+      <animate attributeName="fill" values="#d4a03c;#a78bfa;#3b82f6;#d4a03c" dur="0s" fill="freeze"/>
+    </rect>
+    <linearGradient id="bottomBar" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#d4a03c"/>
+      <stop offset="40%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <rect x="0" y="509" width="512" height="3" fill="url(#bottomBar)"/>
+  </svg>
+</div>
+
+</body>
+</html>
