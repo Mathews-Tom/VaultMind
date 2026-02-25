@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from aiogram.types import CallbackQuery, Message
 
     from vaultmind.bot.thinking import ThinkingPartner
+    from vaultmind.bot.transcribe import Transcriber
     from vaultmind.config import Settings
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.duplicate_detector import DuplicateDetector
@@ -58,6 +59,7 @@ class CommandHandlers:
         llm_client: LLMClient,
         duplicate_detector: DuplicateDetector | None = None,
         note_suggester: NoteSuggester | None = None,
+        transcriber: Transcriber | None = None,
     ) -> None:
         self._ctx = HandlerContext(
             settings=settings,
@@ -67,6 +69,7 @@ class CommandHandlers:
             thinking=thinking,
             llm_client=llm_client,
             vault_root=settings.vault.path,
+            transcriber=transcriber,
         )
         self._duplicate_detector = duplicate_detector
         self._note_suggester = note_suggester
@@ -179,7 +182,7 @@ class CommandHandlers:
         await handle_edit_callback(self._ctx, callback, self._pending_edits)
 
     async def handle_voice(self, message: Message) -> None:
-        await handle_voice(self._ctx, message)
+        await handle_voice(self._ctx, message, transcriber=self._ctx.transcriber)
 
     async def handle_duplicates(self, message: Message, query: str) -> None:
         if self._duplicate_detector is None:
