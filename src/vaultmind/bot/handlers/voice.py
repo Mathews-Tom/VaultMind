@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -50,9 +51,10 @@ async def handle_voice(
             await message.answer("Failed to retrieve voice file.")
             return
 
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-            await bot.download_file(file.file_path, destination=tmp)
+        fd, tmp_name = tempfile.mkstemp(suffix=".ogg")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        await bot.download_file(file.file_path, destination=str(tmp_path))
     except Exception:
         logger.exception("Failed to download voice file")
         await message.answer("Failed to download voice file.")

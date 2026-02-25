@@ -41,17 +41,19 @@ class Transcriber:
         """
         try:
             with open(audio_path, "rb") as f:
-                kwargs: dict[str, str] = {}
                 if self._config.language:
-                    kwargs["language"] = self._config.language
+                    response = self._client.audio.transcriptions.create(
+                        model=self._config.whisper_model,
+                        file=f,
+                        language=self._config.language,
+                    )
+                else:
+                    response = self._client.audio.transcriptions.create(
+                        model=self._config.whisper_model,
+                        file=f,
+                    )
 
-                response = self._client.audio.transcriptions.create(
-                    model=self._config.whisper_model,
-                    file=f,
-                    **kwargs,  # type: ignore[arg-type]
-                )
-
-            text = response.text.strip()
+            text: str = response.text.strip()
             logger.info("Transcribed %s: %d chars", audio_path.name, len(text))
             return text
 
