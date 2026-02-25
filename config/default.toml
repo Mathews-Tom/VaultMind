@@ -70,6 +70,23 @@ min_content_length = 100
 entity_weight = 0.1                  # boost per shared graph entity
 graph_weight = 0.05                  # boost from graph path proximity
 
+[search]
+page_size = 5
+max_results = 25
+session_ttl = 300                        # seconds before paginated session expires
+
+[digest]
+enabled = true
+period_days = 7
+schedule_hour = 8
+timezone = "UTC"
+save_to_vault = true
+send_telegram = true
+max_trending = 10
+max_suggestions = 5
+connection_threshold_low = 0.70
+connection_threshold_high = 0.85
+
 [mcp]
 enabled = false
 host = "127.0.0.1"

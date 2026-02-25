@@ -137,6 +137,29 @@ class NoteSuggestionsConfig(BaseSettings):
     graph_weight: float = 0.05
 
 
+class SearchConfig(BaseSettings):
+    """Paginated search configuration for the Telegram bot."""
+
+    page_size: int = 5
+    max_results: int = 25
+    session_ttl: int = 300
+
+
+class DigestConfig(BaseSettings):
+    """Smart Daily Digest configuration."""
+
+    enabled: bool = True
+    period_days: int = 7
+    schedule_hour: int = 8
+    timezone: str = "UTC"
+    save_to_vault: bool = True
+    send_telegram: bool = True
+    max_trending: int = 10
+    max_suggestions: int = 5
+    connection_threshold_low: float = 0.70
+    connection_threshold_high: float = 0.85
+
+
 class MCPConfig(BaseSettings):
     """MCP server configuration."""
 
@@ -166,6 +189,8 @@ class Settings(BaseSettings):
     watch: WatchConfig = Field(default_factory=WatchConfig)
     duplicate_detection: DuplicateDetectionConfig = Field(default_factory=DuplicateDetectionConfig)
     note_suggestions: NoteSuggestionsConfig = Field(default_factory=NoteSuggestionsConfig)
+    search: SearchConfig = Field(default_factory=SearchConfig)
+    digest: DigestConfig = Field(default_factory=DigestConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     # API keys — always from env vars
