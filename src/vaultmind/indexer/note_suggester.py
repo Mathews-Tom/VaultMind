@@ -125,9 +125,7 @@ class NoteSuggester:
 
             # Signal 2: shared entities
             hit_entities_raw = meta.get("entities", "")
-            hit_entities = (
-                set(hit_entities_raw.split(",")) if hit_entities_raw else set()
-            )
+            hit_entities = set(hit_entities_raw.split(",")) if hit_entities_raw else set()
             shared = note_entities & hit_entities
             shared_count = len(shared)
 

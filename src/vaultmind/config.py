@@ -164,12 +164,8 @@ class Settings(BaseSettings):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     watch: WatchConfig = Field(default_factory=WatchConfig)
-    duplicate_detection: DuplicateDetectionConfig = Field(
-        default_factory=DuplicateDetectionConfig
-    )
-    note_suggestions: NoteSuggestionsConfig = Field(
-        default_factory=NoteSuggestionsConfig
-    )
+    duplicate_detection: DuplicateDetectionConfig = Field(default_factory=DuplicateDetectionConfig)
+    note_suggestions: NoteSuggestionsConfig = Field(default_factory=NoteSuggestionsConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     # API keys — always from env vars

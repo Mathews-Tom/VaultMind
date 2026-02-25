@@ -113,17 +113,17 @@ class IncrementalWatchHandler:
         debounce_s = self._config.debounce_ms / 1000.0
 
         if event_type == "deleted":
-            handle = loop.call_later(
-                debounce_s,
-                lambda p=path: loop.create_task(self._process_delete(p)),
-            )
+
+            def _delete_cb(p: Path = path) -> None:
+                loop.create_task(self._process_delete(p))
+
+            handle = loop.call_later(debounce_s, _delete_cb)
         else:
-            handle = loop.call_later(
-                debounce_s,
-                lambda p=path, et=event_type: loop.create_task(
-                    self._process_change(p, et)
-                ),
-            )
+
+            def _change_cb(p: Path = path, et: str = event_type) -> None:
+                loop.create_task(self._process_change(p, et))
+
+            handle = loop.call_later(debounce_s, _change_cb)
 
         self._pending[path] = handle
 
@@ -210,9 +210,7 @@ class IncrementalWatchHandler:
 
         # Publish typed event
         event_cls = NoteCreatedEvent if event_type == "created" else NoteModifiedEvent
-        await self._event_bus.publish(
-            event_cls(path=path, note=note, chunks_indexed=chunks)
-        )
+        await self._event_bus.publish(event_cls(path=path, note=note, chunks_indexed=chunks))
 
         # Queue graph re-extraction (batched)
         if self._config.reextract_graph and self._extractor and self._graph:

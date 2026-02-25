@@ -31,9 +31,7 @@ async def handle_suggestions(
     if not _is_authorized(ctx, message):
         return
 
-    san = sanitize_text(
-        query, max_length=MAX_QUERY_LENGTH, operation="suggestions"
-    )
+    san = sanitize_text(query, max_length=MAX_QUERY_LENGTH, operation="suggestions")
     query = san.text
     if not query:
         await message.answer(
@@ -44,9 +42,7 @@ async def handle_suggestions(
 
     resolved = _resolve_note_path(ctx, query)
     if resolved is None:
-        await message.answer(
-            f"Note not found: `{query}`", parse_mode="Markdown"
-        )
+        await message.answer(f"Note not found: `{query}`", parse_mode="Markdown")
         return
 
     try:
@@ -72,9 +68,7 @@ async def handle_suggestions(
         details: list[str] = []
         details.append(f"similarity {s.similarity:.0%}")
         if s.shared_entities:
-            details.append(
-                f"shared: {', '.join(s.shared_entities[:3])}"
-            )
+            details.append(f"shared: {', '.join(s.shared_entities[:3])}")
         if s.graph_distance is not None:
             details.append(f"graph dist: {s.graph_distance}")
         parts.append(f"  _({', '.join(details)})_")

@@ -193,8 +193,7 @@ def suggest_links(ctx: click.Context) -> None:
                 )
 
         console.print(
-            f"\n[bold]Summary:[/bold] {len(results)} notes with suggestions"
-            f" ({total} total links)"
+            f"\n[bold]Summary:[/bold] {len(results)} notes with suggestions ({total} total links)"
         )
 
     if cache is not None:

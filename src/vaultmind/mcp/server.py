@@ -350,9 +350,7 @@ def _dispatch_tool(
         from vaultmind.indexer.duplicate_detector import DuplicateDetector
 
         assert isinstance(duplicate_detector, DuplicateDetector)
-        matches = duplicate_detector.find_duplicates(
-            note, max_results=args.get("max_results", 10)
-        )
+        matches = duplicate_detector.find_duplicates(note, max_results=args.get("max_results", 10))
         return {
             "note_path": args["note_path"],
             "matches": [
@@ -380,9 +378,7 @@ def _dispatch_tool(
         from vaultmind.indexer.note_suggester import NoteSuggester
 
         assert isinstance(note_suggester, NoteSuggester)
-        suggestions = note_suggester.suggest_links(
-            note, max_results=args.get("max_results", 5)
-        )
+        suggestions = note_suggester.suggest_links(note, max_results=args.get("max_results", 5))
         return {
             "note_path": args["note_path"],
             "suggestions": [
