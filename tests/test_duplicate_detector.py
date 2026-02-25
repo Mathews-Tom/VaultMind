@@ -118,9 +118,11 @@ class TestDuplicateMatch:
 
 class TestFindDuplicates:
     def test_duplicate_match(self) -> None:
-        store = FakeStore([
-            _make_hit("other/dup.md", "Duplicate", distance=0.05),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/dup.md", "Duplicate", distance=0.05),
+            ]
+        )
         detector = DuplicateDetector(FakeDuplicateConfig(), store)  # type: ignore[arg-type]
         note = _make_note()
 
@@ -131,9 +133,11 @@ class TestFindDuplicates:
         assert matches[0].similarity == pytest.approx(0.95)
 
     def test_merge_match(self) -> None:
-        store = FakeStore([
-            _make_hit("other/merge.md", "Merge Candidate", distance=0.15),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/merge.md", "Merge Candidate", distance=0.15),
+            ]
+        )
         detector = DuplicateDetector(FakeDuplicateConfig(), store)  # type: ignore[arg-type]
         note = _make_note()
 
@@ -144,9 +148,11 @@ class TestFindDuplicates:
         assert matches[0].similarity == pytest.approx(0.85)
 
     def test_below_threshold_excluded(self) -> None:
-        store = FakeStore([
-            _make_hit("other/far.md", "Unrelated", distance=0.30),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/far.md", "Unrelated", distance=0.30),
+            ]
+        )
         detector = DuplicateDetector(FakeDuplicateConfig(), store)  # type: ignore[arg-type]
         note = _make_note()
 
@@ -154,10 +160,12 @@ class TestFindDuplicates:
         assert len(matches) == 0
 
     def test_self_match_excluded(self) -> None:
-        store = FakeStore([
-            _make_hit("test/note.md", "Same Note", distance=0.0),
-            _make_hit("other/real.md", "Real Match", distance=0.05),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("test/note.md", "Same Note", distance=0.0),
+                _make_hit("other/real.md", "Real Match", distance=0.05),
+            ]
+        )
         detector = DuplicateDetector(FakeDuplicateConfig(), store)  # type: ignore[arg-type]
         note = _make_note(path="test/note.md")
 
@@ -166,10 +174,12 @@ class TestFindDuplicates:
         assert matches[0].match_path == "other/real.md"
 
     def test_deduplicates_same_note_multiple_chunks(self) -> None:
-        store = FakeStore([
-            _make_hit("other/dup.md", "Dup", distance=0.04),
-            _make_hit("other/dup.md", "Dup", distance=0.06),  # same note, second chunk
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/dup.md", "Dup", distance=0.04),
+                _make_hit("other/dup.md", "Dup", distance=0.06),  # same note, second chunk
+            ]
+        )
         detector = DuplicateDetector(FakeDuplicateConfig(), store)  # type: ignore[arg-type]
         note = _make_note()
 
@@ -177,9 +187,11 @@ class TestFindDuplicates:
         assert len(matches) == 1
 
     def test_short_content_skipped(self) -> None:
-        store = FakeStore([
-            _make_hit("other/dup.md", distance=0.05),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/dup.md", distance=0.05),
+            ]
+        )
         detector = DuplicateDetector(
             FakeDuplicateConfig(min_content_length=100),  # type: ignore[arg-type]
             store,  # type: ignore[arg-type]
@@ -192,11 +204,13 @@ class TestFindDuplicates:
         assert store.last_query is None  # search never called
 
     def test_mixed_duplicate_and_merge(self) -> None:
-        store = FakeStore([
-            _make_hit("other/dup.md", "Duplicate", distance=0.03),
-            _make_hit("other/merge.md", "Merge", distance=0.15),
-            _make_hit("other/far.md", "Unrelated", distance=0.40),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/dup.md", "Duplicate", distance=0.03),
+                _make_hit("other/merge.md", "Merge", distance=0.15),
+                _make_hit("other/far.md", "Unrelated", distance=0.40),
+            ]
+        )
         detector = DuplicateDetector(FakeDuplicateConfig(), store)  # type: ignore[arg-type]
         note = _make_note()
 
@@ -222,9 +236,11 @@ class TestFindDuplicates:
 
 class TestResultsCache:
     def test_results_stored(self) -> None:
-        store = FakeStore([
-            _make_hit("other/dup.md", distance=0.05),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/dup.md", distance=0.05),
+            ]
+        )
         detector = DuplicateDetector(FakeDuplicateConfig(), store)  # type: ignore[arg-type]
         note = _make_note()
         detector.find_duplicates(note)

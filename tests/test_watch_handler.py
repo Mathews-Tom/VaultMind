@@ -59,11 +59,13 @@ class FakeParser:
         )
 
     def chunk_note(self, note: Note) -> list[object]:
-        return [MagicMock(
-            chunk_id=f"{note.path}::0",
-            content=note.content,
-            to_chroma_metadata=lambda: {},
-        )]
+        return [
+            MagicMock(
+                chunk_id=f"{note.path}::0",
+                content=note.content,
+                to_chroma_metadata=lambda: {},
+            )
+        ]
 
 
 class FakeStore:
@@ -227,7 +229,10 @@ class TestWatchHandlerBasic:
         parser, store, bus = handler_deps
         config = FakeWatchConfig(debounce_ms=10, hash_stability_check=False)
         handler = IncrementalWatchHandler(
-            config=config, parser=parser, store=store, event_bus=bus,  # type: ignore[arg-type]
+            config=config,
+            parser=parser,
+            store=store,
+            event_bus=bus,  # type: ignore[arg-type]
         )
 
         md = _write_md(vault, "note.md", "# Hello\nWorld")
@@ -242,7 +247,10 @@ class TestWatchHandlerBasic:
         parser, store, bus = handler_deps
         config = FakeWatchConfig(debounce_ms=10, hash_stability_check=False)
         handler = IncrementalWatchHandler(
-            config=config, parser=parser, store=store, event_bus=bus,  # type: ignore[arg-type]
+            config=config,
+            parser=parser,
+            store=store,
+            event_bus=bus,  # type: ignore[arg-type]
         )
 
         md = _write_md(vault, "note.md", "version 1")
@@ -260,7 +268,10 @@ class TestWatchHandlerBasic:
         parser, store, bus = handler_deps
         config = FakeWatchConfig(debounce_ms=10, hash_stability_check=False)
         handler = IncrementalWatchHandler(
-            config=config, parser=parser, store=store, event_bus=bus,  # type: ignore[arg-type]
+            config=config,
+            parser=parser,
+            store=store,
+            event_bus=bus,  # type: ignore[arg-type]
         )
 
         md = _write_md(vault, "note.md", "content")
@@ -278,7 +289,10 @@ class TestWatchHandlerBasic:
         parser, store, bus = handler_deps
         config = FakeWatchConfig(debounce_ms=10, hash_stability_check=False)
         handler = IncrementalWatchHandler(
-            config=config, parser=parser, store=store, event_bus=bus,  # type: ignore[arg-type]
+            config=config,
+            parser=parser,
+            store=store,
+            event_bus=bus,  # type: ignore[arg-type]
         )
 
         md = _write_md(vault, "note.md", "static content")
@@ -298,7 +312,10 @@ class TestDebounce:
         parser, store, bus = handler_deps
         config = FakeWatchConfig(debounce_ms=50, hash_stability_check=False)
         handler = IncrementalWatchHandler(
-            config=config, parser=parser, store=store, event_bus=bus,  # type: ignore[arg-type]
+            config=config,
+            parser=parser,
+            store=store,
+            event_bus=bus,  # type: ignore[arg-type]
         )
 
         md = _write_md(vault, "note.md", "v1")
@@ -322,7 +339,10 @@ class TestHashStability:
         parser, store, bus = handler_deps
         config = FakeWatchConfig(debounce_ms=10, hash_stability_check=True)
         handler = IncrementalWatchHandler(
-            config=config, parser=parser, store=store, event_bus=bus,  # type: ignore[arg-type]
+            config=config,
+            parser=parser,
+            store=store,
+            event_bus=bus,  # type: ignore[arg-type]
         )
 
         md = _write_md(vault, "note.md", "stable content")
@@ -338,7 +358,10 @@ class TestHashStability:
         parser, store, bus = handler_deps
         config = FakeWatchConfig(debounce_ms=20, hash_stability_check=True)
         handler = IncrementalWatchHandler(
-            config=config, parser=parser, store=store, event_bus=bus,  # type: ignore[arg-type]
+            config=config,
+            parser=parser,
+            store=store,
+            event_bus=bus,  # type: ignore[arg-type]
         )
 
         md = _write_md(vault, "note.md", "initial")
@@ -361,7 +384,10 @@ class TestEventPublishing:
         parser, store, bus = handler_deps
         config = FakeWatchConfig(debounce_ms=10, hash_stability_check=False)
         handler = IncrementalWatchHandler(
-            config=config, parser=parser, store=store, event_bus=bus,  # type: ignore[arg-type]
+            config=config,
+            parser=parser,
+            store=store,
+            event_bus=bus,  # type: ignore[arg-type]
         )
 
         events: list[NoteCreatedEvent] = []
@@ -383,7 +409,10 @@ class TestEventPublishing:
         parser, store, bus = handler_deps
         config = FakeWatchConfig(debounce_ms=10, hash_stability_check=False)
         handler = IncrementalWatchHandler(
-            config=config, parser=parser, store=store, event_bus=bus,  # type: ignore[arg-type]
+            config=config,
+            parser=parser,
+            store=store,
+            event_bus=bus,  # type: ignore[arg-type]
         )
 
         events: list[NoteModifiedEvent] = []
@@ -408,7 +437,10 @@ class TestEventPublishing:
         parser, store, bus = handler_deps
         config = FakeWatchConfig(debounce_ms=10, hash_stability_check=False)
         handler = IncrementalWatchHandler(
-            config=config, parser=parser, store=store, event_bus=bus,  # type: ignore[arg-type]
+            config=config,
+            parser=parser,
+            store=store,
+            event_bus=bus,  # type: ignore[arg-type]
         )
 
         events: list[NoteDeletedEvent] = []
@@ -430,7 +462,10 @@ class TestEventPublishing:
         parser, store, bus = handler_deps
         config = FakeWatchConfig(debounce_ms=10, hash_stability_check=False)
         handler = IncrementalWatchHandler(
-            config=config, parser=parser, store=store, event_bus=bus,  # type: ignore[arg-type]
+            config=config,
+            parser=parser,
+            store=store,
+            event_bus=bus,  # type: ignore[arg-type]
         )
 
         events: list[NoteCreatedEvent] = []
