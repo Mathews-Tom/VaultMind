@@ -200,6 +200,134 @@ def suggest_links(ctx: click.Context) -> None:
         cache.close()
 
 
+@cli.command("digest")
+@click.option("--days", default=None, type=int, help="Override period_days from config")
+@click.option(
+    "--save/--no-save",
+    default=None,
+    help="Override save_to_vault from config",
+)
+@click.pass_context
+def digest(ctx: click.Context, days: int | None, save: bool | None) -> None:
+    """Generate a vault digest report."""
+    from rich.table import Table
+
+    from vaultmind.config import load_settings
+    from vaultmind.graph import KnowledgeGraph
+    from vaultmind.indexer import Embedder, VaultStore
+    from vaultmind.indexer.digest import DigestGenerator
+    from vaultmind.vault import VaultParser
+
+    settings = load_settings(ctx.obj.get("config_path"))
+
+    is_openai = settings.embedding.provider == "openai"
+    api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
+    if not api_key:
+        console.print(
+            "[red]✗[/red] Embedding API key not set."
+            " Set VAULTMIND_OPENAI_API_KEY or VAULTMIND_VOYAGE_API_KEY."
+        )
+        sys.exit(1)
+
+    digest_config = settings.digest
+    if days is not None:
+        from vaultmind.config import DigestConfig
+
+        digest_config = DigestConfig(
+            enabled=digest_config.enabled,
+            period_days=days,
+            schedule_hour=digest_config.schedule_hour,
+            timezone=digest_config.timezone,
+            save_to_vault=digest_config.save_to_vault,
+            send_telegram=digest_config.send_telegram,
+            max_trending=digest_config.max_trending,
+            max_suggestions=digest_config.max_suggestions,
+            connection_threshold_low=digest_config.connection_threshold_low,
+            connection_threshold_high=digest_config.connection_threshold_high,
+        )
+
+    should_save = digest_config.save_to_vault if save is None else save
+
+    cache = _create_embedding_cache(settings)
+    parser = VaultParser(settings.vault)
+    embedder = Embedder(settings.embedding, api_key, cache=cache)
+    store = VaultStore(settings.chroma, embedder)
+    graph = KnowledgeGraph(settings.graph)
+
+    generator = DigestGenerator(store=store, graph=graph, parser=parser, config=digest_config)
+
+    with console.status("Generating digest..."):
+        report = generator.generate()
+
+    # Rich console output
+    date_str = report.generated_at.strftime("%Y-%m-%d")
+    console.print(f"\n[bold]Daily Digest -- {date_str}[/bold]")
+    console.print(
+        f"  Period: last {report.period_days} days"
+        f" | {report.total_notes} notes"
+        f" | {report.total_entities} entities\n"
+    )
+
+    if report.new_notes or report.modified_notes:
+        console.print("[bold]Activity[/bold]")
+        for title in report.new_notes:
+            console.print(f"  [green]+[/green] {title}")
+        for title in report.modified_notes:
+            console.print(f"  [cyan]~[/cyan] {title}")
+        console.print()
+
+    if report.trending_entities:
+        console.print("[bold]Trending Topics[/bold]")
+        table = Table(show_header=True, header_style="bold magenta", box=None)
+        table.add_column("Entity")
+        table.add_column("Current", justify="right")
+        table.add_column("Previous", justify="right")
+        table.add_column("Delta", justify="right")
+        for entity in report.trending_entities:
+            table.add_row(
+                entity.name,
+                str(entity.current_count),
+                str(entity.previous_count),
+                f"[green]+{entity.delta}[/green]",
+            )
+        console.print(table)
+        console.print()
+
+    if report.suggested_connections:
+        console.print("[bold]Suggested Connections[/bold]")
+        for conn in report.suggested_connections:
+            console.print(
+                f"  [cyan]{conn.note_a}[/cyan] <-> [cyan]{conn.note_b}[/cyan]"
+                f" ({conn.similarity:.0%})"
+            )
+        console.print()
+
+    if report.orphan_notes:
+        console.print("[bold]Orphan Notes[/bold]")
+        for title in report.orphan_notes:
+            console.print(f"  [yellow]{title}[/yellow]")
+        console.print()
+
+    if not any(
+        [
+            report.new_notes,
+            report.modified_notes,
+            report.trending_entities,
+            report.suggested_connections,
+            report.orphan_notes,
+        ]
+    ):
+        console.print(f"[dim]No activity in the last {report.period_days} days.[/dim]")
+
+    if should_save:
+        with console.status("Saving digest to vault..."):
+            dest = generator.save_to_vault(report, settings.vault.path)
+        console.print(f"[green]✓[/green] Digest saved to {dest}")
+
+    if cache is not None:
+        cache.close()
+
+
 @cli.command("scan-duplicates")
 @click.pass_context
 def scan_duplicates(ctx: click.Context) -> None:
