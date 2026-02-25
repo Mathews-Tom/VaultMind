@@ -173,19 +173,19 @@ Set `capture_all = true` in `[routing]` config to restore old behavior (all text
 
 ### Commands
 
-| Command                      | Description                                     |
-| ---------------------------- | ----------------------------------------------- |
-| `/recall <query>`            | Semantic search over vault                      |
+| Command                      | Description                                               |
+| ---------------------------- | --------------------------------------------------------- |
+| `/recall <query>`            | Semantic search over vault                                |
 | `/think <topic>`             | Start thinking partner session (persists across restarts) |
-| `/think explore: <topic>`    | Divergent ideation mode                         |
-| `/think critique: <topic>`   | Stress-test an idea                             |
-| `/think synthesize: <topic>` | Connect dots across domains                     |
-| `/think plan: <topic>`       | Create execution plan                           |
-| `/graph <entity>`            | Query knowledge graph                           |
-| `/daily`                     | Get/create today's daily note                   |
-| `/review`                    | Weekly review with graph insights               |
-| `/stats`                     | Vault and graph statistics                      |
-| Send voice                   | Transcribe and capture (requires whisper extra) |
+| `/think explore: <topic>`    | Divergent ideation mode                                   |
+| `/think critique: <topic>`   | Stress-test an idea                                       |
+| `/think synthesize: <topic>` | Connect dots across domains                               |
+| `/think plan: <topic>`       | Create execution plan                                     |
+| `/graph <entity>`            | Query knowledge graph                                     |
+| `/daily`                     | Get/create today's daily note                             |
+| `/review`                    | Weekly review with graph insights                         |
+| `/stats`                     | Vault and graph statistics                                |
+| Send voice                   | Transcribe and capture (requires whisper extra)           |
 
 ## MCP Integration
 
@@ -218,7 +218,7 @@ uv sync --extra mcp
 
 VaultMind expects (and creates via `init`) this structure:
 
-```
+```text
 ~/.vaultmind/vault/
 ├── 00-inbox/          # Quick captures, unsorted
 ├── 01-daily/          # Daily notes
@@ -287,15 +287,15 @@ uv run ruff format src/ tests/
          │                   │             │        │
          ▼                   ▼             ▼        ▼
 ┌──────────────────────────────────────────────────────┐
-│                    VaultMind Core                     │
+│                    VaultMind Core                    │
 │                                                      │
-│  ┌──────────┐  ┌──────────────┐  ┌────────────────┐ │
-│  │  Parser  │  │  Embedder +  │  │  Knowledge     │ │
-│  │ (md+yaml)│  │  ChromaDB    │  │  Graph (nx)    │ │
-│  └──────────┘  └──────────────┘  └────────────────┘ │
+│  ┌──────────┐  ┌──────────────┐  ┌────────────────┐  │
+│  │  Parser  │  │  Embedder +  │  │  Knowledge     │  │
+│  │ (md+yaml)│  │  ChromaDB    │  │  Graph (nx)    │  │
+│  └──────────┘  └──────────────┘  └────────────────┘  │
 │                                                      │
 │  ┌──────────────────────────────────────────────────┐│
-│  │   LLM Abstraction (Anthropic/OpenAI/Gemini/     ││
+│  │   LLM Abstraction (Anthropic/OpenAI/Gemini/      ││
 │  │   Ollama) → Thinking Partner + Entity Extraction ││
 │  └──────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────┘
