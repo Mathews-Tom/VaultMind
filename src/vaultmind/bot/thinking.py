@@ -6,6 +6,7 @@ Provider-agnostic via the LLMClient abstraction.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -87,14 +88,15 @@ class ThinkingPartner:
         # Get or create session
         session = self._get_session(user_id)
 
-        # Retrieve vault context
-        vault_context = self._build_vault_context(topic, store, graph)
+        # Retrieve vault context (offload sync I/O to thread pool)
+        vault_context = await asyncio.to_thread(self._build_vault_context, topic, store, graph)
 
         # Build messages
         messages = self._build_messages(session, topic, vault_context, mode)
 
         try:
-            response = self._client.complete(
+            response = await asyncio.to_thread(
+                self._client.complete,
                 messages=messages,
                 model=self.llm_config.thinking_model,
                 max_tokens=self.llm_config.max_tokens,

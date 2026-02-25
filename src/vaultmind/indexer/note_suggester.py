@@ -13,6 +13,7 @@ making the formula degrade gracefully to similarity + entity overlap.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -185,7 +186,7 @@ class NoteSuggester:
         if note is None:
             return
 
-        self.suggest_links(note)
+        await asyncio.to_thread(self.suggest_links, note)
 
     # ------------------------------------------------------------------
     # Results access

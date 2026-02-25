@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -131,7 +132,7 @@ async def handle_recall(
     max_results = ctx.settings.search.max_results
     page_size = ctx.settings.search.page_size
 
-    results = ctx.store.search(query, n_results=max_results)
+    results = await asyncio.to_thread(ctx.store.search, query, n_results=max_results)
 
     if not results:
         await message.answer("No matching notes found.")

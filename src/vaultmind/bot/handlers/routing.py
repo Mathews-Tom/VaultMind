@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 import time
@@ -111,10 +112,12 @@ async def handle_smart_response(
     """Generate a vault-context-aware response using the LLM."""
     routing_cfg = ctx.settings.routing
 
-    # Build vault context (reuse ThinkingPartner's method)
+    # Build vault context (reuse ThinkingPartner's method, offload to thread)
     vault_context = ""
     if routing_cfg.vault_context_enabled:
-        vault_context = ctx.thinking._build_vault_context(text, ctx.store, ctx.graph)
+        vault_context = await asyncio.to_thread(
+            ctx.thinking._build_vault_context, text, ctx.store, ctx.graph
+        )
 
     # Select model and system prompt
     model = routing_cfg.chat_model or ctx.settings.llm.fast_model
@@ -129,7 +132,8 @@ async def handle_smart_response(
     messages = [LLMMessage(role="user", content=user_content)]
 
     try:
-        response = ctx.llm_client.complete(
+        response = await asyncio.to_thread(
+            ctx.llm_client.complete,
             messages=messages,
             model=model,
             max_tokens=routing_cfg.chat_max_tokens,

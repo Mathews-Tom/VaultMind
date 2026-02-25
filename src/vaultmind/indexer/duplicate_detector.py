@@ -17,6 +17,7 @@ The detector exposes two integration surfaces:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
@@ -174,7 +175,7 @@ class DuplicateDetector:
         if note is None:
             return
 
-        self.find_duplicates(note)
+        await asyncio.to_thread(self.find_duplicates, note)
 
     # ------------------------------------------------------------------
     # Results access

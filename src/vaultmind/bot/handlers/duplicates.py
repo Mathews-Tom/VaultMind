@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -43,13 +44,13 @@ async def handle_duplicates(
         return
 
     try:
-        note = ctx.parser.parse_file(resolved)
+        note = await asyncio.to_thread(ctx.parser.parse_file, resolved)
     except Exception:
         logger.exception("Failed to parse %s", resolved)
         await message.answer("Failed to read note.")
         return
 
-    matches = detector.find_duplicates(note)
+    matches = await asyncio.to_thread(detector.find_duplicates, note)
 
     if not matches:
         await message.answer(

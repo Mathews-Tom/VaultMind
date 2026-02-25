@@ -190,13 +190,13 @@ class IncrementalWatchHandler:
         self._hash_cache[path] = current_hash
 
         try:
-            note = self._parser.parse_file(path)
+            note = await asyncio.to_thread(self._parser.parse_file, path)
         except Exception:
             logger.exception("Failed to parse %s", path)
             return
 
         try:
-            chunks = self._store.index_single_note(note, self._parser)
+            chunks = await asyncio.to_thread(self._store.index_single_note, note, self._parser)
         except Exception:
             logger.exception("Failed to index %s", path)
             return
@@ -230,7 +230,7 @@ class IncrementalWatchHandler:
             rel_path = str(path)
 
         try:
-            self._store.delete_note(rel_path)
+            await asyncio.to_thread(self._store.delete_note, rel_path)
         except Exception:
             logger.exception("Failed to delete index for %s", path)
             return
@@ -275,7 +275,9 @@ class IncrementalWatchHandler:
 
         logger.info("Graph batch: re-extracting %d notes", len(notes))
         try:
-            stats = self._extractor.extract_and_update_graph(notes, self._graph)
+            stats = await asyncio.to_thread(
+                self._extractor.extract_and_update_graph, notes, self._graph
+            )
             logger.info(
                 "Graph batch: +%d entities, +%d relationships",
                 stats["entities_added"],
