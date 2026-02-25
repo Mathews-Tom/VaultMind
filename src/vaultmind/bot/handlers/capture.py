@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime
@@ -70,10 +71,10 @@ async def handle_capture(ctx: HandlerContext, message: Message, text: str) -> No
     filepath.write_text(note_content, encoding="utf-8")
     logger.info("Captured note: %s", filepath)
 
-    # Index immediately for instant recall
+    # Index immediately for instant recall (offload sync I/O to thread pool)
     try:
-        note = ctx.parser.parse_file(filepath)
-        ctx.store.index_single_note(note, ctx.parser)
+        note = await asyncio.to_thread(ctx.parser.parse_file, filepath)
+        await asyncio.to_thread(ctx.store.index_single_note, note, ctx.parser)
     except Exception:
         logger.exception("Failed to index captured note")
 

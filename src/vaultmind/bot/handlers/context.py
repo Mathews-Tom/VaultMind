@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from vaultmind.bot.thinking import ThinkingPartner
+    from vaultmind.bot.transcribe import Transcriber
     from vaultmind.config import Settings
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
@@ -25,3 +26,4 @@ class HandlerContext:
     thinking: ThinkingPartner
     llm_client: LLMClient
     vault_root: Path
+    transcriber: Transcriber | None = field(default=None)

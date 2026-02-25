@@ -160,6 +160,23 @@ class DigestConfig(BaseSettings):
     connection_threshold_high: float = 0.85
 
 
+class AutoTagConfig(BaseSettings):
+    """Auto-tagging configuration."""
+
+    enabled: bool = True
+    max_tags_per_note: int = 2
+    min_content_length: int = 100
+    tagging_model: str = ""  # Empty = use llm.fast_model
+
+
+class VoiceConfig(BaseSettings):
+    """Voice note capture configuration."""
+
+    enabled: bool = True
+    whisper_model: str = "whisper-1"
+    language: str = ""  # Empty = auto-detect
+
+
 class MCPConfig(BaseSettings):
     """MCP server configuration."""
 
@@ -191,6 +208,8 @@ class Settings(BaseSettings):
     note_suggestions: NoteSuggestionsConfig = Field(default_factory=NoteSuggestionsConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     digest: DigestConfig = Field(default_factory=DigestConfig)
+    auto_tag: AutoTagConfig = Field(default_factory=AutoTagConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     # API keys — always from env vars

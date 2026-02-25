@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -46,13 +47,13 @@ async def handle_suggestions(
         return
 
     try:
-        note = ctx.parser.parse_file(resolved)
+        note = await asyncio.to_thread(ctx.parser.parse_file, resolved)
     except Exception:
         logger.exception("Failed to parse %s", resolved)
         await message.answer("Failed to read note.")
         return
 
-    suggestions = suggester.suggest_links(note)
+    suggestions = await asyncio.to_thread(suggester.suggest_links, note)
 
     if not suggestions:
         await message.answer(

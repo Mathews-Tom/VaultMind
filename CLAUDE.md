@@ -9,8 +9,8 @@ AI-powered personal knowledge management built on Obsidian. Turns an Obsidian va
 ```
 src/vaultmind/
 ├── vault/       # Markdown parser, models, file watcher, event bus, path security
-├── indexer/     # Embedding pipeline + ChromaDB vector store + embedding cache + duplicate detection
-├── graph/       # NetworkX knowledge graph + LLM entity extraction
+├── indexer/     # Embedding pipeline + ChromaDB vector store + embedding cache + duplicate detection + auto-tagging
+├── graph/       # NetworkX knowledge graph + LLM entity extraction + graph maintenance
 ├── bot/         # Telegram bot (aiogram 3.x) — commands, router, thinking partner
 │   ├── commands.py      # Thin facade delegating to handlers/ package
 │   ├── handlers/        # Decomposed handler modules (capture, recall, think, etc.)
@@ -21,7 +21,8 @@ src/vaultmind/
 │   ├── sanitize.py      # Input sanitization (length limits, null bytes, injection detection)
 │   ├── session_store.py # SQLite-backed thinking session persistence
 │   ├── telegram.py      # aiogram Router, handler registration, callback queries
-│   └── thinking.py      # Multi-turn thinking partner (RAG + graph)
+│   ├── thinking.py      # Multi-turn thinking partner (RAG + graph)
+│   └── transcribe.py    # OpenAI Whisper API voice transcription
 ├── llm/         # Provider-agnostic LLM abstraction (Protocol-based)
 │   ├── client.py        # LLMClient Protocol, Message, LLMResponse, factory
 │   └── providers/       # Anthropic, OpenAI, Gemini, Ollama implementations
@@ -40,10 +41,13 @@ uv run vaultmind watch --graph # Watch + batched graph re-extraction
 uv run vaultmind scan-duplicates # Scan vault for duplicate/merge candidates
 uv run vaultmind suggest-links   # Scan vault for link suggestions between notes
 uv run vaultmind bot           # Start Telegram bot (includes watch mode + duplicate detection + suggestions)
-uv run vaultmind graph-build   # Build knowledge graph
-uv run vaultmind graph-report  # Generate graph analytics
-uv run vaultmind mcp-serve     # Start MCP server
-uv run vaultmind stats         # Show vault statistics
+uv run vaultmind graph-build    # Build knowledge graph
+uv run vaultmind graph-maintain # Prune stale refs + remove orphan entities
+uv run vaultmind graph-report   # Generate graph analytics
+uv run vaultmind auto-tag       # LLM-based tag suggestions (dry-run)
+uv run vaultmind auto-tag --apply # Apply suggested tags to frontmatter
+uv run vaultmind mcp-serve      # Start MCP server
+uv run vaultmind stats          # Show vault statistics
 ```
 
 ## Tech Stack
@@ -107,3 +111,7 @@ The `llm/` package uses a `Protocol`-based abstraction. Gemini and Ollama reuse 
 - Semantic duplicate detection (`indexer/duplicate_detector.py`) — reuses existing ChromaDB embeddings (zero additional API cost), classifies matches into bands: duplicate (≥92%), merge (80–92%). Subscribes to event bus for automatic fire-and-forget detection on every index update
 - Context-aware note suggestions (`indexer/note_suggester.py`) — composite scoring: vector similarity (0.70–0.80 band) + shared graph entities (entity_weight=0.1) + graph path distance (graph_weight=0.05). Operates below duplicate/merge thresholds with clean band separation. Available via `/suggest` command, `suggest_links` MCP tool, and `suggest-links` CLI
 - posthog pinned to `<4` — chromadb uses the 3-arg `capture()` API removed in posthog 4.x+
+- Async I/O pipeline — all blocking calls (ChromaDB, embedding API, LLM) wrapped with `asyncio.to_thread()` at handler call sites, keeping the event loop responsive without protocol changes
+- Graph maintenance (`graph/maintenance.py`) — `GraphMaintainer` prunes stale source-note references, removes orphan entities, and subscribes to `NoteDeletedEvent` for incremental cleanup on note deletion
+- Auto-tagging (`indexer/auto_tagger.py`) — LLM classifies notes using existing vault tag vocabulary. New tags go to quarantine (`~/.vaultmind/data/tag_quarantine.json`) pending user approval. Default dry-run with `--apply` opt-in for frontmatter writes
+- Voice note capture (`bot/transcribe.py`) — OpenAI Whisper API transcription (uses existing `openai` dependency). Voice messages → transcription → route to capture (default) or question (if ends with `?`). Requires `VAULTMIND_OPENAI_API_KEY`

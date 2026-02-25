@@ -87,6 +87,17 @@ max_suggestions = 5
 connection_threshold_low = 0.70
 connection_threshold_high = 0.85
 
+[auto_tag]
+enabled = true
+max_tags_per_note = 2
+min_content_length = 100
+tagging_model = ""                       # Empty = use llm.fast_model
+
+[voice]
+enabled = true
+whisper_model = "whisper-1"
+language = ""                            # Empty = auto-detect
+
 [mcp]
 enabled = false
 host = "127.0.0.1"

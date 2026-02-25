@@ -485,6 +485,13 @@ def bot(ctx: click.Context) -> None:
     if settings.note_suggestions.enabled:
         suggester = NoteSuggester(settings.note_suggestions, store, graph=graph)
 
+    # Voice transcription
+    from vaultmind.bot.transcribe import Transcriber
+
+    transcriber: Transcriber | None = None
+    if settings.voice.enabled and settings.openai_api_key:
+        transcriber = Transcriber(settings.voice, settings.openai_api_key)
+
     handlers = CommandHandlers(
         settings=settings,
         store=store,
@@ -494,13 +501,20 @@ def bot(ctx: click.Context) -> None:
         llm_client=llm_client,
         duplicate_detector=detector,
         note_suggester=suggester,
+        transcriber=transcriber,
     )
 
     tg_bot, dp = create_bot(settings.telegram.bot_token)
     register_handlers(handlers)
 
     # Wire up incremental watch mode
-    from vaultmind.vault.events import NoteCreatedEvent, NoteModifiedEvent, VaultEventBus
+    from vaultmind.graph.maintenance import GraphMaintainer
+    from vaultmind.vault.events import (
+        NoteCreatedEvent,
+        NoteDeletedEvent,
+        NoteModifiedEvent,
+        VaultEventBus,
+    )
     from vaultmind.vault.watch_handler import IncrementalWatchHandler
     from vaultmind.vault.watcher import VaultWatcher
 
@@ -513,6 +527,10 @@ def bot(ctx: click.Context) -> None:
     if suggester is not None:
         event_bus.subscribe(NoteCreatedEvent, suggester.on_note_changed)  # type: ignore[arg-type]
         event_bus.subscribe(NoteModifiedEvent, suggester.on_note_changed)  # type: ignore[arg-type]
+
+    # Subscribe graph maintenance to note deletion events
+    maintainer = GraphMaintainer(graph)
+    event_bus.subscribe(NoteDeletedEvent, maintainer.on_note_deleted)  # type: ignore[arg-type]
 
     watch_handler = IncrementalWatchHandler(
         config=settings.watch,
@@ -640,6 +658,104 @@ def watch(ctx: click.Context, with_graph: bool) -> None:
         console.print("\n[yellow]Watcher stopped.[/yellow]")
 
 
+@cli.command("auto-tag")
+@click.option("--apply", "do_apply", is_flag=True, help="Write tags to frontmatter")
+@click.option("--approve-all", is_flag=True, help="Approve all quarantined tags")
+@click.option("--show-quarantine", is_flag=True, help="Show quarantined tags and exit")
+@click.pass_context
+def auto_tag(
+    ctx: click.Context,
+    do_apply: bool,
+    approve_all: bool,
+    show_quarantine: bool,
+) -> None:
+    """Auto-tag vault notes using LLM classification.
+
+    By default runs in dry-run mode — shows suggestions without writing.
+    Use --apply to write tags to frontmatter.
+    """
+    from vaultmind.config import VAULTMIND_HOME, load_settings
+    from vaultmind.indexer.auto_tagger import AutoTagger
+    from vaultmind.vault import VaultParser
+
+    settings = load_settings(ctx.obj.get("config_path"))
+    _require_llm_key(settings)
+
+    quarantine_path = VAULTMIND_HOME / "data" / "tag_quarantine.json"
+
+    model = settings.auto_tag.tagging_model or settings.llm.fast_model
+    llm_client = _create_llm_client(settings)
+    tagger = AutoTagger(settings.auto_tag, llm_client, model, quarantine_path)
+
+    if approve_all:
+        tagger.quarantine.approve_all()
+        tagger.save_quarantine()
+        console.print("[green]✓[/green] All quarantined tags approved.")
+        return
+
+    if show_quarantine:
+        q = tagger.quarantine
+        if q.quarantined_tags:
+            console.print("[bold]Quarantined tags (pending approval):[/bold]")
+            for tag in sorted(q.quarantined_tags):
+                console.print(f"  [yellow]{tag}[/yellow]")
+        else:
+            console.print("[green]No tags in quarantine.[/green]")
+        if q.approved_tags:
+            console.print(f"\n[bold]Approved tags:[/bold] {', '.join(sorted(q.approved_tags))}")
+        return
+
+    parser = VaultParser(settings.vault)
+
+    with console.status("Parsing vault..."):
+        notes = parser.iter_notes()
+
+    vault_tags = tagger.collect_vault_tags(notes)
+    console.print(f"  Vault tag vocabulary: {len(vault_tags)} unique tags")
+
+    # Filter to notes without many tags (likely need tagging)
+    candidates = [n for n in notes if len(n.tags) <= 1]
+    console.print(f"  Candidates (≤1 tag): {len(candidates)} of {len(notes)} notes")
+
+    if not candidates:
+        console.print("[green]✓[/green] All notes are well-tagged.")
+        return
+
+    with console.status(f"Classifying {len(candidates)} notes..."):
+        suggestions = tagger.suggest_batch(candidates, vault_tags)
+
+    if not suggestions:
+        console.print("[green]✓[/green] No tag suggestions generated.")
+        tagger.save_quarantine()
+        return
+
+    for s in suggestions:
+        tag_str = ", ".join(s.suggested_tags) if s.suggested_tags else "(none from vocab)"
+        new_str = f" + new: {', '.join(s.new_tags)}" if s.new_tags else ""
+        console.print(f"  [bold]{s.note_title}[/bold]: [cyan]{tag_str}[/cyan]{new_str}")
+
+    console.print(f"\n[bold]Summary:[/bold] {len(suggestions)} notes with suggestions")
+
+    q = tagger.quarantine
+    if q.quarantined_tags:
+        console.print(
+            f"  [yellow]Quarantined tags:[/yellow] {', '.join(sorted(q.quarantined_tags))}"
+        )
+        console.print("  Run `auto-tag --approve-all` to approve, then `auto-tag --apply`")
+
+    if do_apply:
+        applied = 0
+        for s in suggestions:
+            if s.suggested_tags:
+                note_path = settings.vault.path / s.note_path
+                if note_path.exists():
+                    tagger.apply_tags(note_path, s.suggested_tags)
+                    applied += 1
+        console.print(f"[green]✓[/green] Applied tags to {applied} notes")
+
+    tagger.save_quarantine()
+
+
 @cli.command("graph-build")
 @click.option("--full", is_flag=True, help="Rebuild entire graph from scratch")
 @click.pass_context
@@ -683,6 +799,46 @@ def graph_build(ctx: click.Context, full: bool) -> None:
     )
     gs = graph.stats
     console.print(f"  Total: {gs['nodes']} nodes, {gs['edges']} edges")
+
+
+@cli.command("graph-maintain")
+@click.pass_context
+def graph_maintain(ctx: click.Context) -> None:
+    """Run graph maintenance: prune stale references and remove orphans."""
+    from vaultmind.config import load_settings
+    from vaultmind.graph import KnowledgeGraph
+    from vaultmind.graph.maintenance import GraphMaintainer
+    from vaultmind.vault import VaultParser
+
+    settings = load_settings(ctx.obj.get("config_path"))
+
+    if not settings.graph.persist_path.exists():
+        console.print("[yellow]No graph found. Run `graph-build` first.[/yellow]")
+        return
+
+    parser = VaultParser(settings.vault)
+    graph = KnowledgeGraph(settings.graph)
+    maintainer = GraphMaintainer(graph)
+
+    before = graph.stats
+
+    with console.status("Parsing vault for existing note paths..."):
+        notes = parser.iter_notes()
+        existing_paths = {str(n.path) for n in notes}
+
+    with console.status("Running graph maintenance..."):
+        stats = maintainer.full_maintenance(existing_paths)
+
+    after = graph.stats
+
+    console.print("[green]✓[/green] Graph maintenance complete")
+    console.print(f"  Stale node refs pruned: {stats['nodes_pruned']}")
+    console.print(f"  Stale edge refs pruned: {stats['edges_pruned']}")
+    console.print(f"  Orphan entities removed: {stats['orphans_removed']}")
+    console.print(
+        f"  Graph: {before['nodes']} → {after['nodes']} nodes,"
+        f" {before['edges']} → {after['edges']} edges"
+    )
 
 
 @cli.command("graph-report")
