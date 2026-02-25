@@ -48,6 +48,7 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "• `/read <note>` → read a note\n"
             "• `/edit <note> <instruction>` → edit a note\n"
             "• `/delete <note>` → delete a note\n"
+            "• `/bookmark <title>` → bookmark session/last Q&A to vault\n"
             "• `/suggest <note>` → find notes to link\n"
             "• `/duplicates <note>` → find duplicate/similar notes\n"
             "• `/review` → weekly review prompts\n"
@@ -55,6 +56,14 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "• `/stats` → vault & graph statistics",
             parse_mode="Markdown",
         )
+
+    @router.message(Command("bookmark"))
+    async def cmd_bookmark(message: Message) -> None:
+        title = message.text.replace("/bookmark", "", 1).strip() if message.text else ""
+        if not title:
+            await message.answer("Usage: `/bookmark <title>`", parse_mode="Markdown")
+            return
+        await handlers.handle_bookmark(message, title)
 
     @router.message(Command("recall"))
     async def cmd_recall(message: Message) -> None:
@@ -187,7 +196,8 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "*Thinking*\n"
             "• `/think <topic>` — start a thinking partner session\n"
             "  _Modes: `explore:`, `critique:`, `synthesize:`, `plan:`_\n"
-            "  Follow-up messages continue the session automatically.\n\n"
+            "  Follow-up messages continue the session automatically.\n"
+            "• `/bookmark <title>` — save session or last Q&A to vault\n\n"
             "*System*\n"
             "• `/health` — check system status\n"
             "• `/stats` — vault & graph statistics\n"
@@ -222,3 +232,7 @@ def register_handlers(handlers: CommandHandlers) -> None:
     @router.callback_query(F.data.startswith("edit_"))
     async def callback_edit(callback: CallbackQuery) -> None:
         await handlers.handle_edit_callback(callback)
+
+    @router.callback_query(F.data.startswith("recall_page:"))
+    async def callback_recall_page(callback: CallbackQuery) -> None:
+        await handlers.handle_recall_page_callback(callback)

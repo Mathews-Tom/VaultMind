@@ -148,9 +148,11 @@ class TestNoteSuggestion:
 
 class TestSuggestLinks:
     def test_finds_suggestion_in_band(self) -> None:
-        store = FakeStore([
-            _make_hit("other/related.md", "Related", distance=0.25),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/related.md", "Related", distance=0.25),
+            ]
+        )
         suggester = NoteSuggester(FakeSuggestionsConfig(), store)  # type: ignore[arg-type]
         note = _make_note()
 
@@ -161,9 +163,11 @@ class TestSuggestLinks:
 
     def test_excludes_above_merge_threshold(self) -> None:
         # distance=0.10 → similarity=0.90 → merge territory
-        store = FakeStore([
-            _make_hit("other/dup.md", distance=0.10),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/dup.md", distance=0.10),
+            ]
+        )
         suggester = NoteSuggester(FakeSuggestionsConfig(), store)  # type: ignore[arg-type]
         note = _make_note()
 
@@ -172,9 +176,11 @@ class TestSuggestLinks:
 
     def test_excludes_below_suggestion_threshold(self) -> None:
         # distance=0.40 → similarity=0.60 → too dissimilar
-        store = FakeStore([
-            _make_hit("other/far.md", distance=0.40),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/far.md", distance=0.40),
+            ]
+        )
         suggester = NoteSuggester(FakeSuggestionsConfig(), store)  # type: ignore[arg-type]
         note = _make_note()
 
@@ -182,10 +188,12 @@ class TestSuggestLinks:
         assert len(results) == 0
 
     def test_self_match_excluded(self) -> None:
-        store = FakeStore([
-            _make_hit("test/note.md", "Self", distance=0.25),
-            _make_hit("other/real.md", "Real", distance=0.25),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("test/note.md", "Self", distance=0.25),
+                _make_hit("other/real.md", "Real", distance=0.25),
+            ]
+        )
         suggester = NoteSuggester(FakeSuggestionsConfig(), store)  # type: ignore[arg-type]
         note = _make_note(path="test/note.md")
 
@@ -205,10 +213,7 @@ class TestSuggestLinks:
         assert len(results) == 0
 
     def test_max_results_respected(self) -> None:
-        hits = [
-            _make_hit(f"other/{i}.md", f"Match {i}", distance=0.25)
-            for i in range(20)
-        ]
+        hits = [_make_hit(f"other/{i}.md", f"Match {i}", distance=0.25) for i in range(20)]
         store = FakeStore(hits)
         suggester = NoteSuggester(FakeSuggestionsConfig(), store)  # type: ignore[arg-type]
         note = _make_note()
@@ -217,10 +222,12 @@ class TestSuggestLinks:
         assert len(results) == 3
 
     def test_deduplicates_same_note_chunks(self) -> None:
-        store = FakeStore([
-            _make_hit("other/note.md", "Same", distance=0.22),
-            _make_hit("other/note.md", "Same", distance=0.24),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/note.md", "Same", distance=0.22),
+                _make_hit("other/note.md", "Same", distance=0.24),
+            ]
+        )
         suggester = NoteSuggester(FakeSuggestionsConfig(), store)  # type: ignore[arg-type]
         note = _make_note()
 
@@ -235,10 +242,12 @@ class TestSuggestLinks:
 
 class TestCompositeScoring:
     def test_entity_boost(self) -> None:
-        store = FakeStore([
-            _make_hit("other/a.md", "A", distance=0.25, entities="python,ml"),
-            _make_hit("other/b.md", "B", distance=0.25, entities="unrelated"),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/a.md", "A", distance=0.25, entities="python,ml"),
+                _make_hit("other/b.md", "B", distance=0.25, entities="unrelated"),
+            ]
+        )
         config = FakeSuggestionsConfig(entity_weight=0.1)
         suggester = NoteSuggester(config, store)  # type: ignore[arg-type]
         note = _make_note(entities=["python", "ml"])
@@ -252,13 +261,17 @@ class TestCompositeScoring:
         assert len(results[0].shared_entities) == 2
 
     def test_graph_distance_boost(self) -> None:
-        store = FakeStore([
-            _make_hit("other/close.md", "Close", distance=0.25),
-            _make_hit("other/far.md", "Far", distance=0.25),
-        ])
-        graph = FakeGraph(paths={
-            ("test note", "close"): ["test note", "bridge", "close"],  # dist=2
-        })
+        store = FakeStore(
+            [
+                _make_hit("other/close.md", "Close", distance=0.25),
+                _make_hit("other/far.md", "Far", distance=0.25),
+            ]
+        )
+        graph = FakeGraph(
+            paths={
+                ("test note", "close"): ["test note", "bridge", "close"],  # dist=2
+            }
+        )
         config = FakeSuggestionsConfig(graph_weight=0.05)
         suggester = NoteSuggester(config, store, graph=graph)  # type: ignore[arg-type]
         note = _make_note()
@@ -272,12 +285,16 @@ class TestCompositeScoring:
         assert results[1].graph_distance is None
 
     def test_no_graph_distance_for_disconnected(self) -> None:
-        store = FakeStore([
-            _make_hit("other/note.md", "Note", distance=0.25),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/note.md", "Note", distance=0.25),
+            ]
+        )
         graph = FakeGraph()  # empty graph, no paths
         suggester = NoteSuggester(
-            FakeSuggestionsConfig(), store, graph=graph,  # type: ignore[arg-type]
+            FakeSuggestionsConfig(),
+            store,
+            graph=graph,  # type: ignore[arg-type]
         )
         note = _make_note()
 
@@ -295,12 +312,16 @@ class TestCompositeScoring:
 
 class TestEntityFromGraph:
     def test_extracts_frontmatter_entities(self) -> None:
-        store = FakeStore([
-            _make_hit("other/hit.md", distance=0.25, entities="python"),
-        ])
+        store = FakeStore(
+            [
+                _make_hit("other/hit.md", distance=0.25, entities="python"),
+            ]
+        )
         graph = FakeGraph(entities={"python"})
         suggester = NoteSuggester(
-            FakeSuggestionsConfig(), store, graph=graph,  # type: ignore[arg-type]
+            FakeSuggestionsConfig(),
+            store,
+            graph=graph,  # type: ignore[arg-type]
         )
         note = _make_note(entities=["Python"])
 

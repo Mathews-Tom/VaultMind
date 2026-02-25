@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from vaultmind.bot.handlers.bookmark import LastExchange, handle_bookmark
 from vaultmind.bot.handlers.capture import handle_capture
 from vaultmind.bot.handlers.context import HandlerContext
 from vaultmind.bot.handlers.daily import handle_daily
@@ -19,7 +20,11 @@ from vaultmind.bot.handlers.notes import (
     handle_notes,
 )
 from vaultmind.bot.handlers.read import handle_read
-from vaultmind.bot.handlers.recall import handle_recall
+from vaultmind.bot.handlers.recall import (
+    PaginatedSearch,
+    handle_recall,
+    handle_recall_page_callback,
+)
 from vaultmind.bot.handlers.review import handle_review
 from vaultmind.bot.handlers.routing import handle_greeting, handle_message, handle_smart_response
 from vaultmind.bot.handlers.stats import handle_stats
@@ -66,6 +71,8 @@ class CommandHandlers:
         self._duplicate_detector = duplicate_detector
         self._note_suggester = note_suggester
         self._pending_edits: dict[int, dict[str, str]] = {}
+        self._search_sessions: dict[int, PaginatedSearch] = {}
+        self._last_exchanges: dict[int, LastExchange] = {}
 
     # --- Delegated properties for backward compat (used by tests) ---
 
@@ -103,10 +110,13 @@ class CommandHandlers:
         await handle_capture(self._ctx, message, text)
 
     async def handle_recall(self, message: Message, query: str) -> None:
-        await handle_recall(self._ctx, message, query)
+        await handle_recall(self._ctx, message, query, self._search_sessions, self._last_exchanges)
+
+    async def handle_recall_page_callback(self, callback: CallbackQuery) -> None:
+        await handle_recall_page_callback(self._ctx, callback, self._search_sessions)
 
     async def handle_think(self, message: Message, topic: str) -> None:
-        await handle_think(self._ctx, message, topic)
+        await handle_think(self._ctx, message, topic, self._last_exchanges)
 
     async def handle_graph(self, message: Message, entity: str) -> None:
         await handle_graph(self._ctx, message, entity)
@@ -127,6 +137,7 @@ class CommandHandlers:
             text,
             capture_fn=handle_capture,
             think_fn=handle_think,
+            last_exchanges=self._last_exchanges,
         )
 
     async def handle_greeting(self, message: Message) -> None:
@@ -139,7 +150,12 @@ class CommandHandlers:
         *,
         is_question: bool,
     ) -> None:
-        await handle_smart_response(self._ctx, message, text, is_question=is_question)
+        await handle_smart_response(
+            self._ctx, message, text, is_question=is_question, last_exchanges=self._last_exchanges
+        )
+
+    async def handle_bookmark(self, message: Message, title: str) -> None:
+        await handle_bookmark(self._ctx, message, title, self._last_exchanges)
 
     async def handle_health(self, message: Message) -> None:
         await handle_health(self._ctx, message)

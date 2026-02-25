@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from typing import TYPE_CHECKING
 
 from vaultmind.bot.handlers.utils import _is_authorized, _split_message
@@ -15,6 +16,7 @@ from vaultmind.llm.client import Message as LLMMessage
 if TYPE_CHECKING:
     from aiogram.types import Message
 
+    from vaultmind.bot.handlers.bookmark import LastExchange
     from vaultmind.bot.handlers.context import HandlerContext
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,7 @@ async def handle_message(
     *,
     capture_fn: object,
     think_fn: object,
+    last_exchanges: dict[int, LastExchange] | None = None,
 ) -> None:
     """Route a plain text message based on heuristic classification."""
     if not _is_authorized(ctx, message):
@@ -72,7 +75,7 @@ async def handle_message(
     # Sticky thinking sessions -- continue if active
     user_id = message.from_user.id if message.from_user else 0
     if ctx.thinking.has_active_session(user_id):
-        await think_fn(ctx, message, text)  # type: ignore[operator]
+        await think_fn(ctx, message, text, last_exchanges)  # type: ignore[operator]
         return
 
     # Classify and dispatch
@@ -83,9 +86,13 @@ async def handle_message(
     elif result.intent is Intent.greeting:
         await handle_greeting(message)
     elif result.intent is Intent.question:
-        await handle_smart_response(ctx, message, result.content, is_question=True)
+        await handle_smart_response(
+            ctx, message, result.content, is_question=True, last_exchanges=last_exchanges
+        )
     else:
-        await handle_smart_response(ctx, message, result.content, is_question=False)
+        await handle_smart_response(
+            ctx, message, result.content, is_question=False, last_exchanges=last_exchanges
+        )
 
 
 async def handle_greeting(message: Message) -> None:
@@ -99,6 +106,7 @@ async def handle_smart_response(
     text: str,
     *,
     is_question: bool,
+    last_exchanges: dict[int, LastExchange] | None = None,
 ) -> None:
     """Generate a vault-context-aware response using the LLM."""
     routing_cfg = ctx.settings.routing
@@ -127,6 +135,15 @@ async def handle_smart_response(
             max_tokens=routing_cfg.chat_max_tokens,
             system=system,
         )
+        if last_exchanges is not None:
+            user_id = message.from_user.id if message.from_user else 0
+            from vaultmind.bot.handlers.bookmark import LastExchange as _LastExchange
+
+            last_exchanges[user_id] = _LastExchange(
+                query=text,
+                response=response.text,
+                timestamp=time.monotonic(),
+            )
         for chunk in _split_message(response.text, max_len=4000):
             await message.answer(chunk, parse_mode="Markdown")
     except LLMError as e:

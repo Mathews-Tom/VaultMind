@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from vaultmind.bot.handlers.utils import _is_authorized, _resolve_note_path, _split_message
+from vaultmind.bot.formatter import TelegramFormatter
+from vaultmind.bot.handlers.utils import _is_authorized, _resolve_note_path
 from vaultmind.bot.sanitize import sanitize_path
 
 if TYPE_CHECKING:
@@ -27,14 +28,12 @@ async def handle_read(ctx: HandlerContext, message: Message, query: str) -> None
     filepath = _resolve_note_path(ctx, query)
     if filepath is None:
         await message.answer(
-            f"Note not found: `{query}`\nProvide a path relative to vault root, or a search term.",
-            parse_mode="Markdown",
+            f"Note not found: <code>{query}</code>\n"
+            "Provide a path relative to vault root, or a search term.",
+            parse_mode="HTML",
         )
         return
 
-    content = filepath.read_text(encoding="utf-8")
-    rel_path = filepath.relative_to(ctx.vault_root)
-    header = f"\U0001f4d6 **{rel_path}**\n\n"
-
-    for chunk in _split_message(header + content, max_len=4000):
-        await message.answer(chunk, parse_mode="Markdown")
+    note = ctx.parser.parse_file(filepath)
+    formatted = TelegramFormatter.format_note(note)
+    await message.answer(formatted, parse_mode="HTML")
