@@ -8,6 +8,7 @@ from vaultmind.bot.handlers.capture import handle_capture
 from vaultmind.bot.handlers.context import HandlerContext
 from vaultmind.bot.handlers.daily import handle_daily
 from vaultmind.bot.handlers.delete import handle_delete, handle_delete_callback
+from vaultmind.bot.handlers.duplicates import handle_duplicates
 from vaultmind.bot.handlers.edit import handle_edit, handle_edit_callback
 from vaultmind.bot.handlers.graph import handle_graph
 from vaultmind.bot.handlers.health import handle_health
@@ -22,6 +23,7 @@ from vaultmind.bot.handlers.recall import handle_recall
 from vaultmind.bot.handlers.review import handle_review
 from vaultmind.bot.handlers.routing import handle_greeting, handle_message, handle_smart_response
 from vaultmind.bot.handlers.stats import handle_stats
+from vaultmind.bot.handlers.suggestions import handle_suggestions
 from vaultmind.bot.handlers.think import handle_think
 from vaultmind.bot.handlers.voice import handle_voice
 
@@ -31,6 +33,8 @@ if TYPE_CHECKING:
     from vaultmind.bot.thinking import ThinkingPartner
     from vaultmind.config import Settings
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
+    from vaultmind.indexer.duplicate_detector import DuplicateDetector
+    from vaultmind.indexer.note_suggester import NoteSuggester
     from vaultmind.indexer.store import VaultStore
     from vaultmind.llm.client import LLMClient
     from vaultmind.vault.parser import VaultParser
@@ -47,6 +51,8 @@ class CommandHandlers:
         parser: VaultParser,
         thinking: ThinkingPartner,
         llm_client: LLMClient,
+        duplicate_detector: DuplicateDetector | None = None,
+        note_suggester: NoteSuggester | None = None,
     ) -> None:
         self._ctx = HandlerContext(
             settings=settings,
@@ -57,6 +63,8 @@ class CommandHandlers:
             llm_client=llm_client,
             vault_root=settings.vault.path,
         )
+        self._duplicate_detector = duplicate_detector
+        self._note_suggester = note_suggester
         self._pending_edits: dict[int, dict[str, str]] = {}
 
     # --- Delegated properties for backward compat (used by tests) ---
@@ -156,6 +164,18 @@ class CommandHandlers:
 
     async def handle_voice(self, message: Message) -> None:
         await handle_voice(self._ctx, message)
+
+    async def handle_duplicates(self, message: Message, query: str) -> None:
+        if self._duplicate_detector is None:
+            await message.answer("Duplicate detection is not enabled.")
+            return
+        await handle_duplicates(self._ctx, message, query, self._duplicate_detector)
+
+    async def handle_suggestions(self, message: Message, query: str) -> None:
+        if self._note_suggester is None:
+            await message.answer("Note suggestions are not enabled.")
+            return
+        await handle_suggestions(self._ctx, message, query, self._note_suggester)
 
     # --- Backward-compat methods (used by tests) ---
 

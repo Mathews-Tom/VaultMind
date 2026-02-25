@@ -8,8 +8,8 @@ AI-powered personal knowledge management built on Obsidian. Turns an Obsidian va
 
 ```
 src/vaultmind/
-├── vault/       # Markdown parser, models, file watcher, path security
-├── indexer/     # Embedding pipeline + ChromaDB vector store + embedding cache
+├── vault/       # Markdown parser, models, file watcher, event bus, path security
+├── indexer/     # Embedding pipeline + ChromaDB vector store + embedding cache + duplicate detection
 ├── graph/       # NetworkX knowledge graph + LLM entity extraction
 ├── bot/         # Telegram bot (aiogram 3.x) — commands, router, thinking partner
 │   ├── commands.py      # Thin facade delegating to handlers/ package
@@ -26,7 +26,7 @@ src/vaultmind/
 │   ├── client.py        # LLMClient Protocol, Message, LLMResponse, factory
 │   └── providers/       # Anthropic, OpenAI, Gemini, Ollama implementations
 ├── mcp/         # MCP server for Claude Desktop/Code integration
-├── config.py    # Pydantic Settings — TOML + env vars (incl. RoutingConfig)
+├── config.py    # Pydantic Settings — TOML + env vars (incl. WatchConfig, RoutingConfig)
 └── cli.py       # Click CLI entry point
 ```
 
@@ -35,7 +35,11 @@ src/vaultmind/
 ```bash
 uv run vaultmind init          # Create vault folder structure
 uv run vaultmind index         # Full vault index into ChromaDB
-uv run vaultmind bot           # Start Telegram bot
+uv run vaultmind watch         # Watch vault, incrementally re-index on change
+uv run vaultmind watch --graph # Watch + batched graph re-extraction
+uv run vaultmind scan-duplicates # Scan vault for duplicate/merge candidates
+uv run vaultmind suggest-links   # Scan vault for link suggestions between notes
+uv run vaultmind bot           # Start Telegram bot (includes watch mode + duplicate detection + suggestions)
 uv run vaultmind graph-build   # Build knowledge graph
 uv run vaultmind graph-report  # Generate graph analytics
 uv run vaultmind mcp-serve     # Start MCP server
@@ -98,4 +102,8 @@ The `llm/` package uses a `Protocol`-based abstraction. Gemini and Ollama reuse 
 - Embedding cache (`indexer/embedding_cache.py`) — SQLite-backed, content-hash keyed with `(content_hash, provider, model)` composite key, eliminates redundant API calls during re-indexing
 - Bot handlers decomposed into `handlers/` package — `HandlerContext` dataclass shared state, `commands.py` is a thin facade preserving the public interface
 - Input sanitization (`bot/sanitize.py`) — null byte stripping, length limits per operation, log-only injection detection (never blocks)
+- Incremental watch mode (`vault/watch_handler.py`) — two-stage hash stability check eliminates partial-write bugs, debounce coalesces rapid Obsidian saves, async event bus (`vault/events.py`) decouples downstream consumers (duplicate detection, suggestions) from the watcher
+- Graph re-extraction defaults to False in watch mode — it's an LLM call per note; when enabled, changes are batched on a timer (`batch_graph_interval_seconds`) instead of per-save
+- Semantic duplicate detection (`indexer/duplicate_detector.py`) — reuses existing ChromaDB embeddings (zero additional API cost), classifies matches into bands: duplicate (≥92%), merge (80–92%). Subscribes to event bus for automatic fire-and-forget detection on every index update
+- Context-aware note suggestions (`indexer/note_suggester.py`) — composite scoring: vector similarity (0.70–0.80 band) + shared graph entities (entity_weight=0.1) + graph path distance (graph_weight=0.05). Operates below duplicate/merge thresholds with clean band separation. Available via `/suggest` command, `suggest_links` MCP tool, and `suggest-links` CLI
 - posthog pinned to `<4` — chromadb uses the 3-arg `capture()` API removed in posthog 4.x+

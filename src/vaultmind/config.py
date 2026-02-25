@@ -112,6 +112,31 @@ class RoutingConfig(BaseSettings):
     capture_all: bool = False  # Escape hatch: route all text to capture
 
 
+class WatchConfig(BaseSettings):
+    """Incremental watch mode configuration."""
+
+    debounce_ms: int = 500
+    hash_stability_check: bool = True
+    reextract_graph: bool = False
+    batch_graph_interval_seconds: int = 300
+
+
+class DuplicateDetectionConfig(BaseSettings):
+    """Semantic duplicate detection configuration."""
+
+    enabled: bool = True
+    min_content_length: int = 100
+
+
+class NoteSuggestionsConfig(BaseSettings):
+    """Context-aware note suggestions configuration."""
+
+    enabled: bool = True
+    min_content_length: int = 100
+    entity_weight: float = 0.1
+    graph_weight: float = 0.05
+
+
 class MCPConfig(BaseSettings):
     """MCP server configuration."""
 
@@ -138,6 +163,9 @@ class Settings(BaseSettings):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    watch: WatchConfig = Field(default_factory=WatchConfig)
+    duplicate_detection: DuplicateDetectionConfig = Field(default_factory=DuplicateDetectionConfig)
+    note_suggestions: NoteSuggestionsConfig = Field(default_factory=NoteSuggestionsConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     # API keys — always from env vars

@@ -54,6 +54,22 @@ vault_context_enabled = true
 max_context_chunks = 4
 capture_all = false               # true = old behavior (all text → capture)
 
+[watch]
+debounce_ms = 500
+hash_stability_check = true
+reextract_graph = false              # LLM call per note — opt-in only
+batch_graph_interval_seconds = 300   # 5 min batch window when enabled
+
+[duplicate_detection]
+enabled = true
+min_content_length = 100             # skip very short notes
+
+[note_suggestions]
+enabled = true
+min_content_length = 100
+entity_weight = 0.1                  # boost per shared graph entity
+graph_weight = 0.05                  # boost from graph path proximity
+
 [mcp]
 enabled = false
 host = "127.0.0.1"

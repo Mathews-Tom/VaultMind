@@ -48,6 +48,8 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "• `/read <note>` → read a note\n"
             "• `/edit <note> <instruction>` → edit a note\n"
             "• `/delete <note>` → delete a note\n"
+            "• `/suggest <note>` → find notes to link\n"
+            "• `/duplicates <note>` → find duplicate/similar notes\n"
             "• `/review` → weekly review prompts\n"
             "• `/health` → system health check\n"
             "• `/stats` → vault & graph statistics",
@@ -129,6 +131,28 @@ def register_handlers(handlers: CommandHandlers) -> None:
             return
         await handlers.handle_edit(message, args)
 
+    @router.message(Command("suggest"))
+    async def cmd_suggest(message: Message) -> None:
+        query = message.text.replace("/suggest", "", 1).strip() if message.text else ""
+        if not query:
+            await message.answer(
+                "Usage: `/suggest <note path or search term>`",
+                parse_mode="Markdown",
+            )
+            return
+        await handlers.handle_suggestions(message, query)
+
+    @router.message(Command("duplicates"))
+    async def cmd_duplicates(message: Message) -> None:
+        query = message.text.replace("/duplicates", "", 1).strip() if message.text else ""
+        if not query:
+            await message.answer(
+                "Usage: `/duplicates <note path or search term>`",
+                parse_mode="Markdown",
+            )
+            return
+        await handlers.handle_duplicates(message, query)
+
     @router.message(Command("health"))
     async def cmd_health(message: Message) -> None:
         await handlers.handle_health(message)
@@ -157,6 +181,8 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "• `/edit <note> <instruction>` — AI-assisted edit with "
             "confirmation\n"
             "• `/delete <note>` — delete with confirmation\n"
+            "• `/suggest <note>` — find notes worth linking\n"
+            "• `/duplicates <note>` — find similar/duplicate notes\n"
             "• `/daily` — get or create today's daily note\n\n"
             "*Thinking*\n"
             "• `/think <topic>` — start a thinking partner session\n"
