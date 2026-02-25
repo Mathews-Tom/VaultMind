@@ -32,6 +32,8 @@ def create_mcp_server(
     store: VaultStore,
     graph: KnowledgeGraph,
     parser: VaultParser,
+    duplicate_detector: object | None = None,
+    note_suggester: object | None = None,
 ) -> Any:  # Returns mcp.server.Server (optional dep)
     """Create and configure the MCP server with vault tools.
 
@@ -170,6 +172,52 @@ def create_mcp_server(
                 },
             ),
             Tool(
+                name="find_duplicates",
+                description=(
+                    "Find semantically similar or duplicate notes for a given note."
+                    " Returns matches classified as 'duplicate' (≥92% similar)"
+                    " or 'merge' (80-92% similar)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "note_path": {
+                            "type": "string",
+                            "description": "Note path relative to vault root",
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of matches (default 10)",
+                            "default": 10,
+                        },
+                    },
+                    "required": ["note_path"],
+                },
+            ),
+            Tool(
+                name="suggest_links",
+                description=(
+                    "Find notes that should be linked to a given note."
+                    " Uses composite scoring: semantic similarity,"
+                    " shared graph entities, and graph distance."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "note_path": {
+                            "type": "string",
+                            "description": "Note path relative to vault root",
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of suggestions (default 5)",
+                            "default": 5,
+                        },
+                    },
+                    "required": ["note_path"],
+                },
+            ),
+            Tool(
                 name="capture",
                 description="Quick-capture a note to the vault inbox.",
                 inputSchema={
@@ -204,6 +252,8 @@ def create_mcp_server(
                 store,
                 graph,
                 parser,
+                duplicate_detector=duplicate_detector,
+                note_suggester=note_suggester,
             )
             text = json.dumps(result, indent=2, default=str)
             return [TextContent(type="text", text=text)]
@@ -222,6 +272,9 @@ def _dispatch_tool(
     store: VaultStore,
     graph: KnowledgeGraph,
     parser: VaultParser,
+    *,
+    duplicate_detector: object | None = None,
+    note_suggester: object | None = None,
 ) -> dict[str, Any]:
     """Route tool calls to the appropriate handler."""
 
@@ -283,6 +336,68 @@ def _dispatch_tool(
         if path:
             return {"path": path, "length": len(path) - 1}
         return {"path": None, "message": "No path found between entities"}
+
+    elif name == "find_duplicates":
+        if duplicate_detector is None:
+            return {"error": "Duplicate detection is not configured"}
+        try:
+            filepath = validate_vault_path(args["note_path"], vault_path)
+        except PathTraversalError as e:
+            return {"error": f"Path not allowed: {e.user_path}"}
+        if not filepath.exists():
+            return {"error": f"Note not found: {args['note_path']}"}
+        note = parser.parse_file(filepath)
+        from vaultmind.indexer.duplicate_detector import DuplicateDetector
+
+        assert isinstance(duplicate_detector, DuplicateDetector)
+        matches = duplicate_detector.find_duplicates(
+            note, max_results=args.get("max_results", 10)
+        )
+        return {
+            "note_path": args["note_path"],
+            "matches": [
+                {
+                    "path": m.match_path,
+                    "title": m.match_title,
+                    "similarity": m.similarity,
+                    "type": m.match_type.value,
+                }
+                for m in matches
+            ],
+            "count": len(matches),
+        }
+
+    elif name == "suggest_links":
+        if note_suggester is None:
+            return {"error": "Note suggestions are not configured"}
+        try:
+            filepath = validate_vault_path(args["note_path"], vault_path)
+        except PathTraversalError as e:
+            return {"error": f"Path not allowed: {e.user_path}"}
+        if not filepath.exists():
+            return {"error": f"Note not found: {args['note_path']}"}
+        note = parser.parse_file(filepath)
+        from vaultmind.indexer.note_suggester import NoteSuggester
+
+        assert isinstance(note_suggester, NoteSuggester)
+        suggestions = note_suggester.suggest_links(
+            note, max_results=args.get("max_results", 5)
+        )
+        return {
+            "note_path": args["note_path"],
+            "suggestions": [
+                {
+                    "path": s.target_path,
+                    "title": s.target_title,
+                    "similarity": s.similarity,
+                    "shared_entities": s.shared_entities,
+                    "graph_distance": s.graph_distance,
+                    "composite_score": s.composite_score,
+                }
+                for s in suggestions
+            ],
+            "count": len(suggestions),
+        }
 
     elif name == "capture":
         from datetime import datetime

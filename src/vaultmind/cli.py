@@ -136,6 +136,129 @@ def init(ctx: click.Context) -> None:
     settings.graph.persist_path.parent.mkdir(parents=True, exist_ok=True)
 
 
+@cli.command("suggest-links")
+@click.pass_context
+def suggest_links(ctx: click.Context) -> None:
+    """Scan vault for link suggestions between notes."""
+    from vaultmind.config import load_settings
+    from vaultmind.graph import KnowledgeGraph
+    from vaultmind.indexer import Embedder, VaultStore
+    from vaultmind.indexer.note_suggester import NoteSuggester
+    from vaultmind.vault import VaultParser
+
+    settings = load_settings(ctx.obj.get("config_path"))
+
+    is_openai = settings.embedding.provider == "openai"
+    api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
+    if not api_key:
+        console.print(
+            "[red]✗[/red] Embedding API key not set."
+            " Set VAULTMIND_OPENAI_API_KEY or VAULTMIND_VOYAGE_API_KEY."
+        )
+        sys.exit(1)
+
+    cache = _create_embedding_cache(settings)
+    parser = VaultParser(settings.vault)
+    embedder = Embedder(settings.embedding, api_key, cache=cache)
+    store = VaultStore(settings.chroma, embedder)
+
+    graph: KnowledgeGraph | None = None
+    if settings.graph.persist_path.exists():
+        graph = KnowledgeGraph(settings.graph)
+
+    suggester = NoteSuggester(settings.note_suggestions, store, graph=graph)
+
+    with console.status("Parsing vault..."):
+        notes = parser.iter_notes()
+
+    with console.status(f"Finding link suggestions for {len(notes)} notes..."):
+        results = suggester.scan_vault(notes)
+
+    if not results:
+        console.print("[green]✓[/green] No link suggestions found.")
+    else:
+        total = sum(len(v) for v in results.values())
+        for note_path, suggestions in sorted(results.items()):
+            console.print(f"\n[bold]{note_path}[/bold]")
+            for s in suggestions:
+                extras = []
+                if s.shared_entities:
+                    extras.append(f"shared: {', '.join(s.shared_entities[:3])}")
+                if s.graph_distance is not None:
+                    extras.append(f"graph: {s.graph_distance}")
+                extra_str = f" ({', '.join(extras)})" if extras else ""
+                console.print(
+                    f"  [cyan]link[/cyan] (score {s.composite_score:.2f},"
+                    f" sim {s.similarity:.0%}): {s.target_path}{extra_str}"
+                )
+
+        console.print(
+            f"\n[bold]Summary:[/bold] {len(results)} notes with suggestions"
+            f" ({total} total links)"
+        )
+
+    if cache is not None:
+        cache.close()
+
+
+@cli.command("scan-duplicates")
+@click.pass_context
+def scan_duplicates(ctx: click.Context) -> None:
+    """Scan vault for semantic duplicates and merge candidates."""
+    from vaultmind.config import load_settings
+    from vaultmind.indexer import Embedder, VaultStore
+    from vaultmind.indexer.duplicate_detector import DuplicateDetector, MatchType
+    from vaultmind.vault import VaultParser
+
+    settings = load_settings(ctx.obj.get("config_path"))
+
+    is_openai = settings.embedding.provider == "openai"
+    api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
+    if not api_key:
+        console.print(
+            "[red]✗[/red] Embedding API key not set."
+            " Set VAULTMIND_OPENAI_API_KEY or VAULTMIND_VOYAGE_API_KEY."
+        )
+        sys.exit(1)
+
+    cache = _create_embedding_cache(settings)
+    parser = VaultParser(settings.vault)
+    embedder = Embedder(settings.embedding, api_key, cache=cache)
+    store = VaultStore(settings.chroma, embedder)
+    detector = DuplicateDetector(settings.duplicate_detection, store)
+
+    with console.status("Parsing vault..."):
+        notes = parser.iter_notes()
+
+    with console.status(f"Scanning {len(notes)} notes for duplicates..."):
+        results = detector.scan_vault(notes)
+
+    if not results:
+        console.print("[green]✓[/green] No duplicates or merge candidates found.")
+    else:
+        total_dup = 0
+        total_merge = 0
+        for note_path, matches in sorted(results.items()):
+            dups = [m for m in matches if m.match_type == MatchType.DUPLICATE]
+            merges = [m for m in matches if m.match_type == MatchType.MERGE]
+            total_dup += len(dups)
+            total_merge += len(merges)
+
+            console.print(f"\n[bold]{note_path}[/bold]")
+            for m in dups:
+                console.print(f"  [red]duplicate[/red] ({m.similarity:.0%}): {m.match_path}")
+            for m in merges:
+                console.print(f"  [yellow]merge[/yellow] ({m.similarity:.0%}): {m.match_path}")
+
+        console.print(
+            f"\n[bold]Summary:[/bold] {len(results)} notes with matches"
+            f" ({total_dup} duplicates, {total_merge} merge candidates)"
+        )
+
+    if cache is not None:
+        cache.close()
+
+
 @cli.command()
 @click.pass_context
 def index(ctx: click.Context) -> None:
@@ -221,6 +344,20 @@ def bot(ctx: click.Context) -> None:
         session_store=session_store,
     )
 
+    # Duplicate detection
+    from vaultmind.indexer.duplicate_detector import DuplicateDetector
+
+    detector: DuplicateDetector | None = None
+    if settings.duplicate_detection.enabled:
+        detector = DuplicateDetector(settings.duplicate_detection, store)
+
+    # Note suggestions
+    from vaultmind.indexer.note_suggester import NoteSuggester
+
+    suggester: NoteSuggester | None = None
+    if settings.note_suggestions.enabled:
+        suggester = NoteSuggester(settings.note_suggestions, store, graph=graph)
+
     handlers = CommandHandlers(
         settings=settings,
         store=store,
@@ -228,15 +365,152 @@ def bot(ctx: click.Context) -> None:
         parser=parser,
         thinking=thinking,
         llm_client=llm_client,
+        duplicate_detector=detector,
+        note_suggester=suggester,
     )
 
     tg_bot, dp = create_bot(settings.telegram.bot_token)
     register_handlers(handlers)
 
+    # Wire up incremental watch mode
+    from vaultmind.vault.events import NoteCreatedEvent, NoteModifiedEvent, VaultEventBus
+    from vaultmind.vault.watch_handler import IncrementalWatchHandler
+    from vaultmind.vault.watcher import VaultWatcher
+
+    event_bus = VaultEventBus()
+
+    # Subscribe duplicate detection and note suggestions to watch events
+    if detector is not None:
+        event_bus.subscribe(NoteCreatedEvent, detector.on_note_changed)  # type: ignore[arg-type]
+        event_bus.subscribe(NoteModifiedEvent, detector.on_note_changed)  # type: ignore[arg-type]
+    if suggester is not None:
+        event_bus.subscribe(NoteCreatedEvent, suggester.on_note_changed)  # type: ignore[arg-type]
+        event_bus.subscribe(NoteModifiedEvent, suggester.on_note_changed)  # type: ignore[arg-type]
+
+    watch_handler = IncrementalWatchHandler(
+        config=settings.watch,
+        parser=parser,
+        store=store,
+        event_bus=event_bus,
+    )
+    watcher = VaultWatcher(config=settings.vault, on_change=watch_handler.handle_change)
+
     provider = settings.llm.provider
     model = settings.llm.thinking_model
     console.print(f"[green]✓[/green] Starting Telegram bot (LLM: {provider}/{model})...")
-    asyncio.run(dp.start_polling(tg_bot))
+    console.print(f"  Watch mode: debounce={settings.watch.debounce_ms}ms")
+
+    async def _run_bot_with_watcher() -> None:
+        watcher.start()
+        try:
+            await dp.start_polling(tg_bot)
+        finally:
+            watcher.stop()
+
+    asyncio.run(_run_bot_with_watcher())
+
+
+@cli.command()
+@click.option("--graph", "with_graph", is_flag=True, help="Enable graph re-extraction")
+@click.pass_context
+def watch(ctx: click.Context, with_graph: bool) -> None:
+    """Watch vault for changes and incrementally re-index."""
+    from vaultmind.config import load_settings
+    from vaultmind.indexer import Embedder, VaultStore
+    from vaultmind.vault import VaultParser
+    from vaultmind.vault.events import VaultEventBus
+    from vaultmind.vault.watch_handler import IncrementalWatchHandler
+    from vaultmind.vault.watcher import VaultWatcher
+
+    settings = load_settings(ctx.obj.get("config_path"))
+
+    is_openai = settings.embedding.provider == "openai"
+    embed_key = settings.openai_api_key if is_openai else settings.voyage_api_key
+    if not embed_key:
+        console.print(
+            "[red]✗[/red] Embedding API key not set."
+            " Set VAULTMIND_OPENAI_API_KEY or VAULTMIND_VOYAGE_API_KEY."
+        )
+        sys.exit(1)
+
+    cache = _create_embedding_cache(settings)
+    parser = VaultParser(settings.vault)
+    embedder = Embedder(settings.embedding, embed_key, cache=cache)
+    store = VaultStore(settings.chroma, embedder)
+
+    event_bus = VaultEventBus()
+
+    # Duplicate detection and note suggestions
+    from vaultmind.indexer.duplicate_detector import DuplicateDetector
+    from vaultmind.indexer.note_suggester import NoteSuggester
+    from vaultmind.vault.events import NoteCreatedEvent, NoteModifiedEvent
+
+    if settings.duplicate_detection.enabled:
+        detector = DuplicateDetector(settings.duplicate_detection, store)
+        event_bus.subscribe(NoteCreatedEvent, detector.on_note_changed)  # type: ignore[arg-type]
+        event_bus.subscribe(NoteModifiedEvent, detector.on_note_changed)  # type: ignore[arg-type]
+
+    # Optional graph re-extraction
+    graph = None
+    extractor = None
+    watch_config = settings.watch
+    if with_graph:
+        from vaultmind.config import WatchConfig
+        from vaultmind.graph import EntityExtractor, KnowledgeGraph
+
+        _require_llm_key(settings)
+        graph = KnowledgeGraph(settings.graph)
+        extraction_model = settings.graph.extraction_model or settings.llm.thinking_model
+        llm_client = _create_llm_client(settings)
+        extractor = EntityExtractor(settings.graph, llm_client, model=extraction_model)
+        # Force reextract_graph on since user explicitly opted in via --graph
+        watch_config = WatchConfig(
+            debounce_ms=settings.watch.debounce_ms,
+            hash_stability_check=settings.watch.hash_stability_check,
+            reextract_graph=True,
+            batch_graph_interval_seconds=settings.watch.batch_graph_interval_seconds,
+        )
+
+    # Note suggestions (graph available only if --graph was used)
+    if settings.note_suggestions.enabled:
+        watch_suggester = NoteSuggester(settings.note_suggestions, store, graph=graph)
+        event_bus.subscribe(NoteCreatedEvent, watch_suggester.on_note_changed)  # type: ignore[arg-type]
+        event_bus.subscribe(NoteModifiedEvent, watch_suggester.on_note_changed)  # type: ignore[arg-type]
+
+    handler = IncrementalWatchHandler(
+        config=watch_config,
+        parser=parser,
+        store=store,
+        event_bus=event_bus,
+        graph=graph,
+        extractor=extractor,
+    )
+    watcher = VaultWatcher(config=settings.vault, on_change=handler.handle_change)
+
+    console.print(f"[green]✓[/green] Watching {settings.vault.path}")
+    console.print(f"  Debounce: {watch_config.debounce_ms}ms")
+    console.print(f"  Hash stability: {watch_config.hash_stability_check}")
+    console.print(f"  Graph re-extraction: {watch_config.reextract_graph}")
+
+    async def _run_watch() -> None:
+        watcher.start()
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            watcher.stop()
+            if cache is not None:
+                cache.close()
+
+    try:
+        asyncio.run(_run_watch())
+    except KeyboardInterrupt:
+        watcher.stop()
+        if cache is not None:
+            cache.close()
+        console.print("\n[yellow]Watcher stopped.[/yellow]")
 
 
 @cli.command("graph-build")
