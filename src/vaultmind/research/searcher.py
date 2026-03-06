@@ -49,7 +49,8 @@ def _run_yt_search(query: str, max_results: int) -> list[SearchResult]:
             SearchResult(
                 video_id=video_id,
                 title=data.get("title", "Unknown"),
-                url=data.get("url", "") or data.get("webpage_url", "")
+                url=data.get("url", "")
+                or data.get("webpage_url", "")
                 or f"https://www.youtube.com/watch?v={video_id}",
                 channel=data.get("channel", "") or data.get("uploader", "Unknown"),
                 duration_seconds=int(data.get("duration", 0) or 0),

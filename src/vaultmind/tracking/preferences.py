@@ -9,14 +9,68 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
-_STOP_WORDS = frozenset({
-    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "is", "it", "this", "that", "are", "was",
-    "were", "be", "been", "have", "has", "had", "do", "does", "did", "will",
-    "would", "could", "should", "may", "might", "can", "not", "no", "yes",
-    "all", "each", "every", "both", "few", "more", "most", "some", "any",
-    "how", "what", "which", "who", "when", "where", "why", "than", "then",
-})
+_STOP_WORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "is",
+        "it",
+        "this",
+        "that",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "can",
+        "not",
+        "no",
+        "yes",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "some",
+        "any",
+        "how",
+        "what",
+        "which",
+        "who",
+        "when",
+        "where",
+        "why",
+        "than",
+        "then",
+    }
+)
 
 
 class InteractionType(StrEnum):
@@ -62,12 +116,8 @@ class PreferenceStore:
             )
             """
         )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_type ON interactions(interaction_type)"
-        )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_timestamp ON interactions(timestamp)"
-        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_type ON interactions(interaction_type)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON interactions(timestamp)")
         self._conn.commit()
 
     def record(self, interaction: Interaction) -> None:
@@ -147,8 +197,7 @@ class PreferenceStore:
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT interaction_type, COUNT(*) FROM interactions "
-                "GROUP BY interaction_type"
+                "SELECT interaction_type, COUNT(*) FROM interactions GROUP BY interaction_type"
             ).fetchall()
 
         return {InteractionType(row[0]): row[1] for row in rows}
@@ -172,9 +221,7 @@ class PreferenceStore:
         ).fetchall()
         return [(row[0], row[1]) for row in rows]
 
-    def get_top_tags(
-        self, approved: bool = True, limit: int = 20
-    ) -> list[tuple[str, int]]:
+    def get_top_tags(self, approved: bool = True, limit: int = 20) -> list[tuple[str, int]]:
         """Most frequently approved or rejected tags."""
         tag_type = InteractionType.TAG_APPROVED if approved else InteractionType.TAG_REJECTED
         rows = self._conn.execute(
@@ -203,9 +250,7 @@ class PreferenceStore:
         counter: Counter[str] = Counter()
         for (content,) in rows:
             words = content.lower().split()
-            counter.update(
-                w for w in words if len(w) >= 4 and w not in _STOP_WORDS
-            )
+            counter.update(w for w in words if len(w) >= 4 and w not in _STOP_WORDS)
 
         return counter.most_common(limit)
 

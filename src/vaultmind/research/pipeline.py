@@ -122,12 +122,14 @@ async def run_research_pipeline(
                 languages=[config.youtube_language],
             )
             transcript = " ".join(s["text"] for s in segments)
-            sources.append({
-                "title": result.title,
-                "content": transcript,
-                "url": result.url,
-                "video_id": result.video_id,
-            })
+            sources.append(
+                {
+                    "title": result.title,
+                    "content": transcript,
+                    "url": result.url,
+                    "video_id": result.video_id,
+                }
+            )
             logger.info("Fetched transcript: %s", result.title)
         except Exception:
             logger.warning("Could not fetch transcript for: %s", result.title)
@@ -170,7 +172,7 @@ async def run_research_pipeline(
 ---
 title: "Research: {query}"
 tags: [research-summary]
-sources: [{', '.join(s['title'] for s in sources)}]
+sources: [{", ".join(s["title"] for s in sources)}]
 created: {now}
 ---
 

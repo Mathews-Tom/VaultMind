@@ -947,8 +947,7 @@ def learn(ctx: click.Context, days: int, save_report: bool) -> None:
 
     if not db_path.exists():
         console.print(
-            "[yellow]No preference data yet.[/yellow]"
-            " Use the bot to generate interactions."
+            "[yellow]No preference data yet.[/yellow] Use the bot to generate interactions."
         )
         return
 

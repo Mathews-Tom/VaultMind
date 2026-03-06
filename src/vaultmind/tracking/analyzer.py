@@ -99,8 +99,7 @@ def _generate_recommendations(
     if active_hours:
         top_hour = active_hours[0]
         recs.append(
-            f"Your most active hour is {top_hour}:00 "
-            f"-- digest delivery could be scheduled then."
+            f"Your most active hour is {top_hour}:00 -- digest delivery could be scheduled then."
         )
 
     # Suggestion acceptance rate
@@ -185,9 +184,7 @@ def generate_preference_report(insights: PreferenceInsights) -> str:
         lines.append("")
         lines.append("| Type | Count |")
         lines.append("|------|-------|")
-        for itype, count in sorted(
-            insights.interaction_counts.items(), key=lambda x: -x[1]
-        ):
+        for itype, count in sorted(insights.interaction_counts.items(), key=lambda x: -x[1]):
             lines.append(f"| {itype} | {count} |")
         lines.append("")
 

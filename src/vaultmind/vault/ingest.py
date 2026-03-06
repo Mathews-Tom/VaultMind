@@ -42,9 +42,7 @@ _YT_PATTERNS = [
         r"(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/(?:embed|shorts|live)/)"
         r"([a-zA-Z0-9_-]{11})"
     ),
-    re.compile(
-        r"(?:m\.youtube\.com|music\.youtube\.com)/watch\?.*v=([a-zA-Z0-9_-]{11})"
-    ),
+    re.compile(r"(?:m\.youtube\.com|music\.youtube\.com)/watch\?.*v=([a-zA-Z0-9_-]{11})"),
 ]
 
 

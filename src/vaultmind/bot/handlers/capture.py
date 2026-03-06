@@ -64,9 +64,7 @@ async def handle_capture(ctx: HandlerContext, message: Message, text: str) -> No
                     url=result.url,
                     metadata=result.metadata,
                 )
-            note_path = create_vault_note(
-                result, ctx.vault_root, ctx.settings.ingest.inbox_folder
-            )
+            note_path = create_vault_note(result, ctx.vault_root, ctx.settings.ingest.inbox_folder)
             note = await asyncio.to_thread(ctx.parser.parse_file, note_path)
             await asyncio.to_thread(ctx.store.index_single_note, note, ctx.parser)
             rel = note_path.relative_to(ctx.vault_root)
