@@ -177,6 +177,30 @@ class VoiceConfig(BaseSettings):
     language: str = ""  # Empty = auto-detect
 
 
+class IngestConfig(BaseSettings):
+    """URL ingestion configuration."""
+
+    enabled: bool = True
+    youtube_language: str = "en"
+    max_content_length: int = 100_000
+    inbox_folder: str = "00-inbox"
+
+
+class ResearchConfig(BaseSettings):
+    """Research pipeline configuration."""
+
+    max_results: int = 5
+    output_folder: str = "research"
+    youtube_language: str = "en"
+
+
+class TrackingConfig(BaseSettings):
+    """User preference tracking configuration."""
+
+    enabled: bool = True
+    db_path: str = ""  # Empty = default (~/.vaultmind/data/preferences.db)
+
+
 class MCPConfig(BaseSettings):
     """MCP server configuration."""
 
@@ -210,6 +234,9 @@ class Settings(BaseSettings):
     digest: DigestConfig = Field(default_factory=DigestConfig)
     auto_tag: AutoTagConfig = Field(default_factory=AutoTagConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    ingest: IngestConfig = Field(default_factory=IngestConfig)
+    research: ResearchConfig = Field(default_factory=ResearchConfig)
+    tracking: TrackingConfig = Field(default_factory=TrackingConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     # API keys — always from env vars

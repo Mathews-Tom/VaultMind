@@ -860,6 +860,117 @@ def graph_report(ctx: click.Context) -> None:
     console.print(report)
 
 
+@cli.command()
+@click.argument("query")
+@click.option("--max-results", default=None, type=int, help="Override max results from config")
+@click.pass_context
+def research(ctx: click.Context, query: str, max_results: int | None) -> None:
+    """Run a research pipeline: search YouTube, fetch transcripts, analyze, create vault notes."""
+    from vaultmind.config import load_settings
+    from vaultmind.indexer import Embedder, VaultStore
+    from vaultmind.research.pipeline import ResearchConfig as PipelineConfig
+    from vaultmind.research.pipeline import run_research_pipeline
+    from vaultmind.vault import VaultParser
+
+    settings = load_settings(ctx.obj.get("config_path"))
+    _require_llm_key(settings)
+
+    is_openai = settings.embedding.provider == "openai"
+    embed_key = settings.openai_api_key if is_openai else settings.voyage_api_key
+    if not embed_key:
+        console.print(
+            "[red]✗[/red] Embedding API key not set."
+            " Set VAULTMIND_OPENAI_API_KEY or VAULTMIND_VOYAGE_API_KEY."
+        )
+        sys.exit(1)
+
+    cache = _create_embedding_cache(settings)
+    parser = VaultParser(settings.vault)
+    embedder = Embedder(settings.embedding, embed_key, cache=cache)
+    store = VaultStore(settings.chroma, embedder)
+    llm_client = _create_llm_client(settings)
+
+    pipeline_config = PipelineConfig(
+        max_results=max_results or settings.research.max_results,
+        output_folder=settings.research.output_folder,
+        youtube_language=settings.research.youtube_language,
+    )
+
+    model = settings.llm.thinking_model
+
+    async def _run() -> None:
+        with console.status(f"Researching: {query}..."):
+            result = await run_research_pipeline(
+                query=query,
+                vault_root=settings.vault.path,
+                llm_client=llm_client,
+                store=store,
+                parser=parser,
+                config=pipeline_config,
+                model=model,
+            )
+
+        console.print(f"\n[green]✓[/green] Research complete: {query}")
+        console.print(f"  Sources created: {len(result.sources_created)}")
+        for p in result.sources_created:
+            console.print(f"    {p.relative_to(settings.vault.path)}")
+        if result.summary_path.exists():
+            console.print(f"  Summary: {result.summary_path.relative_to(settings.vault.path)}")
+        console.print(f"\n[bold]Summary:[/bold] {result.analysis_summary}")
+
+    asyncio.run(_run())
+
+    if cache is not None:
+        cache.close()
+
+
+@cli.command()
+@click.option("--days", default=30, type=int, help="Analysis period in days")
+@click.option("--save", "save_report", is_flag=True, help="Save report to vault")
+@click.pass_context
+def learn(ctx: click.Context, days: int, save_report: bool) -> None:
+    """Analyze usage patterns and generate preference insights."""
+    from vaultmind.config import VAULTMIND_HOME, load_settings
+    from vaultmind.tracking import (
+        PreferenceStore,
+        analyze_preferences,
+        generate_preference_report,
+    )
+
+    settings = load_settings(ctx.obj.get("config_path"))
+
+    db_path = (
+        Path(settings.tracking.db_path)
+        if settings.tracking.db_path
+        else VAULTMIND_HOME / "data" / "preferences.db"
+    )
+
+    if not db_path.exists():
+        console.print(
+            "[yellow]No preference data yet.[/yellow] Use the bot to generate interactions."
+        )
+        return
+
+    store = PreferenceStore(db_path)
+    insights = analyze_preferences(store, days=days)
+    report = generate_preference_report(insights)
+
+    console.print(report)
+
+    if save_report:
+        report_path = settings.vault.path / settings.vault.meta_folder / "usage-insights.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
+        console.print(f"\n[green]✓[/green] Report saved to {report_path}")
+
+    if insights.recommendations:
+        console.print("\n[bold]Recommendations:[/bold]")
+        for rec in insights.recommendations:
+            console.print(f"  {rec}")
+
+    store.close()
+
+
 @cli.command("mcp-serve")
 @click.pass_context
 def mcp_serve(ctx: click.Context) -> None:

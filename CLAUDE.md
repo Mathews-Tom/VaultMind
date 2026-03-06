@@ -8,9 +8,11 @@ AI-powered personal knowledge management built on Obsidian. Turns an Obsidian va
 
 ```
 src/vaultmind/
-├── vault/       # Markdown parser, models, file watcher, event bus, path security
+├── vault/       # Markdown parser, models, file watcher, event bus, path security, URL ingestion
 ├── indexer/     # Embedding pipeline + ChromaDB vector store + embedding cache + duplicate detection + auto-tagging
 ├── graph/       # NetworkX knowledge graph + LLM entity extraction + graph maintenance
+├── research/    # External source search (YouTube) + LLM analysis + vault note pipeline
+├── tracking/    # SQLite-backed user preference tracking + usage analytics
 ├── bot/         # Telegram bot (aiogram 3.x) — commands, router, thinking partner
 │   ├── commands.py      # Thin facade delegating to handlers/ package
 │   ├── handlers/        # Decomposed handler modules (capture, recall, think, etc.)
@@ -46,8 +48,11 @@ uv run vaultmind graph-maintain # Prune stale refs + remove orphan entities
 uv run vaultmind graph-report   # Generate graph analytics
 uv run vaultmind auto-tag       # LLM-based tag suggestions (dry-run)
 uv run vaultmind auto-tag --apply # Apply suggested tags to frontmatter
-uv run vaultmind mcp-serve      # Start MCP server
-uv run vaultmind stats          # Show vault statistics
+uv run vaultmind research "query" # Search YouTube, analyze, create vault notes
+uv run vaultmind learn           # Analyze usage patterns, generate insights
+uv run vaultmind learn --save    # Save insights report to vault
+uv run vaultmind mcp-serve       # Start MCP server
+uv run vaultmind stats           # Show vault statistics
 ```
 
 ## Tech Stack
@@ -115,3 +120,6 @@ The `llm/` package uses a `Protocol`-based abstraction. Gemini and Ollama reuse 
 - Graph maintenance (`graph/maintenance.py`) — `GraphMaintainer` prunes stale source-note references, removes orphan entities, and subscribes to `NoteDeletedEvent` for incremental cleanup on note deletion
 - Auto-tagging (`indexer/auto_tagger.py`) — LLM classifies notes using existing vault tag vocabulary. New tags go to quarantine (`~/.vaultmind/data/tag_quarantine.json`) pending user approval. Default dry-run with `--apply` opt-in for frontmatter writes
 - Voice note capture (`bot/transcribe.py`) — OpenAI Whisper API transcription (uses existing `openai` dependency). Voice messages → transcription → route to capture (default) or question (if ends with `?`). Requires `VAULTMIND_OPENAI_API_KEY`
+- URL ingestion (`vault/ingest.py`) — detects URLs in capture text, fetches YouTube transcripts (via `youtube-transcript-api`) or article content (via urllib), creates vault notes with frontmatter, indexes immediately. Falls back to plain text capture on failure
+- Research pipeline (`research/pipeline.py`) — `vaultmind research "query"` searches YouTube via yt-dlp, fetches transcripts, creates individual source notes in `research/{query}/`, runs LLM comparative analysis, creates summary note with `[[wikilinks]]` to sources. All notes indexed in ChromaDB
+- Preference tracking (`tracking/preferences.py`) — SQLite-backed store at `~/.vaultmind/data/preferences.db` records user interactions (searches, captures, tag approvals/rejections, suggestion responses, URL ingests). `tracking/analyzer.py` generates insights: top searches, tag patterns, active hours, acceptance rates, actionable recommendations. `vaultmind learn` CLI command produces markdown report

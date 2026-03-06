@@ -98,6 +98,21 @@ enabled = true
 whisper_model = "whisper-1"
 language = ""                            # Empty = auto-detect
 
+[ingest]
+enabled = true
+youtube_language = "en"
+max_content_length = 100000
+inbox_folder = "00-inbox"
+
+[research]
+max_results = 5
+output_folder = "research"
+youtube_language = "en"
+
+[tracking]
+enabled = true
+db_path = ""                                # Empty = default ~/.vaultmind/data/preferences.db
+
 [mcp]
 enabled = false
 host = "127.0.0.1"
