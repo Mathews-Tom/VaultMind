@@ -1068,8 +1068,8 @@ def stats(ctx: click.Context, metadata_audit: bool) -> None:
 
         is_openai = settings.embedding.provider == "openai"
         api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
-        cache = _create_embedding_cache(settings)
-        embedder = Embedder(settings.embedding, api_key, cache=cache)
+        audit_cache = _create_embedding_cache(settings)
+        embedder = Embedder(settings.embedding, api_key, cache=audit_cache)
         store = VaultStore(settings.chroma, embedder)
 
         all_chunks = store._collection.get(include=["metadatas"])  # type: ignore[list-item]
@@ -1100,8 +1100,8 @@ def stats(ctx: click.Context, metadata_audit: bool) -> None:
                     " Features depending on this metadata may degrade.[/yellow]"
                 )
 
-        if cache is not None:
-            cache.close()
+        if audit_cache is not None:
+            audit_cache.close()
 
 
 if __name__ == "__main__":

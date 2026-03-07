@@ -234,7 +234,7 @@ class KnowledgeGraph:
             return nx.DiGraph()
         undirected = self._graph.to_undirected()
         ego = nx.ego_graph(undirected, node_id, radius=depth)
-        sub: nx.DiGraph = self._graph.subgraph(ego.nodes).copy()  # type: ignore[assignment]
+        sub = self._graph.subgraph(ego.nodes).copy()
         return sub
 
     def shortest_paths(
