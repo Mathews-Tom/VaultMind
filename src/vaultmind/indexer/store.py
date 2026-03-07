@@ -151,6 +151,33 @@ class VaultStore:
 
         return hits
 
+    def ranked_search(
+        self,
+        query: str,
+        n_results: int = 5,
+        where: dict[str, Any] | None = None,
+        ranking_enabled: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Semantic search with note-type-aware ranking.
+
+        Returns results sorted by ranked score instead of raw distance.
+        """
+        from vaultmind.indexer.ranking import rank_results
+
+        hits = self.search(query, n_results=n_results, where=where)
+        ranked = rank_results(hits, enabled=ranking_enabled)
+        return [
+            {
+                "chunk_id": r.chunk_id,
+                "content": r.content,
+                "metadata": r.metadata,
+                "distance": 1.0 - r.raw_score,  # preserve original distance format
+                "raw_score": r.raw_score,
+                "final_score": r.final_score,
+            }
+            for r in ranked
+        ]
+
     @property
     def count(self) -> int:
         """Total number of indexed chunks."""
