@@ -166,6 +166,23 @@ class EvolutionConfig(BaseSettings):
     include_in_digest: bool = True
 
 
+class MaturationConfig(BaseSettings):
+    """Zettelkasten maturation pipeline configuration."""
+
+    enabled: bool = True
+    schedule_day: str = "sunday"
+    schedule_hour: int = 9
+    timezone: str = "UTC"
+    min_cluster_size: int = 3
+    max_clusters_per_digest: int = 3
+    cluster_eps: float = 0.25
+    synthesis_max_tokens: int = 1500
+    synthesis_model: str = ""  # Empty = use llm.thinking_model
+    target_note_types: list[str] = Field(default_factory=lambda: ["fleeting", "literature"])
+    dismissed_cluster_expiry_days: int = 90
+    inbox_folder: str = "00-inbox"
+
+
 class DigestConfig(BaseSettings):
     """Smart Daily Digest configuration."""
 
@@ -255,6 +272,7 @@ class Settings(BaseSettings):
     search: SearchConfig = Field(default_factory=SearchConfig)
     ranking: RankingConfig = Field(default_factory=RankingConfig)
     evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
+    maturation: MaturationConfig = Field(default_factory=MaturationConfig)
     digest: DigestConfig = Field(default_factory=DigestConfig)
     auto_tag: AutoTagConfig = Field(default_factory=AutoTagConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
