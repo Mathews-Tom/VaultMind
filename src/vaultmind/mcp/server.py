@@ -15,6 +15,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from vaultmind.mcp.auth import AuditLogger, ProfileEnforcer, ProfileError
 from vaultmind.vault.security import PathTraversalError, validate_vault_path
 
 if TYPE_CHECKING:
@@ -34,6 +35,8 @@ def create_mcp_server(
     parser: VaultParser,
     duplicate_detector: object | None = None,
     note_suggester: object | None = None,
+    enforcer: ProfileEnforcer | None = None,
+    audit_logger: AuditLogger | None = None,
 ) -> Any:  # Returns mcp.server.Server (optional dep)
     """Create and configure the MCP server with vault tools.
 
@@ -245,6 +248,20 @@ def create_mcp_server(
     @server.call_tool()  # type: ignore[misc,untyped-decorator,unused-ignore]
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         try:
+            # Profile enforcement
+            if enforcer is not None:
+                enforcer.check_tool(name)
+                # Check write permission for write operations
+                if name in ("vault_write", "capture"):
+                    enforcer.check_write()
+                # Check path scope for path-based operations
+                if name in ("vault_read", "vault_write", "vault_list") and "path" in arguments:
+                    from pathlib import Path as PathCls
+
+                    enforcer.check_path(PathCls(arguments["path"]))
+                if name == "vault_write" and "content" in arguments:
+                    enforcer.check_size(arguments["content"])
+
             result = _dispatch_tool(
                 name,
                 arguments,
@@ -256,9 +273,22 @@ def create_mcp_server(
                 note_suggester=note_suggester,
             )
             text = json.dumps(result, indent=2, default=str)
+
+            # Audit log success
+            if audit_logger is not None and enforcer is not None:
+                audit_logger.log(enforcer.policy.name, name, arguments, "OK")
+
             return [TextContent(type="text", text=text)]
+        except ProfileError as e:
+            # Audit log denial
+            if audit_logger is not None and enforcer is not None:
+                audit_logger.log(enforcer.policy.name, name, arguments, "DENIED", reason=str(e))
+            err = json.dumps({"error": str(e)})
+            return [TextContent(type="text", text=err)]
         except Exception as e:
             logger.exception("Tool %s failed", name)
+            if audit_logger is not None and enforcer is not None:
+                audit_logger.log(enforcer.policy.name, name, arguments, "ERROR", reason=str(e))
             err = json.dumps({"error": str(e)})
             return [TextContent(type="text", text=err)]
 

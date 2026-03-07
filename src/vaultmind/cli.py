@@ -972,8 +972,14 @@ def learn(ctx: click.Context, days: int, save_report: bool) -> None:
 
 
 @cli.command("mcp-serve")
+@click.option(
+    "--profile",
+    default=None,
+    type=str,
+    help="MCP profile name (e.g., researcher, planner, full). Default: researcher (read-only)",
+)
 @click.pass_context
-def mcp_serve(ctx: click.Context) -> None:
+def mcp_serve(ctx: click.Context, profile: str | None) -> None:
     """Start the MCP server for agent integration."""
     from vaultmind.config import load_settings
     from vaultmind.graph import KnowledgeGraph
@@ -982,6 +988,31 @@ def mcp_serve(ctx: click.Context) -> None:
     from vaultmind.vault import VaultParser
 
     settings = load_settings(ctx.obj.get("config_path"))
+
+    from vaultmind.config import VAULTMIND_HOME
+    from vaultmind.mcp.auth import AuditLogger, ProfileEnforcer
+    from vaultmind.mcp.profiles import load_profile
+
+    profile_name = profile or "researcher"
+    if profile is None:
+        import sys as _sys
+
+        logging.getLogger(__name__).warning(
+            "No --profile specified; defaulting to 'researcher' (read-only)"
+        )
+        print(
+            "Warning: No --profile specified; defaulting to 'researcher' (read-only)",
+            file=_sys.stderr,
+        )
+
+    config_profiles = settings.mcp.profiles if settings.mcp.profiles else None
+    policy = load_profile(profile_name, config_profiles=config_profiles)
+    enforcer = ProfileEnforcer(policy, settings.vault.path)
+    audit_log = AuditLogger(VAULTMIND_HOME / "data" / "mcp_audit.jsonl")
+
+    console.print(f"  Profile: {profile_name} ({policy.description})")
+    console.print(f"  Write: {'enabled' if policy.write_enabled else 'disabled'}")
+    console.print(f"  Folder scope: {', '.join(policy.folder_scope)}")
 
     is_openai = settings.embedding.provider == "openai"
     api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
@@ -996,6 +1027,8 @@ def mcp_serve(ctx: click.Context) -> None:
         store,
         graph,
         parser,
+        enforcer=enforcer,
+        audit_logger=audit_log,
     )
 
     console.print("[green]✓[/green] MCP server starting...")
