@@ -464,11 +464,24 @@ def bot(ctx: click.Context) -> None:
 
     llm_client = _create_llm_client(settings)
     session_store = SessionStore(VAULTMIND_HOME / "data" / "sessions.db")
+
+    # Graph context builder for thinking partner
+    from vaultmind.graph.context import GraphContextBuilder
+
+    graph_ctx: GraphContextBuilder | None = None
+    if settings.llm.graph_context_enabled:
+        graph_ctx = GraphContextBuilder(
+            knowledge_graph=graph,
+            llm_client=llm_client,
+            fast_model=settings.llm.fast_model,
+        )
+
     thinking = ThinkingPartner(
         settings.llm,
         settings.telegram,
         llm_client,
         session_store=session_store,
+        graph_context_builder=graph_ctx,
     )
 
     # Duplicate detection

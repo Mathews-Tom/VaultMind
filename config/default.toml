@@ -37,6 +37,10 @@ fast_model = "gpt-4.1"
 max_context_notes = 8
 max_tokens = 4096
 ollama_base_url = "http://localhost:11434"
+graph_context_enabled = true
+graph_hop_depth = 2
+graph_min_confidence = 0.6
+graph_max_relationships = 20
 
 # Provider-specific model examples:
 #   anthropic:  claude-sonnet-4-20250514, claude-opus-4-20250514
