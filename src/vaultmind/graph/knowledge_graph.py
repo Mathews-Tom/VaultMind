@@ -224,6 +224,74 @@ class KnowledgeGraph:
             if score > 0
         ]
 
+    def ego_subgraph(self, entity: str, depth: int = 2) -> nx.DiGraph:
+        """Return the ego subgraph centered on entity within given depth.
+
+        Returns an empty DiGraph if entity not found.
+        """
+        node_id = self._normalize(entity)
+        if not self._graph.has_node(node_id):
+            return nx.DiGraph()
+        undirected = self._graph.to_undirected()
+        ego = nx.ego_graph(undirected, node_id, radius=depth)
+        sub = self._graph.subgraph(ego.nodes).copy()
+        return sub
+
+    def shortest_paths(
+        self,
+        source: str,
+        target: str,
+        max_length: int = 3,
+        top_k: int = 5,
+    ) -> list[list[dict[str, str | float]]]:
+        """Find top-K shortest paths between two entities, enriched with edge data.
+
+        Each path is a list of dicts with node label and relationship info.
+        Returns empty list if no path exists or nodes not found.
+        """
+        src = self._normalize(source)
+        tgt = self._normalize(target)
+
+        if not self._graph.has_node(src) or not self._graph.has_node(tgt):
+            return []
+
+        try:
+            undirected = self._graph.to_undirected()
+            all_paths = list(nx.all_simple_paths(undirected, src, tgt, cutoff=max_length))
+        except nx.NetworkXNoPath:
+            return []
+
+        enriched_paths: list[list[dict[str, str | float]]] = []
+        for path_nodes in all_paths[:top_k]:
+            path_info: list[dict[str, str | float]] = []
+            for i, node in enumerate(path_nodes):
+                entry: dict[str, str | float] = {
+                    "entity": self._graph.nodes[node].get("label", node),
+                    "type": self._graph.nodes[node].get("type", "unknown"),
+                }
+                if i < len(path_nodes) - 1:
+                    next_node = path_nodes[i + 1]
+                    if self._graph.has_edge(node, next_node):
+                        edge_data = self._graph.edges[node, next_node]
+                    elif self._graph.has_edge(next_node, node):
+                        edge_data = self._graph.edges[next_node, node]
+                    else:
+                        edge_data = {}
+                    entry["relation"] = edge_data.get("relation", "related_to")
+                    entry["confidence"] = edge_data.get("confidence", 1.0)
+                path_info.append(entry)
+            enriched_paths.append(path_info)
+
+        # Sort by minimum confidence along the path
+        def min_confidence(path: list[dict[str, str | float]]) -> float:
+            confidences = [
+                float(step.get("confidence", 1.0)) for step in path if "confidence" in step
+            ]
+            return min(confidences) if confidences else 0.0
+
+        enriched_paths.sort(key=min_confidence, reverse=True)
+        return enriched_paths[:top_k]
+
     def get_orphan_entities(self) -> list[dict[str, Any]]:
         """Find entities with no connections (degree 0)."""
         return [{"id": n, **dict(self._graph.nodes[n])} for n in nx.isolates(self._graph)]

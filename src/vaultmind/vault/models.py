@@ -82,6 +82,7 @@ class NoteChunk(BaseModel):
     entities: list[str] = Field(default_factory=list)
     created: str = ""
     modified: str = ""
+    status: str = ""
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -100,5 +101,6 @@ class NoteChunk(BaseModel):
             "entities": ",".join(self.entities),
             "created": self.created,
             "modified": self.modified,
+            "status": self.status,
             "chunk_idx": self.chunk_idx,
         }

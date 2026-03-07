@@ -13,13 +13,15 @@ from vaultmind.research.searcher import SearchResult, _run_yt_search
 
 class TestParseAnalysis:
     def test_parse_valid_json(self) -> None:
-        raw = json.dumps({
-            "summary": "Test summary",
-            "key_themes": ["theme1", "theme2"],
-            "comparative_insights": "Comparison here",
-            "gaps": "Gap analysis",
-            "recommendations": "Do this",
-        })
+        raw = json.dumps(
+            {
+                "summary": "Test summary",
+                "key_themes": ["theme1", "theme2"],
+                "comparative_insights": "Comparison here",
+                "gaps": "Gap analysis",
+                "recommendations": "Do this",
+            }
+        )
         result = _parse_analysis(raw)
         assert result.summary == "Test summary"
         assert result.key_themes == ["theme1", "theme2"]
@@ -56,15 +58,18 @@ class TestRunYtSearch:
     def test_parses_yt_dlp_output(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps({
-                "id": "vid123",
-                "title": "Found Video",
-                "url": "https://youtube.com/watch?v=vid123",
-                "channel": "Channel",
-                "duration": 300,
-                "view_count": 5000,
-                "description": "desc",
-            }) + "\n",
+            stdout=json.dumps(
+                {
+                    "id": "vid123",
+                    "title": "Found Video",
+                    "url": "https://youtube.com/watch?v=vid123",
+                    "channel": "Channel",
+                    "duration": 300,
+                    "view_count": 5000,
+                    "description": "desc",
+                }
+            )
+            + "\n",
             stderr="",
         )
         results = _run_yt_search("test query", max_results=1)

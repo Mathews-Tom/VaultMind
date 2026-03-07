@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+from vaultmind.errors import VaultMindError
+
 logger = logging.getLogger(__name__)
 
 type Provider = Literal["anthropic", "openai", "gemini", "ollama"]
@@ -35,7 +37,7 @@ class LLMResponse:
     usage: dict[str, int]
 
 
-class LLMError(Exception):
+class LLMError(VaultMindError):
     """Unified error for all LLM providers."""
 
     def __init__(self, message: str, provider: str, original: Exception | None = None) -> None:
