@@ -61,7 +61,7 @@ def load_profile(name: str, config_profiles: dict[str, Any] | None = None) -> Pr
     elif name in DEFAULT_PROFILES:
         profile_data = DEFAULT_PROFILES[name]
     else:
-        available = set()
+        available: set[str] = set()
         if config_profiles:
             available.update(config_profiles.keys())
         available.update(DEFAULT_PROFILES.keys())

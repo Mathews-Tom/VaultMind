@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 NOTE_TYPE_CONFIG: dict[str, dict[str, float | None]] = {
     "permanent": {"multiplier": 1.3, "half_life_days": None},
@@ -71,7 +72,7 @@ def score(
 
 
 def rank_results(
-    hits: list[dict],
+    hits: list[dict[str, Any]],
     enabled: bool = True,
 ) -> list[RankedResult]:
     """Rank a list of search hits using the scoring pipeline.
