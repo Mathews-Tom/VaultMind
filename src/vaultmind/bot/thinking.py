@@ -16,6 +16,7 @@ from vaultmind.llm.client import LLMError, Message
 if TYPE_CHECKING:
     from vaultmind.bot.session_store import SessionStore
     from vaultmind.config import LLMConfig, TelegramConfig
+    from vaultmind.graph.context import GraphContextBuilder
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
     from vaultmind.llm.client import LLMClient
@@ -34,6 +35,8 @@ Your role:
 5. End with concrete next actions or open questions
 
 When referencing their notes, use [[Note Title]] format.
+When the Knowledge Graph Context section is present, use those entity relationships
+to inform your analysis — they represent explicit connections the user has established.
 Be direct, substantive, and avoid generic advice. You know this person's work — act like it.
 """
 
@@ -60,11 +63,13 @@ class ThinkingPartner:
         telegram_config: TelegramConfig,
         llm_client: LLMClient,
         session_store: SessionStore | None = None,
+        graph_context_builder: GraphContextBuilder | None = None,
     ) -> None:
         self.llm_config = llm_config
         self.session_ttl = telegram_config.thinking_session_ttl
         self._client = llm_client
         self._store = session_store
+        self._graph_ctx = graph_context_builder
         # In-memory hot cache over SQLite
         self._sessions: dict[int, _ThinkingSession] = {}
 
@@ -91,8 +96,31 @@ class ThinkingPartner:
         # Retrieve vault context (offload sync I/O to thread pool)
         vault_context = await asyncio.to_thread(self._build_vault_context, topic, store, graph)
 
+        # Build graph context via entity extraction (if available)
+        graph_context_str = ""
+        if self._graph_ctx is not None and self.llm_config.graph_context_enabled:
+            session_id = str(user_id)
+            try:
+                graph_block = await self._graph_ctx.build(
+                    query=topic,
+                    session_id=session_id,
+                    hop_depth=self.llm_config.graph_hop_depth,
+                    min_confidence=self.llm_config.graph_min_confidence,
+                    max_relationships=self.llm_config.graph_max_relationships,
+                )
+                if graph_block is not None:
+                    graph_context_str = graph_block.render(
+                        min_confidence=self.llm_config.graph_min_confidence
+                    )
+            except Exception:
+                logger.warning("Graph context building failed", exc_info=True)
+
+        full_context = vault_context
+        if graph_context_str:
+            full_context = f"{vault_context}\n\n{graph_context_str}"
+
         # Build messages
-        messages = self._build_messages(session, topic, vault_context, mode)
+        messages = self._build_messages(session, topic, full_context, mode)
 
         try:
             response = await asyncio.to_thread(
@@ -235,6 +263,8 @@ class ThinkingPartner:
         self._sessions.pop(user_id, None)
         if self._store is not None:
             self._store.delete(user_id)
+        if self._graph_ctx is not None:
+            self._graph_ctx.clear_session(str(user_id))
 
     def has_active_session(self, user_id: int) -> bool:
         """Check if a user has an active (non-expired) thinking session."""

@@ -89,6 +89,10 @@ class LLMConfig(BaseSettings):
     max_context_notes: int = 8
     max_tokens: int = 4096
     ollama_base_url: str = "http://localhost:11434"
+    graph_context_enabled: bool = True
+    graph_hop_depth: int = 2
+    graph_min_confidence: float = 0.6
+    graph_max_relationships: int = 20
 
 
 class TelegramConfig(BaseSettings):
