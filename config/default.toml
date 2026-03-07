@@ -75,6 +75,9 @@ page_size = 5
 max_results = 25
 session_ttl = 300                        # seconds before paginated session expires
 
+[ranking]
+enabled = true
+
 [digest]
 enabled = true
 period_days = 7
@@ -117,3 +120,27 @@ db_path = ""                                # Empty = default ~/.vaultmind/data/
 enabled = false
 host = "127.0.0.1"
 port = 8765
+
+# MCP Profile definitions — customize per-agent access
+# Activate with: vaultmind mcp-serve --profile <name>
+# Default (no flag): researcher (read-only)
+
+[mcp.profiles.researcher]
+description = "Read-only access for research and Q&A tasks"
+allowed_tools = ["vault_search", "vault_read", "vault_list", "graph_query", "graph_path"]
+folder_scope = ["*"]
+write_enabled = false
+
+[mcp.profiles.planner]
+description = "Read/write access for project planning"
+allowed_tools = ["vault_search", "vault_read", "vault_write", "vault_list", "graph_query", "graph_path", "capture"]
+folder_scope = ["02-projects", "00-inbox"]
+write_enabled = true
+max_note_size_bytes = 50000
+
+[mcp.profiles.full]
+description = "Unrestricted access — requires explicit opt-in"
+allowed_tools = ["*"]
+folder_scope = ["*"]
+write_enabled = true
+requires_confirmation = true

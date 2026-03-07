@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -145,6 +145,12 @@ class SearchConfig(BaseSettings):
     session_ttl: int = 300
 
 
+class RankingConfig(BaseSettings):
+    """Search result ranking configuration."""
+
+    enabled: bool = True
+
+
 class DigestConfig(BaseSettings):
     """Smart Daily Digest configuration."""
 
@@ -207,6 +213,7 @@ class MCPConfig(BaseSettings):
     enabled: bool = False
     host: str = "127.0.0.1"
     port: int = 8765
+    profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class Settings(BaseSettings):
@@ -231,6 +238,7 @@ class Settings(BaseSettings):
     duplicate_detection: DuplicateDetectionConfig = Field(default_factory=DuplicateDetectionConfig)
     note_suggestions: NoteSuggestionsConfig = Field(default_factory=NoteSuggestionsConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    ranking: RankingConfig = Field(default_factory=RankingConfig)
     digest: DigestConfig = Field(default_factory=DigestConfig)
     auto_tag: AutoTagConfig = Field(default_factory=AutoTagConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
