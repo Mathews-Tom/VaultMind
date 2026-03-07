@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from vaultmind.errors import VaultMindError
+
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-class PathTraversalError(ValueError):
+class PathTraversalError(VaultMindError, ValueError):
     """Raised when a user-supplied path escapes the vault root."""
 
     def __init__(self, user_path: str, vault_root: Path) -> None:
