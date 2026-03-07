@@ -1013,8 +1013,11 @@ async def _run_mcp(server: object, stdio_server: object) -> None:
 
 
 @cli.command()
+@click.option(
+    "--metadata-audit", is_flag=True, help="Audit metadata coverage across indexed chunks"
+)
 @click.pass_context
-def stats(ctx: click.Context) -> None:
+def stats(ctx: click.Context, metadata_audit: bool) -> None:
     """Show vault and graph statistics."""
     from vaultmind.config import load_settings
     from vaultmind.graph import KnowledgeGraph
@@ -1059,6 +1062,46 @@ def stats(ctx: click.Context) -> None:
         console.print(f"  Entries: {cs['total_entries']}")
         console.print(f"  Size: {cs['total_size_bytes'] / 1024:.1f} KB")
         cache.close()
+
+    if metadata_audit:
+        from vaultmind.indexer import Embedder, VaultStore
+
+        is_openai = settings.embedding.provider == "openai"
+        api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
+        cache = _create_embedding_cache(settings)
+        embedder = Embedder(settings.embedding, api_key, cache=cache)
+        store = VaultStore(settings.chroma, embedder)
+
+        all_chunks = store._collection.get(include=["metadatas"])  # type: ignore[list-item]
+        total = len(all_chunks["ids"])
+        metadatas = all_chunks["metadatas"] or []
+
+        if total == 0:
+            console.print(
+                "\n[yellow]No indexed chunks found. Run `vaultmind index` first.[/yellow]"
+            )
+        else:
+            fields = ["note_type", "created", "status"]
+            console.print(f"\n[bold]Metadata Audit[/bold] ({total} chunks)")
+            for field in fields:
+                count = sum(1 for m in metadatas if m.get(field) and m[field] != "")
+                pct = count / total * 100
+                color = "green" if pct >= 80 else "yellow" if pct >= 50 else "red"
+                console.print(
+                    f"  {field:12s}: [{color}]{pct:5.1f}%[/{color}] ({count}/{total} chunks)"
+                )
+
+            console.print()
+            if any(
+                sum(1 for m in metadatas if m.get(f) and m[f] != "") / total < 0.8 for f in fields
+            ):
+                console.print(
+                    "[yellow]Warning: metadata coverage below 80% for some fields."
+                    " Features depending on this metadata may degrade.[/yellow]"
+                )
+
+        if cache is not None:
+            cache.close()
 
 
 if __name__ == "__main__":
