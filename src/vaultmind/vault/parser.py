@@ -116,6 +116,7 @@ class VaultParser:
                         entities=note.entities,
                         created=note.created.isoformat(),
                         modified=note.modified.isoformat(),
+                        status=note.status,
                     )
                 )
             else:
@@ -139,6 +140,7 @@ class VaultParser:
                                 entities=note.entities,
                                 created=note.created.isoformat(),
                                 modified=note.modified.isoformat(),
+                                status=note.status,
                             )
                         )
                         current_chunk = para
@@ -158,6 +160,7 @@ class VaultParser:
                             entities=note.entities,
                             created=note.created.isoformat(),
                             modified=note.modified.isoformat(),
+                            status=note.status,
                         )
                     )
 
