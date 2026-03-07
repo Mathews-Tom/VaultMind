@@ -517,6 +517,27 @@ def bot(ctx: click.Context) -> None:
             min_confidence_for_stale=settings.evolution.min_confidence_for_stale,
         )
 
+    # Maturation pipeline
+    from vaultmind.pipeline.maturation import MaturationPipeline
+
+    maturation_pipeline: MaturationPipeline | None = None
+    if settings.maturation.enabled:
+        synthesis_model = settings.maturation.synthesis_model or settings.llm.thinking_model
+        mat_config = settings.maturation
+        # Override synthesis_model with resolved value
+        mat_config_dict = mat_config.model_dump()
+        mat_config_dict["synthesis_model"] = synthesis_model
+        from vaultmind.config import MaturationConfig
+
+        resolved_mat_config = MaturationConfig(**mat_config_dict)
+        maturation_pipeline = MaturationPipeline(
+            config=resolved_mat_config,
+            collection=store._collection,
+            knowledge_graph=graph,
+            llm=llm_client,
+            vault_root=settings.vault.path,
+        )
+
     handlers = CommandHandlers(
         settings=settings,
         store=store,
@@ -528,6 +549,7 @@ def bot(ctx: click.Context) -> None:
         note_suggester=suggester,
         transcriber=transcriber,
         evolution_detector=evolution_detector,
+        maturation_pipeline=maturation_pipeline,
     )
 
     tg_bot, dp = create_bot(settings.telegram.bot_token)
@@ -571,11 +593,45 @@ def bot(ctx: click.Context) -> None:
     console.print(f"[green]✓[/green] Starting Telegram bot (LLM: {provider}/{model})...")
     console.print(f"  Watch mode: debounce={settings.watch.debounce_ms}ms")
 
+    # Maturation scheduler
+    from datetime import timedelta
+
+    from vaultmind.services.scheduler import ScheduledJob, SchedulerService
+
+    scheduler: SchedulerService | None = None
+    if maturation_pipeline is not None:
+
+        async def _maturation_digest() -> None:
+            assert maturation_pipeline is not None
+            clusters = maturation_pipeline.discover()
+            if clusters:
+                logging.getLogger(__name__).info(
+                    "Maturation digest: %d clusters ready", len(clusters)
+                )
+            maturation_pipeline.mark_run()
+
+        maturation_job = ScheduledJob(
+            name="maturation_digest",
+            interval=timedelta(days=7),
+            execute=_maturation_digest,
+        )
+        scheduler = SchedulerService(
+            jobs=[maturation_job],
+            state_path=Path.home() / ".vaultmind" / "data" / "scheduler_state.json",
+        )
+
     async def _run_bot_with_watcher() -> None:
         watcher.start()
+        scheduler_task = None
+        if scheduler is not None:
+            scheduler_task = asyncio.create_task(scheduler.run())
         try:
             await dp.start_polling(tg_bot)
         finally:
+            if scheduler is not None:
+                scheduler.stop()
+            if scheduler_task is not None:
+                scheduler_task.cancel()
             watcher.stop()
 
     asyncio.run(_run_bot_with_watcher())

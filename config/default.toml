@@ -82,6 +82,20 @@ session_ttl = 300                        # seconds before paginated session expi
 [ranking]
 enabled = true
 
+[maturation]
+enabled = true
+schedule_day = "sunday"
+schedule_hour = 9
+timezone = "UTC"
+min_cluster_size = 3
+max_clusters_per_digest = 3
+cluster_eps = 0.25
+synthesis_max_tokens = 1500
+synthesis_model = ""                         # Empty = use llm.thinking_model
+target_note_types = ["fleeting", "literature"]
+dismissed_cluster_expiry_days = 90
+inbox_folder = "00-inbox"
+
 [evolution]
 enabled = true
 confidence_drift_threshold = 0.3

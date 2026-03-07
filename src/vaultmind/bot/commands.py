@@ -14,6 +14,7 @@ from vaultmind.bot.handlers.edit import handle_edit, handle_edit_callback
 from vaultmind.bot.handlers.evolve import handle_evolve
 from vaultmind.bot.handlers.graph import handle_graph
 from vaultmind.bot.handlers.health import handle_health
+from vaultmind.bot.handlers.maturation import handle_mature
 from vaultmind.bot.handlers.notes import (
     _find_notes_by_date,
     _llm_resolve_date,
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from vaultmind.indexer.note_suggester import NoteSuggester
     from vaultmind.indexer.store import VaultStore
     from vaultmind.llm.client import LLMClient
+    from vaultmind.pipeline.maturation import MaturationPipeline
     from vaultmind.vault.parser import VaultParser
 
 
@@ -63,6 +65,7 @@ class CommandHandlers:
         note_suggester: NoteSuggester | None = None,
         transcriber: Transcriber | None = None,
         evolution_detector: EvolutionDetector | None = None,
+        maturation_pipeline: MaturationPipeline | None = None,
     ) -> None:
         self._ctx = HandlerContext(
             settings=settings,
@@ -77,6 +80,7 @@ class CommandHandlers:
         self._duplicate_detector = duplicate_detector
         self._note_suggester = note_suggester
         self._evolution_detector = evolution_detector
+        self._maturation_pipeline = maturation_pipeline
         self._pending_edits: dict[int, dict[str, str]] = {}
         self._search_sessions: dict[int, PaginatedSearch] = {}
         self._last_exchanges: dict[int, LastExchange] = {}
@@ -205,6 +209,12 @@ class CommandHandlers:
             await message.answer("Belief evolution tracking is not enabled.")
             return
         await handle_evolve(self._ctx, message, args, self._evolution_detector)
+
+    async def handle_mature(self, message: Message, args: str) -> None:
+        if self._maturation_pipeline is None:
+            await message.answer("Maturation pipeline is not enabled.")
+            return
+        await handle_mature(self._ctx, message, args, self._maturation_pipeline)
 
     # --- Backward-compat methods (used by tests) ---
 

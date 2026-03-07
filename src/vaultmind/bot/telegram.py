@@ -54,6 +54,7 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "• `/review` → weekly review prompts\n"
             "• `/health` → system health check\n"
             "• `/evolve` → belief evolution signals\n"
+            "• `/mature` → Zettelkasten maturation clusters\n"
             "• `/stats` → vault & graph statistics",
             parse_mode="Markdown",
         )
@@ -218,6 +219,11 @@ def register_handlers(handlers: CommandHandlers) -> None:
     async def cmd_evolve(message: Message) -> None:
         args = message.text.replace("/evolve", "", 1).strip() if message.text else ""
         await handlers.handle_evolve(message, args)
+
+    @router.message(Command("mature"))
+    async def cmd_mature(message: Message) -> None:
+        args = message.text.replace("/mature", "", 1).strip() if message.text else ""
+        await handlers.handle_mature(message, args)
 
     @router.message(F.voice)
     async def handle_voice(message: Message) -> None:
