@@ -155,6 +155,17 @@ class RankingConfig(BaseSettings):
     enabled: bool = True
 
 
+class EvolutionConfig(BaseSettings):
+    """Belief evolution tracking configuration."""
+
+    enabled: bool = True
+    confidence_drift_threshold: float = 0.3
+    stale_days: int = 180
+    min_confidence_for_stale: float = 0.8
+    max_results: int = 10
+    include_in_digest: bool = True
+
+
 class DigestConfig(BaseSettings):
     """Smart Daily Digest configuration."""
 
@@ -243,6 +254,7 @@ class Settings(BaseSettings):
     note_suggestions: NoteSuggestionsConfig = Field(default_factory=NoteSuggestionsConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     ranking: RankingConfig = Field(default_factory=RankingConfig)
+    evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
     digest: DigestConfig = Field(default_factory=DigestConfig)
     auto_tag: AutoTagConfig = Field(default_factory=AutoTagConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)

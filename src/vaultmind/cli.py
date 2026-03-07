@@ -505,6 +505,18 @@ def bot(ctx: click.Context) -> None:
     if settings.voice.enabled and settings.openai_api_key:
         transcriber = Transcriber(settings.voice, settings.openai_api_key)
 
+    # Evolution detector
+    from vaultmind.graph.evolution import EvolutionDetector
+
+    evolution_detector: EvolutionDetector | None = None
+    if settings.evolution.enabled:
+        evolution_detector = EvolutionDetector(
+            knowledge_graph=graph,
+            confidence_drift_threshold=settings.evolution.confidence_drift_threshold,
+            stale_days=settings.evolution.stale_days,
+            min_confidence_for_stale=settings.evolution.min_confidence_for_stale,
+        )
+
     handlers = CommandHandlers(
         settings=settings,
         store=store,
@@ -515,6 +527,7 @@ def bot(ctx: click.Context) -> None:
         duplicate_detector=detector,
         note_suggester=suggester,
         transcriber=transcriber,
+        evolution_detector=evolution_detector,
     )
 
     tg_bot, dp = create_bot(settings.telegram.bot_token)
