@@ -82,6 +82,14 @@ session_ttl = 300                        # seconds before paginated session expi
 [ranking]
 enabled = true
 
+[evolution]
+enabled = true
+confidence_drift_threshold = 0.3
+stale_days = 180
+min_confidence_for_stale = 0.8
+max_results = 10
+include_in_digest = true
+
 [digest]
 enabled = true
 period_days = 7

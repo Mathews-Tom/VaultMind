@@ -11,6 +11,7 @@ from vaultmind.bot.handlers.daily import handle_daily
 from vaultmind.bot.handlers.delete import handle_delete, handle_delete_callback
 from vaultmind.bot.handlers.duplicates import handle_duplicates
 from vaultmind.bot.handlers.edit import handle_edit, handle_edit_callback
+from vaultmind.bot.handlers.evolve import handle_evolve
 from vaultmind.bot.handlers.graph import handle_graph
 from vaultmind.bot.handlers.health import handle_health
 from vaultmind.bot.handlers.notes import (
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from vaultmind.bot.thinking import ThinkingPartner
     from vaultmind.bot.transcribe import Transcriber
     from vaultmind.config import Settings
+    from vaultmind.graph.evolution import EvolutionDetector
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.duplicate_detector import DuplicateDetector
     from vaultmind.indexer.note_suggester import NoteSuggester
@@ -60,6 +62,7 @@ class CommandHandlers:
         duplicate_detector: DuplicateDetector | None = None,
         note_suggester: NoteSuggester | None = None,
         transcriber: Transcriber | None = None,
+        evolution_detector: EvolutionDetector | None = None,
     ) -> None:
         self._ctx = HandlerContext(
             settings=settings,
@@ -73,6 +76,7 @@ class CommandHandlers:
         )
         self._duplicate_detector = duplicate_detector
         self._note_suggester = note_suggester
+        self._evolution_detector = evolution_detector
         self._pending_edits: dict[int, dict[str, str]] = {}
         self._search_sessions: dict[int, PaginatedSearch] = {}
         self._last_exchanges: dict[int, LastExchange] = {}
@@ -195,6 +199,12 @@ class CommandHandlers:
             await message.answer("Note suggestions are not enabled.")
             return
         await handle_suggestions(self._ctx, message, query, self._note_suggester)
+
+    async def handle_evolve(self, message: Message, args: str) -> None:
+        if self._evolution_detector is None:
+            await message.answer("Belief evolution tracking is not enabled.")
+            return
+        await handle_evolve(self._ctx, message, args, self._evolution_detector)
 
     # --- Backward-compat methods (used by tests) ---
 
