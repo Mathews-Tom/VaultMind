@@ -144,6 +144,11 @@ youtube_language = "en"
 enabled = true
 db_path = ""                                # Empty = default ~/.vaultmind/data/preferences.db
 
+[activation]
+enabled = true
+half_life_days = 14.0
+db_path = ""                                # Empty = default ~/.vaultmind/data/activations.db
+
 [mcp]
 enabled = false
 host = "127.0.0.1"

@@ -241,6 +241,14 @@ class TrackingConfig(BaseSettings):
     db_path: str = ""  # Empty = default (~/.vaultmind/data/preferences.db)
 
 
+class ActivationConfig(BaseSettings):
+    """Activation-based note decay configuration."""
+
+    enabled: bool = True
+    half_life_days: float = 14.0
+    db_path: str = ""  # Empty = default ~/.vaultmind/data/activations.db
+
+
 class MCPConfig(BaseSettings):
     """MCP server configuration."""
 
@@ -281,6 +289,7 @@ class Settings(BaseSettings):
     ingest: IngestConfig = Field(default_factory=IngestConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)
+    activation: ActivationConfig = Field(default_factory=ActivationConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     # API keys — always from env vars

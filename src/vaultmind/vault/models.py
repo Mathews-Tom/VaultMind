@@ -25,6 +25,13 @@ class NoteType(StrEnum):
     TEMPLATE = "template"
 
 
+class NoteMode(StrEnum):
+    """Note operational mode — controls ranking multiplier."""
+
+    LEARNING = "learning"
+    OPERATIONAL = "operational"
+
+
 class Note(BaseModel):
     """Represents a parsed Obsidian markdown note."""
 
@@ -35,6 +42,7 @@ class Note(BaseModel):
     tags: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
     related: list[str] = Field(default_factory=list)
+    mode: NoteMode = NoteMode.LEARNING
     status: str = "active"
     source: str = "manual"
     created: datetime = Field(default_factory=datetime.now)
@@ -83,6 +91,7 @@ class NoteChunk(BaseModel):
     created: str = ""
     modified: str = ""
     status: str = ""
+    mode: str = ""
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -102,5 +111,6 @@ class NoteChunk(BaseModel):
             "created": self.created,
             "modified": self.modified,
             "status": self.status,
+            "mode": self.mode,
             "chunk_idx": self.chunk_idx,
         }

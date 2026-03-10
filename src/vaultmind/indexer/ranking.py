@@ -1,7 +1,7 @@
 """Note-type-aware search result ranking.
 
-Applies type multipliers, temporal decay, and status suppression
-post-retrieval to produce Zettelkasten-aware search ordering.
+Applies type multipliers, temporal decay, mode multipliers, activation boost,
+and status suppression post-retrieval to produce Zettelkasten-aware search ordering.
 """
 
 from __future__ import annotations
@@ -25,6 +25,11 @@ DEFAULT_CONFIG: dict[str, float | None] = {"multiplier": 1.0, "half_life_days": 
 
 ARCHIVED_MULTIPLIER = 0.4
 
+MODE_MULTIPLIERS: dict[str, float] = {
+    "operational": 1.2,
+    "learning": 1.0,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class RankedResult:
@@ -43,10 +48,13 @@ def score(
     note_type: str,
     created_at: str,
     status: str,
+    mode: str = "",
+    activation_score: float = 0.0,
 ) -> float:
     """Compute ranked score from raw similarity score.
 
-    Pipeline: raw_score -> type_multiplier -> decay_multiplier -> status_multiplier
+    Pipeline: raw_score -> type_multiplier -> decay_multiplier ->
+              mode_multiplier -> activation_boost -> status_multiplier
     """
     cfg = NOTE_TYPE_CONFIG.get(note_type, DEFAULT_CONFIG)
     multiplier = cfg["multiplier"]
@@ -64,6 +72,12 @@ def score(
                 s *= math.exp(-0.693 * age_days / half_life)
         except (ValueError, TypeError):
             pass  # unparseable created_at — skip decay
+
+    mode_mult = MODE_MULTIPLIERS.get(mode, 1.0)
+    s *= mode_mult
+
+    if activation_score > 0:
+        s *= 1.0 + 0.3 * activation_score  # up to 30% boost
 
     if status in ("archived", "completed"):
         s *= ARCHIVED_MULTIPLIER
@@ -97,6 +111,8 @@ def rank_results(
                 note_type=meta.get("note_type", ""),
                 created_at=meta.get("created", ""),
                 status=meta.get("status", ""),
+                mode=meta.get("mode", ""),
+                activation_score=hit.get("activation_score", 0.0),
             )
         else:
             final = raw
