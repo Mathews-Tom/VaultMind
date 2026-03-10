@@ -261,6 +261,15 @@ class ActivationConfig(BaseSettings):
     db_path: str = ""  # Empty = default ~/.vaultmind/data/activations.db
 
 
+class EpisodicConfig(BaseSettings):
+    """Episodic memory configuration."""
+
+    enabled: bool = True
+    db_path: str = ""  # default: ~/.vaultmind/data/episodes.db
+    auto_extract: bool = False  # LLM extraction from notes (opt-in)
+    extraction_model: str = ""  # Empty = use llm.fast_model
+
+
 class MCPConfig(BaseSettings):
     """MCP server configuration."""
 
@@ -303,6 +312,7 @@ class Settings(BaseSettings):
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)
     activation: ActivationConfig = Field(default_factory=ActivationConfig)
+    episodic: EpisodicConfig = Field(default_factory=EpisodicConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     # API keys — always from env vars

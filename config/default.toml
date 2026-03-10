@@ -158,6 +158,12 @@ enabled = true
 half_life_days = 14.0
 db_path = ""                                # Empty = default ~/.vaultmind/data/activations.db
 
+[episodic]
+enabled = true
+db_path = ""                                # Empty = default ~/.vaultmind/data/episodes.db
+auto_extract = false                        # LLM extraction from notes (opt-in)
+extraction_model = ""                       # Empty = use llm.fast_model
+
 [mcp]
 enabled = false
 host = "127.0.0.1"
