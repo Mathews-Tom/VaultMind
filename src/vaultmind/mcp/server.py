@@ -243,6 +243,43 @@ def create_mcp_server(
                     "required": ["content"],
                 },
             ),
+            Tool(
+                name="capture_note",
+                description=(
+                    "Capture a structured note to the vault with full metadata control."
+                    " Supports note type, tags, and custom target folder."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "Note content (markdown)",
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Note title (auto-generated from content if omitted)",
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Tags for the note",
+                        },
+                        "note_type": {
+                            "type": "string",
+                            "enum": ["fleeting", "literature", "permanent", "project", "concept"],
+                            "default": "fleeting",
+                            "description": "Note classification type",
+                        },
+                        "folder": {
+                            "type": "string",
+                            "default": "00-inbox",
+                            "description": "Target folder relative to vault root",
+                        },
+                    },
+                    "required": ["content"],
+                },
+            ),
         ]
 
     @server.call_tool()  # type: ignore[misc,untyped-decorator,unused-ignore]
@@ -252,7 +289,7 @@ def create_mcp_server(
             if enforcer is not None:
                 enforcer.check_tool(name)
                 # Check write permission for write operations
-                if name in ("vault_write", "capture"):
+                if name in ("vault_write", "capture", "capture_note"):
                     enforcer.check_write()
                 # Check path scope for path-based operations
                 if name in ("vault_read", "vault_write", "vault_list") and "path" in arguments:
@@ -442,6 +479,64 @@ def _dispatch_tool(
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(content, encoding="utf-8")
         return {"status": "ok", "path": f"00-inbox/{filename}"}
+
+    elif name == "capture_note":
+        import re
+        from datetime import datetime
+
+        now = datetime.now()
+        raw_content: str = args["content"]
+
+        # Auto-generate title from first non-empty line if not provided
+        if args.get("title"):
+            title = args["title"]
+        else:
+            first_line = next(
+                (
+                    line.strip().lstrip("#").strip()
+                    for line in raw_content.splitlines()
+                    if line.strip()
+                ),
+                now.strftime("Capture %Y%m%d-%H%M%S"),
+            )
+            title = first_line[:50]
+
+        note_type = args.get("note_type", "fleeting")
+        note_tags: list[str] = args.get("tags") or []
+        target_folder: str = args.get("folder") or "00-inbox"
+
+        # Build slug from title
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50]
+        timestamp = now.strftime("%Y%m%d-%H%M%S")
+        filename = f"{slug}-{timestamp}.md"
+
+        tags_yaml = "[" + ", ".join(note_tags) + "]" if note_tags else "[]"
+        file_content = (
+            f"---\n"
+            f"title: {title}\n"
+            f"type: {note_type}\n"
+            f"tags: {tags_yaml}\n"
+            f"created: {now.strftime('%Y-%m-%d %H:%M')}\n"
+            f"source: mcp\n"
+            f"status: active\n"
+            f"---\n\n"
+            f"# {title}\n\n"
+            f"{raw_content}\n"
+        )
+
+        filepath = vault_path / target_folder / filename
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        filepath.write_text(file_content, encoding="utf-8")
+
+        # Parse and index the new note
+        try:
+            note = parser.parse_file(filepath)
+            store.index_single_note(note, parser)
+        except Exception as exc:
+            logger.warning("Failed to index capture_note after write: %s", exc)
+
+        rel_path = f"{target_folder}/{filename}"
+        return {"status": "ok", "path": rel_path, "title": title}
 
     else:
         return {"error": f"Unknown tool: {name}"}

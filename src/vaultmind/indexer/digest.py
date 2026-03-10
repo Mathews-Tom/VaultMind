@@ -62,6 +62,10 @@ class DigestReport:
     orphan_notes: list[str] = field(default_factory=list)
     total_notes: int = 0
     total_entities: int = 0
+    inbox_count: int = 0
+    oldest_inbox_note: str = ""
+    oldest_inbox_age_days: int = 0
+    inbox_notes: list[str] = field(default_factory=list)
 
 
 class DigestGenerator:
@@ -117,6 +121,9 @@ class DigestGenerator:
         # Orphan notes: notes with zero wikilinks in or out
         orphan_notes = self._compute_orphans(notes)
 
+        # Inbox triage: notes still sitting in inbox
+        inbox_notes, oldest_inbox_note, oldest_inbox_age_days = self._compute_inbox_triage(notes)
+
         graph_stats = self._graph.stats
 
         return DigestReport(
@@ -129,6 +136,10 @@ class DigestGenerator:
             orphan_notes=orphan_notes,
             total_notes=len(notes),
             total_entities=graph_stats["nodes"],
+            inbox_count=len(inbox_notes),
+            oldest_inbox_note=oldest_inbox_note,
+            oldest_inbox_age_days=oldest_inbox_age_days,
+            inbox_notes=inbox_notes,
         )
 
     def format_telegram(self, report: DigestReport) -> str:
@@ -141,6 +152,7 @@ class DigestGenerator:
             and not report.trending_entities
             and not report.suggested_connections
             and not report.orphan_notes
+            and not report.inbox_count
         ):
             return (
                 f"<b>📊 Daily Digest — {date_str}</b>\n\n"
@@ -184,6 +196,17 @@ class DigestGenerator:
             lines.append("<b>🏝 Orphan Notes</b>")
             for title in report.orphan_notes:
                 lines.append(f"• {html.escape(title)} (no links)")
+
+        # Inbox triage
+        if report.inbox_count:
+            lines.append("")
+            lines.append("<b>📥 Inbox Triage</b>")
+            lines.append(f"• {report.inbox_count} notes awaiting processing")
+            if report.oldest_inbox_age_days > self._config.inbox_age_warning_days:
+                oldest = html.escape(report.oldest_inbox_note)
+                lines.append(f"• ⚠️ Oldest: {oldest} ({report.oldest_inbox_age_days} days)")
+            for title in report.inbox_notes[: self._config.max_inbox_shown]:
+                lines.append(f"• {html.escape(title)}")
 
         # Footer
         lines.append("")
@@ -338,6 +361,40 @@ class DigestGenerator:
         suggestions.sort(key=lambda c: c.similarity, reverse=True)
         return suggestions[: self._config.max_suggestions]
 
+    def _compute_inbox_triage(
+        self,
+        notes: list[Note],
+    ) -> tuple[list[str], str, int]:
+        """Find notes still in inbox, ordered by age (oldest first).
+
+        Returns:
+            Tuple of (titles_list, oldest_title, oldest_age_days).
+        """
+        inbox_prefix = self._config.inbox_folder
+        now = datetime.now(tz=UTC)
+
+        inbox: list[tuple[datetime, str]] = []
+        for note in notes:
+            if not str(note.path).startswith(inbox_prefix):
+                continue
+            ctime = self._file_ctime(note.path)
+            if ctime is None:
+                # Fall back to epoch so it sorts oldest
+                ctime = datetime.fromtimestamp(0, tz=UTC)
+            inbox.append((ctime, note.title))
+
+        if not inbox:
+            return [], "", 0
+
+        # Sort oldest first
+        inbox.sort(key=lambda t: t[0])
+
+        oldest_ctime, oldest_title = inbox[0]
+        oldest_age_days = (now - oldest_ctime).days
+
+        titles = [title for _, title in inbox]
+        return titles, oldest_title, oldest_age_days
+
     def _compute_orphans(self, notes: list[Note]) -> list[str]:
         """Find notes with zero wikilinks in or out across all vault notes."""
         # Build a set of all note titles
@@ -422,6 +479,22 @@ class DigestGenerator:
             lines.append("## Orphan Notes")
             lines.append("")
             for title in report.orphan_notes:
+                lines.append(f"- [[{title}]]")
+            lines.append("")
+
+        # Inbox triage
+        if report.inbox_count:
+            lines.append("## Inbox Triage")
+            lines.append("")
+            lines.append(f"**{report.inbox_count} notes awaiting processing**")
+            lines.append("")
+            if report.oldest_inbox_age_days > self._config.inbox_age_warning_days:
+                lines.append(
+                    f"> ⚠️ Oldest: **{report.oldest_inbox_note}**"
+                    f" ({report.oldest_inbox_age_days} days)"
+                )
+                lines.append("")
+            for title in report.inbox_notes[: self._config.max_inbox_shown]:
                 lines.append(f"- [[{title}]]")
             lines.append("")
 

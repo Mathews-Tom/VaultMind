@@ -198,6 +198,9 @@ class DigestConfig(BaseSettings):
     max_suggestions: int = 5
     connection_threshold_low: float = 0.70
     connection_threshold_high: float = 0.85
+    inbox_folder: str = "00-inbox"
+    inbox_age_warning_days: int = 7
+    max_inbox_shown: int = 10
 
 
 class AutoTagConfig(BaseSettings):
