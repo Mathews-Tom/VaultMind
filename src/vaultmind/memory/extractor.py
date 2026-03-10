@@ -75,4 +75,4 @@ def extract_episodes(
         )
         return []
 
-    return parsed  # type: ignore[return-value]
+    return parsed
