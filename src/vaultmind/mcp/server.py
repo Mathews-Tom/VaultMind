@@ -502,15 +502,15 @@ def _dispatch_tool(
             title = first_line[:50]
 
         note_type = args.get("note_type", "fleeting")
-        tags: list[str] = args.get("tags") or []
-        folder: str = args.get("folder") or "00-inbox"
+        note_tags: list[str] = args.get("tags") or []
+        target_folder: str = args.get("folder") or "00-inbox"
 
         # Build slug from title
         slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50]
         timestamp = now.strftime("%Y%m%d-%H%M%S")
         filename = f"{slug}-{timestamp}.md"
 
-        tags_yaml = "[" + ", ".join(tags) + "]" if tags else "[]"
+        tags_yaml = "[" + ", ".join(note_tags) + "]" if note_tags else "[]"
         file_content = (
             f"---\n"
             f"title: {title}\n"
@@ -524,7 +524,7 @@ def _dispatch_tool(
             f"{raw_content}\n"
         )
 
-        filepath = vault_path / folder / filename
+        filepath = vault_path / target_folder / filename
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(file_content, encoding="utf-8")
 
@@ -535,7 +535,7 @@ def _dispatch_tool(
         except Exception as exc:
             logger.warning("Failed to index capture_note after write: %s", exc)
 
-        rel_path = f"{folder}/{filename}"
+        rel_path = f"{target_folder}/{filename}"
         return {"status": "ok", "path": rel_path, "title": title}
 
     else:
