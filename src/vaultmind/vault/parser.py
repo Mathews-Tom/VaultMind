@@ -87,6 +87,7 @@ class VaultParser:
         1. Split by headings (## level sections)
         2. If a section exceeds max_tokens, split by paragraphs
         3. Each chunk preserves the heading context
+        4. A contextual prefix is prepended for embedding quality
         """
         body = note.body_without_frontmatter()
         if not body.strip():
@@ -100,17 +101,20 @@ class VaultParser:
             if not content:
                 continue
 
+            prefix = self._contextual_prefix(note, heading)
+
             # Rough token estimate: ~4 chars per token
             estimated_tokens = len(content) // 4
 
             if estimated_tokens <= max_tokens:
+                body_text = f"{heading}\n\n{content}" if heading else content
                 chunks.append(
                     NoteChunk(
                         note_path=str(note.path),
                         note_title=note.title,
                         chunk_idx=len(chunks),
                         heading=heading,
-                        content=f"{heading}\n\n{content}" if heading else content,
+                        content=f"{prefix}\n\n{body_text}",
                         note_type=note.note_type,
                         tags=note.tags,
                         entities=note.entities,
@@ -126,15 +130,14 @@ class VaultParser:
 
                 for para in paragraphs:
                     if len((current_chunk + para).encode()) // 4 > max_tokens and current_chunk:
+                        body_text = f"{heading}\n\n{current_chunk}" if heading else current_chunk
                         chunks.append(
                             NoteChunk(
                                 note_path=str(note.path),
                                 note_title=note.title,
                                 chunk_idx=len(chunks),
                                 heading=heading,
-                                content=(
-                                    f"{heading}\n\n{current_chunk}" if heading else current_chunk
-                                ),
+                                content=f"{prefix}\n\n{body_text}",
                                 note_type=note.note_type,
                                 tags=note.tags,
                                 entities=note.entities,
@@ -148,13 +151,14 @@ class VaultParser:
                         current_chunk = f"{current_chunk}\n\n{para}" if current_chunk else para
 
                 if current_chunk.strip():
+                    body_text = f"{heading}\n\n{current_chunk}" if heading else current_chunk
                     chunks.append(
                         NoteChunk(
                             note_path=str(note.path),
                             note_title=note.title,
                             chunk_idx=len(chunks),
                             heading=heading,
-                            content=f"{heading}\n\n{current_chunk}" if heading else current_chunk,
+                            content=f"{prefix}\n\n{body_text}",
                             note_type=note.note_type,
                             tags=note.tags,
                             entities=note.entities,
@@ -165,6 +169,19 @@ class VaultParser:
                     )
 
         return chunks
+
+    def _contextual_prefix(self, note: Note, heading: str) -> str:
+        """Build a contextual prefix for embedding quality.
+
+        Format: note: {title} (type: {note_type}) | section: {heading} | tags: {t1, t2}
+        """
+        parts = [f"note: {note.title} (type: {note.note_type.value})"]
+        if heading:
+            clean = heading.lstrip("#").strip()
+            parts.append(f"section: {clean}")
+        if note.tags:
+            parts.append(f"tags: {', '.join(note.tags[:5])}")
+        return " | ".join(parts)
 
     def _split_by_headings(self, text: str) -> list[tuple[str, str]]:
         """Split text into (heading, content) pairs."""
