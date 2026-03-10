@@ -16,10 +16,9 @@ from datetime import datetime
 from pathlib import Path  # noqa: TC003 — used at runtime for mkdir/connect
 from typing import TYPE_CHECKING
 
-from vaultmind.memory.models import Episode
-
 if TYPE_CHECKING:
     from vaultmind.llm.client import LLMClient
+    from vaultmind.memory.models import Episode
     from vaultmind.memory.store import EpisodeStore
 
 logger = logging.getLogger(__name__)
