@@ -132,7 +132,10 @@ async def handle_recall(
     max_results = ctx.settings.search.max_results
     page_size = ctx.settings.search.page_size
 
-    results = await asyncio.to_thread(ctx.store.search, query, n_results=max_results)
+    if ctx.settings.search.hybrid_enabled:
+        results = await asyncio.to_thread(ctx.store.hybrid_search, query, n_results=max_results)
+    else:
+        results = await asyncio.to_thread(ctx.store.search, query, n_results=max_results)
 
     if not results:
         await message.answer("No matching notes found.")

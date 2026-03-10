@@ -25,6 +25,7 @@ from rich.logging import RichHandler
 from vaultmind import __version__
 
 if TYPE_CHECKING:
+    from vaultmind.indexer.bm25 import BM25Index
     from vaultmind.indexer.embedding_cache import EmbeddingCache
     from vaultmind.llm.client import LLMClient
 
@@ -53,6 +54,19 @@ def _require_llm_key(settings: object) -> None:
         env_var = f"VAULTMIND_{provider.upper()}_API_KEY"
         console.print(f"[red]✗[/red] {provider.capitalize()} API key not set. Set {env_var}.")
         sys.exit(1)
+
+
+def _create_bm25_index(settings: object) -> BM25Index | None:
+    """Create a BM25Index if hybrid search is enabled, otherwise return None."""
+    from vaultmind.config import VAULTMIND_HOME, Settings
+    from vaultmind.indexer.bm25 import BM25Index
+
+    assert isinstance(settings, Settings)
+    if not settings.search.hybrid_enabled:
+        return None
+
+    bm25_path = Path(settings.search.bm25_db_path or str(VAULTMIND_HOME / "data" / "bm25.db"))
+    return BM25Index(bm25_path)
 
 
 def _create_embedding_cache(settings: object) -> EmbeddingCache | None:
@@ -406,9 +420,10 @@ def index(ctx: click.Context) -> None:
         sys.exit(1)
 
     cache = _create_embedding_cache(settings)
+    bm25 = _create_bm25_index(settings)
     parser = VaultParser(settings.vault)
     embedder = Embedder(settings.embedding, api_key, cache=cache)
-    store = VaultStore(settings.chroma, embedder)
+    store = VaultStore(settings.chroma, embedder, bm25=bm25)
 
     with console.status("Parsing vault..."):
         notes = parser.iter_notes()
@@ -454,9 +469,10 @@ def bot(ctx: click.Context) -> None:
     is_openai = settings.embedding.provider == "openai"
     embed_key = settings.openai_api_key if is_openai else settings.voyage_api_key
     cache = _create_embedding_cache(settings)
+    bm25 = _create_bm25_index(settings)
     parser = VaultParser(settings.vault)
     embedder = Embedder(settings.embedding, embed_key, cache=cache)
-    store = VaultStore(settings.chroma, embedder)
+    store = VaultStore(settings.chroma, embedder, bm25=bm25)
     graph = KnowledgeGraph(settings.graph)
 
     from vaultmind.bot.session_store import SessionStore
