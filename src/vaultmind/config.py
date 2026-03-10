@@ -220,6 +220,15 @@ class VoiceConfig(BaseSettings):
     language: str = ""  # Empty = auto-detect
 
 
+class ImageConfig(BaseSettings):
+    """Image/photo capture configuration."""
+
+    enabled: bool = True
+    vision_model: str = ""  # Empty = use llm.fast_model
+    max_image_size_bytes: int = 10_000_000
+    save_originals: bool = True
+
+
 class IngestConfig(BaseSettings):
     """URL ingestion configuration."""
 
@@ -289,6 +298,7 @@ class Settings(BaseSettings):
     digest: DigestConfig = Field(default_factory=DigestConfig)
     auto_tag: AutoTagConfig = Field(default_factory=AutoTagConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    image: ImageConfig = Field(default_factory=ImageConfig)
     ingest: IngestConfig = Field(default_factory=IngestConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)

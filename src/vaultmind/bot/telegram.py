@@ -229,6 +229,10 @@ def register_handlers(handlers: CommandHandlers) -> None:
     async def handle_voice(message: Message) -> None:
         await handlers.handle_voice(message)
 
+    @router.message(F.photo)
+    async def handle_photo(message: Message) -> None:
+        await handlers.handle_photo(message)
+
     @router.message(F.text & ~F.text.startswith("/"))
     async def handle_text(message: Message) -> None:
         """Default handler: route plain text through message classifier."""

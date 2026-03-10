@@ -132,6 +132,12 @@ enabled = true
 whisper_model = "whisper-1"
 language = ""                            # Empty = auto-detect
 
+[image]
+enabled = true
+vision_model = ""                        # Empty = use llm.fast_model
+max_image_size_bytes = 10000000
+save_originals = true
+
 [ingest]
 enabled = true
 youtube_language = "en"
