@@ -58,6 +58,8 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "• `/decide <decision>` → record a decision\n"
             "• `/outcome <id> <status> <description>` → resolve a decision\n"
             "• `/episodes [entity]` → list episodes\n"
+            "• `/workflows` → list active workflow patterns\n"
+            "• `/workflow <id>` → show workflow steps\n"
             "• `/stats` → vault & graph statistics",
             parse_mode="Markdown",
         )
@@ -254,6 +256,18 @@ def register_handlers(handlers: CommandHandlers) -> None:
     async def cmd_episodes(message: Message) -> None:
         entity = message.text.replace("/episodes", "", 1).strip() if message.text else ""
         await handlers.handle_episodes(message, entity)
+
+    @router.message(Command("workflows"))
+    async def cmd_workflows(message: Message) -> None:
+        await handlers.handle_workflows(message)
+
+    @router.message(Command("workflow"))
+    async def cmd_workflow(message: Message) -> None:
+        workflow_id = message.text.replace("/workflow", "", 1).strip() if message.text else ""
+        if not workflow_id:
+            await message.answer("Usage: <code>/workflow &lt;id&gt;</code>", parse_mode="HTML")
+            return
+        await handlers.handle_workflow_detail(message, workflow_id)
 
     @router.message(F.voice)
     async def handle_voice(message: Message) -> None:

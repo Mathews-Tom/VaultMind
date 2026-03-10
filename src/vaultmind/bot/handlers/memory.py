@@ -1,4 +1,4 @@
-"""Episodic memory bot commands — /decide, /outcome, /episodes."""
+"""Episodic memory bot commands — /decide, /outcome, /episodes, /workflows, /workflow."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from aiogram.types import Message
 
     from vaultmind.bot.handlers.context import HandlerContext
+    from vaultmind.memory.procedural import ProceduralMemory
     from vaultmind.memory.store import EpisodeStore
 
 logger = logging.getLogger(__name__)
@@ -133,5 +134,76 @@ async def handle_episodes(
         lines.append("")
 
     text = "\n".join(lines)
+    for chunk in _split_message(text, max_len=4000):
+        await message.answer(chunk, parse_mode="HTML")
+
+
+async def handle_workflows(
+    ctx: HandlerContext,
+    message: Message,
+    procedural: ProceduralMemory | None,
+) -> None:
+    """List active workflows with success rates. /workflows"""
+    if not _is_authorized(ctx, message):
+        return
+
+    if procedural is None:
+        await message.answer("Procedural memory not enabled.", parse_mode="HTML")
+        return
+
+    workflows = await asyncio.to_thread(procedural.list_active)
+    if not workflows:
+        await message.answer(
+            "No active workflows yet. Use <code>synthesize-workflows</code> CLI to mine patterns.",
+            parse_mode="HTML",
+        )
+        return
+
+    lines = ["<b>Active Workflows</b>", ""]
+    for wf in workflows:
+        rate_pct = f"{wf.success_rate * 100:.0f}%"
+        lines.append(
+            f"<code>{wf.workflow_id}</code> — <b>{wf.name}</b>\n"
+            f"  Success: {rate_pct} | Used: {wf.usage_count}x"
+        )
+        lines.append("")
+
+    text = "\n".join(lines)
+    for chunk in _split_message(text, max_len=4000):
+        await message.answer(chunk, parse_mode="HTML")
+
+
+async def handle_workflow_detail(
+    ctx: HandlerContext,
+    message: Message,
+    workflow_id: str,
+    procedural: ProceduralMemory | None,
+) -> None:
+    """Show workflow steps. /workflow <id>"""
+    if not _is_authorized(ctx, message):
+        return
+
+    if procedural is None:
+        await message.answer("Procedural memory not enabled.", parse_mode="HTML")
+        return
+
+    workflow = await asyncio.to_thread(procedural.get, workflow_id)
+    if workflow is None:
+        await message.answer(
+            f"No workflow found with ID <code>{workflow_id}</code>.", parse_mode="HTML"
+        )
+        return
+
+    steps_text = "\n".join(f"  {i}. {step}" for i, step in enumerate(workflow.steps, 1))
+    rate_pct = f"{workflow.success_rate * 100:.0f}%"
+
+    text = (
+        f"<b>{workflow.name}</b> (<code>{workflow.workflow_id}</code>)\n\n"
+        f"<b>Description:</b> {workflow.description}\n\n"
+        f"<b>Steps:</b>\n{steps_text}\n\n"
+        f"<b>Trigger:</b> {workflow.trigger_pattern}\n\n"
+        f"<b>Stats:</b> {rate_pct} success rate | {workflow.usage_count} uses\n"
+        f"<b>Source episodes:</b> {len(workflow.source_episodes)}"
+    )
     for chunk in _split_message(text, max_len=4000):
         await message.answer(chunk, parse_mode="HTML")

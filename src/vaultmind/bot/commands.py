@@ -16,7 +16,13 @@ from vaultmind.bot.handlers.evolve import handle_evolve
 from vaultmind.bot.handlers.graph import handle_graph
 from vaultmind.bot.handlers.health import handle_health
 from vaultmind.bot.handlers.maturation import handle_mature
-from vaultmind.bot.handlers.memory import handle_decide, handle_episodes, handle_outcome
+from vaultmind.bot.handlers.memory import (
+    handle_decide,
+    handle_episodes,
+    handle_outcome,
+    handle_workflow_detail,
+    handle_workflows,
+)
 from vaultmind.bot.handlers.notes import (
     _find_notes_by_date,
     _llm_resolve_date,
@@ -48,6 +54,7 @@ if TYPE_CHECKING:
     from vaultmind.indexer.note_suggester import NoteSuggester
     from vaultmind.indexer.store import VaultStore
     from vaultmind.llm.client import LLMClient
+    from vaultmind.memory.procedural import ProceduralMemory
     from vaultmind.memory.store import EpisodeStore
     from vaultmind.pipeline.maturation import MaturationPipeline
     from vaultmind.vault.parser import VaultParser
@@ -70,6 +77,7 @@ class CommandHandlers:
         evolution_detector: EvolutionDetector | None = None,
         maturation_pipeline: MaturationPipeline | None = None,
         episode_store: EpisodeStore | None = None,
+        procedural_memory: ProceduralMemory | None = None,
     ) -> None:
         self._ctx = HandlerContext(
             settings=settings,
@@ -86,6 +94,7 @@ class CommandHandlers:
         self._evolution_detector = evolution_detector
         self._maturation_pipeline = maturation_pipeline
         self._episode_store = episode_store
+        self._procedural_memory = procedural_memory
         self._pending_edits: dict[int, dict[str, str]] = {}
         self._search_sessions: dict[int, PaginatedSearch] = {}
         self._last_exchanges: dict[int, LastExchange] = {}
@@ -241,6 +250,18 @@ class CommandHandlers:
             await message.answer("Episodic memory not enabled.")
             return
         await handle_episodes(self._ctx, message, entity, self._episode_store)
+
+    async def handle_workflows(self, message: Message) -> None:
+        if self._procedural_memory is None:
+            await message.answer("Procedural memory not enabled.")
+            return
+        await handle_workflows(self._ctx, message, self._procedural_memory)
+
+    async def handle_workflow_detail(self, message: Message, workflow_id: str) -> None:
+        if self._procedural_memory is None:
+            await message.answer("Procedural memory not enabled.")
+            return
+        await handle_workflow_detail(self._ctx, message, workflow_id, self._procedural_memory)
 
     # --- Backward-compat methods (used by tests) ---
 

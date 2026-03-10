@@ -554,6 +554,31 @@ def bot(ctx: click.Context) -> None:
             vault_root=settings.vault.path,
         )
 
+    # Episodic memory
+    from vaultmind.memory.store import EpisodeStore
+
+    episode_store: EpisodeStore | None = None
+    if settings.episodic.enabled:
+        episode_db = (
+            Path(settings.episodic.db_path)
+            if settings.episodic.db_path
+            else VAULTMIND_HOME / "data" / "episodes.db"
+        )
+        episode_store = EpisodeStore(episode_db)
+
+    # Procedural memory
+    from vaultmind.memory.procedural import ProceduralMemory
+
+    procedural_memory: ProceduralMemory | None = None
+    if settings.procedural.enabled:
+        procedural_db = (
+            Path(settings.procedural.db_path)
+            if settings.procedural.db_path
+            else VAULTMIND_HOME / "data" / "procedural.db"
+        )
+        procedural_memory = ProceduralMemory(procedural_db)
+        console.print("[green]✓[/green] Procedural memory enabled")
+
     handlers = CommandHandlers(
         settings=settings,
         store=store,
@@ -566,6 +591,8 @@ def bot(ctx: click.Context) -> None:
         transcriber=transcriber,
         evolution_detector=evolution_detector,
         maturation_pipeline=maturation_pipeline,
+        episode_store=episode_store,
+        procedural_memory=procedural_memory,
     )
 
     tg_bot, dp = create_bot(settings.telegram.bot_token)
@@ -1132,6 +1159,86 @@ def learn(ctx: click.Context, days: int, save_report: bool) -> None:
             console.print(f"  {rec}")
 
     store.close()
+
+
+@cli.command("synthesize-workflows")
+@click.option(
+    "--min-episodes",
+    default=3,
+    show_default=True,
+    type=int,
+    help="Minimum episodes per pattern",
+)
+@click.pass_context
+def synthesize_workflows(ctx: click.Context, min_episodes: int) -> None:
+    """Mine episodic memory for workflow patterns."""
+    from vaultmind.config import VAULTMIND_HOME, load_settings
+    from vaultmind.memory.procedural import ProceduralMemory
+    from vaultmind.memory.store import EpisodeStore
+
+    settings = load_settings(ctx.obj.get("config_path"))
+
+    if not settings.procedural.enabled:
+        console.print(
+            "[yellow]Procedural memory is disabled.[/yellow] "
+            "Set [procedural] enabled = true in config to use this feature."
+        )
+        return
+
+    _require_llm_key(settings)
+
+    episode_db = (
+        Path(settings.episodic.db_path)
+        if settings.episodic.db_path
+        else VAULTMIND_HOME / "data" / "episodes.db"
+    )
+    if not episode_db.exists():
+        console.print(
+            "[yellow]No episodic memory found.[/yellow] "
+            "Use /decide and /outcome in the bot to create episodes first."
+        )
+        return
+
+    procedural_db = (
+        Path(settings.procedural.db_path)
+        if settings.procedural.db_path
+        else VAULTMIND_HOME / "data" / "procedural.db"
+    )
+
+    synthesis_model = settings.procedural.synthesis_model or settings.llm.fast_model
+    llm_client = _create_llm_client(settings)
+    episode_store = EpisodeStore(episode_db)
+    procedural = ProceduralMemory(procedural_db)
+
+    resolved_count = len(episode_store.query_resolved())
+    console.print(f"  Resolved episodes available: {resolved_count}")
+
+    with console.status("Synthesizing workflows..."):
+        workflows = procedural.synthesize_workflows(
+            episode_store=episode_store,
+            llm_client=llm_client,
+            model=synthesis_model,
+            min_episodes=min_episodes,
+        )
+
+    if not workflows:
+        console.print(
+            "[yellow]No workflow patterns found.[/yellow] "
+            f"Need >= {min_episodes} resolved episodes with shared entities."
+        )
+    else:
+        console.print(f"[green]✓[/green] Synthesized {len(workflows)} workflow(s):")
+        for wf in workflows:
+            console.print(f"\n  [bold]{wf.name}[/bold] ({wf.workflow_id})")
+            console.print(f"  {wf.description}")
+            console.print(f"  Trigger: {wf.trigger_pattern}")
+            console.print(f"  Steps: {len(wf.steps)}")
+            for i, step in enumerate(wf.steps, 1):
+                console.print(f"    {i}. {step}")
+            console.print(f"  Source episodes: {len(wf.source_episodes)}")
+
+    episode_store.close()
+    procedural.close()
 
 
 @cli.command("mcp-serve")
