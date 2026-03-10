@@ -270,6 +270,15 @@ class EpisodicConfig(BaseSettings):
     extraction_model: str = ""  # Empty = use llm.fast_model
 
 
+class ProceduralConfig(BaseSettings):
+    """Procedural memory configuration."""
+
+    enabled: bool = False  # Off by default — experimental
+    db_path: str = ""  # Empty = default ~/.vaultmind/data/procedural.db
+    min_episodes_for_pattern: int = 3
+    synthesis_model: str = ""  # Empty = use llm.fast_model
+
+
 class MCPConfig(BaseSettings):
     """MCP server configuration."""
 
@@ -313,6 +322,7 @@ class Settings(BaseSettings):
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)
     activation: ActivationConfig = Field(default_factory=ActivationConfig)
     episodic: EpisodicConfig = Field(default_factory=EpisodicConfig)
+    procedural: ProceduralConfig = Field(default_factory=ProceduralConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     # API keys — always from env vars

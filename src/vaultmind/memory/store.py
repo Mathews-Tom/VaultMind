@@ -147,6 +147,16 @@ class EpisodeStore:
         ).fetchall()
         return [_row_to_episode(r) for r in rows]
 
+    def query_resolved(self, limit: int = 100) -> list[Episode]:
+        """Return resolved episodes (non-pending), ordered by created desc."""
+        rows = self._conn.execute(
+            "SELECT * FROM episodes"
+            " WHERE outcome_status != 'pending'"
+            " ORDER BY created DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_episode(r) for r in rows]
+
     def search_by_entity(self, entity: str, limit: int = 10) -> list[Episode]:
         """Find episodes mentioning a specific entity (case-insensitive substring)."""
         rows = self._conn.execute(

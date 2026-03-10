@@ -164,6 +164,12 @@ db_path = ""                                # Empty = default ~/.vaultmind/data/
 auto_extract = false                        # LLM extraction from notes (opt-in)
 extraction_model = ""                       # Empty = use llm.fast_model
 
+[procedural]
+enabled = false                             # Experimental — disabled by default
+db_path = ""                                # Empty = default ~/.vaultmind/data/procedural.db
+min_episodes_for_pattern = 3
+synthesis_model = ""                        # Empty = use llm.fast_model
+
 [mcp]
 enabled = false
 host = "127.0.0.1"
