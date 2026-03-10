@@ -69,6 +69,7 @@ The server binds to `127.0.0.1:8765` by default. Configure in `[mcp]` section of
 Semantic search over the vault using ChromaDB embeddings.
 
 **Parameters:**
+
 - `query` (string, required) — natural language search query
 - `n_results` (int, default 5) — number of results
 - `note_type` (string, optional) — filter by note type (`fleeting`, `literature`, `permanent`, `project`, etc.)
@@ -80,6 +81,7 @@ Semantic search over the vault using ChromaDB embeddings.
 Read the full content of a note.
 
 **Parameters:**
+
 - `path` (string, required) — note path relative to vault root (e.g., `02-projects/cairn/architecture.md`)
 
 **Returns:** Full markdown content including frontmatter.
@@ -89,6 +91,7 @@ Read the full content of a note.
 Create or overwrite a note. The note is automatically re-indexed in ChromaDB after writing.
 
 **Parameters:**
+
 - `path` (string, required) — note path relative to vault root
 - `content` (string, required) — full markdown content including YAML frontmatter
 
@@ -99,6 +102,7 @@ Create or overwrite a note. The note is automatically re-indexed in ChromaDB aft
 List notes in a vault folder.
 
 **Parameters:**
+
 - `folder` (string, default `""`) — folder path relative to vault root (empty = root)
 - `tag` (string, optional) — filter by tag
 
@@ -109,6 +113,7 @@ List notes in a vault folder.
 Query an entity's connections in the knowledge graph.
 
 **Parameters:**
+
 - `entity` (string, required) — entity name to look up
 - `depth` (int, default 1) — neighborhood traversal depth
 
@@ -119,6 +124,7 @@ Query an entity's connections in the knowledge graph.
 Find the shortest path between two entities in the knowledge graph.
 
 **Parameters:**
+
 - `source` (string, required) — source entity name
 - `target` (string, required) — target entity name
 
@@ -129,10 +135,12 @@ Find the shortest path between two entities in the knowledge graph.
 Find semantically similar or duplicate notes.
 
 **Parameters:**
+
 - `note_path` (string, required) — note path relative to vault root
 - `max_results` (int, default 10) — maximum number of matches
 
 **Returns:** Matches classified into bands:
+
 - **Duplicate** (>= 92% similarity) — nearly identical content
 - **Merge candidate** (80-92% similarity) — related content worth consolidating
 
@@ -141,10 +149,12 @@ Find semantically similar or duplicate notes.
 Find notes that should be linked to a given note using composite scoring.
 
 **Parameters:**
+
 - `note_path` (string, required) — note path relative to vault root
 - `max_results` (int, default 5) — maximum number of suggestions
 
 **Returns:** Suggestions with composite scores based on:
+
 - Semantic similarity (70-80% band, below duplicate threshold)
 - Shared graph entities (weight: 0.1 per entity)
 - Graph path distance (weight: 0.05)
@@ -154,6 +164,7 @@ Find notes that should be linked to a given note using composite scoring.
 Quick-capture a note to the vault inbox.
 
 **Parameters:**
+
 - `content` (string, required) — note content
 - `title` (string, optional) — note title (auto-generated timestamp if omitted)
 - `tags` (array of strings, optional) — tags (defaults to `["capture"]`)
@@ -165,6 +176,7 @@ Quick-capture a note to the vault inbox.
 Rich note capture with full frontmatter control. Creates the note, writes full YAML frontmatter, and indexes immediately.
 
 **Parameters:**
+
 - `content` (string, required) — note content (markdown)
 - `title` (string, optional) — note title (auto-generated from first line of content if omitted)
 - `tags` (array of strings, optional) — tags for the note
@@ -223,6 +235,7 @@ All path-based tools validate that the requested path resolves within the vault 
 ### Audit logging
 
 Every MCP tool call is logged with:
+
 - Profile name
 - Tool name
 - Arguments
@@ -232,6 +245,7 @@ Every MCP tool call is logged with:
 ### Profile enforcement
 
 The `ProfileEnforcer` checks:
+
 1. Is this tool allowed for the active profile?
 2. Is write access enabled (for `vault_write`, `capture`, `capture_note`)?
 3. Is the target path within the allowed folder scope?

@@ -41,7 +41,7 @@ When enabled, changes are batched on a timer (`watch.batch_graph_interval_second
 
 ### Telegram Bot
 
-```
+```text
 /graph Python
 ```
 
@@ -69,6 +69,7 @@ uv run vaultmind graph-maintain
 ```
 
 This command:
+
 1. **Prunes stale source references** — removes source-note attributions for notes that no longer exist
 2. **Removes orphan entities** — deletes entities with no remaining source notes
 
@@ -86,6 +87,7 @@ The `/think` command uses the knowledge graph as context:
 This gives the thinking partner awareness of how concepts in your vault relate to each other — not just what's semantically similar, but what's structurally connected.
 
 Configuration in `[llm]`:
+
 - `graph_context_enabled` — toggle graph context (default: true)
 - `graph_hop_depth` — ego subgraph depth (default: 2)
 - `graph_min_confidence` — minimum confidence for context entities (default: 0.6)

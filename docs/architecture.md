@@ -6,7 +6,7 @@ VaultMind is structured as a set of composable modules around a central principl
 
 ## Module Map
 
-```
+```text
 src/vaultmind/
 ├── cli.py           # Click CLI entry point
 ├── config.py        # Pydantic Settings — TOML + env vars
@@ -116,7 +116,7 @@ src/vaultmind/
 
 ### Indexing Pipeline
 
-```
+```text
 Markdown files → Parser (contextual chunks) → Embedder → ChromaDB
                     ↓                              ↓          ↓
               Frontmatter metadata         Embedding Cache   BM25 Index (FTS5)
@@ -128,7 +128,7 @@ Markdown files → Parser (contextual chunks) → Embedder → ChromaDB
 
 ### Hybrid Search
 
-```
+```text
 Query → Vector search (ChromaDB) ─┐
      → BM25 keyword search (FTS5) ┼→ Reciprocal Rank Fusion → Ranked results
                                    │        ↓
@@ -139,7 +139,7 @@ When hybrid search is enabled (default), both vector and keyword results are mer
 
 ### Watch Pipeline
 
-```
+```text
 Filesystem event → Debounce → Hash stability check → Index update → Event bus
                                                                        ↓
                                                      Duplicate detection (fire-and-forget)
@@ -151,7 +151,7 @@ Two-stage hash stability eliminates partial-write bugs from Obsidian's rapid sav
 
 ### Message Routing
 
-```
+```text
 User message → Sanitize → Intent classifier (heuristic-first)
                               ↓
                    ┌──────────┼──────────────┐
@@ -164,7 +164,7 @@ The router uses heuristics (regex, length, line count) before falling back to LL
 
 ### Thinking Partner
 
-```
+```text
 User topic → Entity extraction (LLM) → Ego subgraph (NetworkX)
                                            ↓
                                     Vault search (ChromaDB)
@@ -178,7 +178,7 @@ Multi-turn sessions persist to SQLite with `(user_id, session_name)` composite k
 
 ### Zettelkasten Maturation
 
-```
+```text
 Fleeting/literature notes → DBSCAN clustering (embeddings)
                                     ↓
                             Cluster digest (user review)
@@ -190,7 +190,7 @@ The pipeline identifies clusters of semantically related fleeting notes ready to
 
 ### Belief Evolution
 
-```
+```text
 Knowledge graph snapshots → Confidence drift detection
                          → Relationship shift detection
                          → Stale claim detection (> 180 days)
@@ -200,7 +200,7 @@ Knowledge graph snapshots → Confidence drift detection
 
 ### Episodic Memory
 
-```
+```text
 /decide <text> → EpisodeStore (SQLite) → Pending episode
 /outcome <id> <status> <desc> → Resolved episode with lessons
                                         ↓

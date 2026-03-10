@@ -99,7 +99,7 @@ uv run vaultmind init
 
 Creates the `~/.vaultmind/` directory structure:
 
-```
+```text
 ~/.vaultmind/
 ├── vault/
 │   ├── 00-inbox/
@@ -148,41 +148,41 @@ The bot starts with watch mode enabled — vault changes are indexed incremental
 
 ## CLI Commands
 
-| Command | Description |
-| --- | --- |
-| `vaultmind init` | Create vault folder structure |
-| `vaultmind index` | Full vault index into ChromaDB |
-| `vaultmind watch` | Watch vault, incrementally re-index on change |
-| `vaultmind watch --graph` | Watch + batched graph re-extraction |
-| `vaultmind bot` | Start Telegram bot (includes watch + duplicate detection + suggestions) |
-| `vaultmind graph-build` | Build knowledge graph (add `--full` to rebuild) |
-| `vaultmind graph-maintain` | Prune stale refs + remove orphan entities |
-| `vaultmind graph-report` | Generate graph analytics report |
-| `vaultmind scan-duplicates` | Scan vault for duplicate/merge candidates |
-| `vaultmind suggest-links` | Suggest links between notes |
-| `vaultmind digest` | Generate weekly digest (add `--save` to write to vault) |
-| `vaultmind auto-tag` | LLM-based tag suggestions (dry-run by default) |
-| `vaultmind auto-tag --apply` | Apply suggested tags to frontmatter |
-| `vaultmind research "query"` | Search YouTube, analyze transcripts, create vault notes |
-| `vaultmind learn` | Analyze usage patterns, generate insights report |
-| `vaultmind learn --save` | Save insights report to vault |
-| `vaultmind tag-synonyms` | Detect likely tag synonyms and suggest merges |
-| `vaultmind synthesize-workflows` | Mine episodic memory for workflow patterns |
-| `vaultmind stats` | Show vault + graph statistics |
-| `vaultmind stats --metadata-audit` | Audit frontmatter completeness |
-| `vaultmind mcp-serve` | Start MCP server (default profile: researcher) |
-| `vaultmind mcp-serve --profile full` | Start MCP with full access |
+| Command                              | Description                                                             |
+| ------------------------------------ | ----------------------------------------------------------------------- |
+| `vaultmind init`                     | Create vault folder structure                                           |
+| `vaultmind index`                    | Full vault index into ChromaDB                                          |
+| `vaultmind watch`                    | Watch vault, incrementally re-index on change                           |
+| `vaultmind watch --graph`            | Watch + batched graph re-extraction                                     |
+| `vaultmind bot`                      | Start Telegram bot (includes watch + duplicate detection + suggestions) |
+| `vaultmind graph-build`              | Build knowledge graph (add `--full` to rebuild)                         |
+| `vaultmind graph-maintain`           | Prune stale refs + remove orphan entities                               |
+| `vaultmind graph-report`             | Generate graph analytics report                                         |
+| `vaultmind scan-duplicates`          | Scan vault for duplicate/merge candidates                               |
+| `vaultmind suggest-links`            | Suggest links between notes                                             |
+| `vaultmind digest`                   | Generate weekly digest (add `--save` to write to vault)                 |
+| `vaultmind auto-tag`                 | LLM-based tag suggestions (dry-run by default)                          |
+| `vaultmind auto-tag --apply`         | Apply suggested tags to frontmatter                                     |
+| `vaultmind research "query"`         | Search YouTube, analyze transcripts, create vault notes                 |
+| `vaultmind learn`                    | Analyze usage patterns, generate insights report                        |
+| `vaultmind learn --save`             | Save insights report to vault                                           |
+| `vaultmind tag-synonyms`             | Detect likely tag synonyms and suggest merges                           |
+| `vaultmind synthesize-workflows`     | Mine episodic memory for workflow patterns                              |
+| `vaultmind stats`                    | Show vault + graph statistics                                           |
+| `vaultmind stats --metadata-audit`   | Audit frontmatter completeness                                          |
+| `vaultmind mcp-serve`                | Start MCP server (default profile: researcher)                          |
+| `vaultmind mcp-serve --profile full` | Start MCP with full access                                              |
 
 ## LLM Providers
 
 Set `[llm].provider` in `config/default.toml` and the matching API key in `.env`.
 
-| Provider | Config | Model examples |
-| --- | --- | --- |
+| Provider  | Config                   | Model examples                                       |
+| --------- | ------------------------ | ---------------------------------------------------- |
 | Anthropic | `provider = "anthropic"` | `claude-sonnet-4-20250514`, `claude-opus-4-20250514` |
-| OpenAI | `provider = "openai"` | `gpt-4.1`, `gpt-4.1-mini` |
-| Gemini | `provider = "gemini"` | `gemini-2.5-flash`, `gemini-2.5-pro` |
-| Ollama | `provider = "ollama"` | `llama3.3`, `qwen3`, `deepseek-r1` |
+| OpenAI    | `provider = "openai"`    | `gpt-4.1`, `gpt-4.1-mini`                            |
+| Gemini    | `provider = "gemini"`    | `gemini-2.5-flash`, `gemini-2.5-pro`                 |
+| Ollama    | `provider = "ollama"`    | `llama3.3`, `qwen3`, `deepseek-r1`                   |
 
 Ollama requires no API key. Set `ollama_base_url` if not running on `localhost:11434`.
 
@@ -192,18 +192,18 @@ Ollama requires no API key. Set `ollama_base_url` if not running on `localhost:1
 
 Plain text messages are classified automatically — no command prefix needed:
 
-| You send | What happens |
-| --- | --- |
-| `note: buy groceries` | Captured to inbox (prefix stripped) |
-| `save: meeting notes...` | Captured to inbox (prefix stripped) |
-| Multiline paste (3+ lines) | Captured to inbox (pasted content = intentional) |
-| Long text (500+ chars) | Captured to inbox |
-| "Hi", "thanks", "ok" | Static greeting response (no LLM call) |
-| "What did I write about X?" | Vault-context-aware answer via LLM |
-| "Tell me about my projects" | Conversational response with vault context |
-| Follow-up after `/think` | Continues thinking session (sticky) |
-| URL in message | Auto-ingests YouTube transcript or article content |
-| Photo/image | Described via vision model, saved as note with image embed |
+| You send                    | What happens                                               |
+| --------------------------- | ---------------------------------------------------------- |
+| `note: buy groceries`       | Captured to inbox (prefix stripped)                        |
+| `save: meeting notes...`    | Captured to inbox (prefix stripped)                        |
+| Multiline paste (3+ lines)  | Captured to inbox (pasted content = intentional)           |
+| Long text (500+ chars)      | Captured to inbox                                          |
+| "Hi", "thanks", "ok"        | Static greeting response (no LLM call)                     |
+| "What did I write about X?" | Vault-context-aware answer via LLM                         |
+| "Tell me about my projects" | Conversational response with vault context                 |
+| Follow-up after `/think`    | Continues thinking session (sticky)                        |
+| URL in message              | Auto-ingests YouTube transcript or article content         |
+| Photo/image                 | Described via vision model, saved as note with image embed |
 
 Capture prefixes: `note:`, `save:`, `capture:`, `remember:`, `jot:`, `log:`
 
@@ -211,35 +211,35 @@ Set `capture_all = true` in `[routing]` config to restore old behavior (all text
 
 ### Commands
 
-| Command | Description |
-| --- | --- |
-| `/recall <query>` | Semantic search over vault (paginated) |
-| `/think <topic>` | Start thinking partner session (persists across restarts) |
-| `/think explore: <topic>` | Divergent ideation mode |
-| `/think critique: <topic>` | Stress-test an idea |
-| `/think synthesize: <topic>` | Connect dots across domains |
-| `/think plan: <topic>` | Create execution plan |
-| `/graph <entity>` | Query knowledge graph connections |
-| `/daily` | Get/create today's daily note |
-| `/notes <date>` | Find notes by date (natural language: `yesterday`, `last week`) |
-| `/read <note>` | Read full note content |
-| `/edit <note> <instruction>` | AI-assisted edit with confirmation |
-| `/delete <note>` | Delete note with confirmation |
-| `/bookmark <title>` | Save thinking session or last Q&A to vault |
-| `/suggest <note>` | Find notes worth linking (composite scoring) |
-| `/duplicates <note>` | Find duplicate/similar notes |
-| `/review` | Weekly review with graph insights |
-| `/evolve` | Belief evolution signals (confidence drift, stale claims) |
-| `/mature` | Zettelkasten maturation — clusters ready for synthesis |
-| `/decide <decision>` | Record a decision (creates pending episode) |
-| `/outcome <id> <status> <desc>` | Resolve a decision with outcome and lessons |
-| `/episodes [entity]` | List episodes, optionally filtered by entity |
-| `/workflows` | List active workflow patterns with success rates |
-| `/workflow <id>` | Show workflow steps and details |
-| `/health` | System health check |
-| `/stats` | Vault and graph statistics |
-| Send voice message | Transcribe via Whisper and route as capture or question |
-| Send photo | Describe via vision model and capture as note with image embed |
+| Command                         | Description                                                     |
+| ------------------------------- | --------------------------------------------------------------- |
+| `/recall <query>`               | Semantic search over vault (paginated)                          |
+| `/think <topic>`                | Start thinking partner session (persists across restarts)       |
+| `/think explore: <topic>`       | Divergent ideation mode                                         |
+| `/think critique: <topic>`      | Stress-test an idea                                             |
+| `/think synthesize: <topic>`    | Connect dots across domains                                     |
+| `/think plan: <topic>`          | Create execution plan                                           |
+| `/graph <entity>`               | Query knowledge graph connections                               |
+| `/daily`                        | Get/create today's daily note                                   |
+| `/notes <date>`                 | Find notes by date (natural language: `yesterday`, `last week`) |
+| `/read <note>`                  | Read full note content                                          |
+| `/edit <note> <instruction>`    | AI-assisted edit with confirmation                              |
+| `/delete <note>`                | Delete note with confirmation                                   |
+| `/bookmark <title>`             | Save thinking session or last Q&A to vault                      |
+| `/suggest <note>`               | Find notes worth linking (composite scoring)                    |
+| `/duplicates <note>`            | Find duplicate/similar notes                                    |
+| `/review`                       | Weekly review with graph insights                               |
+| `/evolve`                       | Belief evolution signals (confidence drift, stale claims)       |
+| `/mature`                       | Zettelkasten maturation — clusters ready for synthesis          |
+| `/decide <decision>`            | Record a decision (creates pending episode)                     |
+| `/outcome <id> <status> <desc>` | Resolve a decision with outcome and lessons                     |
+| `/episodes [entity]`            | List episodes, optionally filtered by entity                    |
+| `/workflows`                    | List active workflow patterns with success rates                |
+| `/workflow <id>`                | Show workflow steps and details                                 |
+| `/health`                       | System health check                                             |
+| `/stats`                        | Vault and graph statistics                                      |
+| Send voice message              | Transcribe via Whisper and route as capture or question         |
+| Send photo                      | Describe via vision model and capture as note with image embed  |
 
 ## MCP Integration
 
@@ -270,28 +270,28 @@ uv sync --extra mcp
 
 ### MCP Tools
 
-| Tool | Description |
-| --- | --- |
-| `vault_search` | Semantic search with optional note type filter |
-| `vault_read` | Read full note by relative path |
-| `vault_write` | Create/overwrite note + auto-reindex |
-| `vault_list` | List folder contents with optional tag/type filter |
-| `graph_query` | Entity neighbors and relationships (configurable depth) |
-| `graph_path` | Shortest path between two entities |
-| `find_duplicates` | Semantic duplicate detection (duplicate/merge bands) |
-| `suggest_links` | Note suggestions (similarity + shared entities + graph distance) |
-| `capture` | Quick-capture to inbox with optional title and tags |
-| `capture_note` | Rich capture with note type, tags, and target folder |
+| Tool              | Description                                                      |
+| ----------------- | ---------------------------------------------------------------- |
+| `vault_search`    | Semantic search with optional note type filter                   |
+| `vault_read`      | Read full note by relative path                                  |
+| `vault_write`     | Create/overwrite note + auto-reindex                             |
+| `vault_list`      | List folder contents with optional tag/type filter               |
+| `graph_query`     | Entity neighbors and relationships (configurable depth)          |
+| `graph_path`      | Shortest path between two entities                               |
+| `find_duplicates` | Semantic duplicate detection (duplicate/merge bands)             |
+| `suggest_links`   | Note suggestions (similarity + shared entities + graph distance) |
+| `capture`         | Quick-capture to inbox with optional title and tags              |
+| `capture_note`    | Rich capture with note type, tags, and target folder             |
 
 ### MCP Profiles
 
 Profiles control per-agent access. Activate with `--profile <name>`:
 
-| Profile | Access | Folders |
-| --- | --- | --- |
-| `researcher` (default) | Read-only: search, read, list, graph | All |
-| `planner` | Read/write: + capture, capture_note, vault_write | `02-projects`, `00-inbox` |
-| `full` | Unrestricted (requires explicit opt-in) | All |
+| Profile                | Access                                           | Folders                   |
+| ---------------------- | ------------------------------------------------ | ------------------------- |
+| `researcher` (default) | Read-only: search, read, list, graph             | All                       |
+| `planner`              | Read/write: + capture, capture_note, vault_write | `02-projects`, `00-inbox` |
+| `full`                 | Unrestricted (requires explicit opt-in)          | All                       |
 
 ## Vault Structure
 
@@ -326,11 +326,11 @@ status: active
 
 Layered config system:
 
-| Layer | File | Purpose |
-| --- | --- | --- |
-| Settings | `config/default.toml` | All non-secret config (paths, models, thresholds) |
-| Secrets | `.env` | API keys, bot token |
-| Overrides | Environment variables | `VAULTMIND_*` prefix overrides any setting |
+| Layer     | File                  | Purpose                                           |
+| --------- | --------------------- | ------------------------------------------------- |
+| Settings  | `config/default.toml` | All non-secret config (paths, models, thresholds) |
+| Secrets   | `.env`                | API keys, bot token                               |
+| Overrides | Environment variables | `VAULTMIND_*` prefix overrides any setting        |
 
 Config sections: `[vault]`, `[llm]`, `[telegram]`, `[routing]`, `[embedding]`, `[chroma]`, `[graph]`, `[watch]`, `[duplicate_detection]`, `[note_suggestions]`, `[search]`, `[ranking]`, `[activation]`, `[maturation]`, `[evolution]`, `[digest]`, `[auto_tag]`, `[voice]`, `[ingest]`, `[research]`, `[tracking]`, `[image]`, `[episodic]`, `[procedural]`, `[mcp]`.
 
@@ -400,19 +400,19 @@ uv run ruff format src/ tests/
 
 ## Tech Stack
 
-| Layer | Technology |
-| --- | --- |
-| Language | Python 3.12+ |
-| LLM | Anthropic, OpenAI, Gemini, Ollama (provider-agnostic) |
-| Embeddings | OpenAI / Voyage |
-| Vector Store | ChromaDB |
-| Knowledge Graph | NetworkX |
-| Clustering | scikit-learn (DBSCAN) |
-| Telegram Bot | aiogram 3.x |
-| Agent Protocol | MCP |
-| CLI | Click + Rich |
-| Config | Pydantic Settings + TOML |
-| Packaging | Hatch + uv |
+| Layer           | Technology                                            |
+| --------------- | ----------------------------------------------------- |
+| Language        | Python 3.12+                                          |
+| LLM             | Anthropic, OpenAI, Gemini, Ollama (provider-agnostic) |
+| Embeddings      | OpenAI / Voyage                                       |
+| Vector Store    | ChromaDB                                              |
+| Knowledge Graph | NetworkX                                              |
+| Clustering      | scikit-learn (DBSCAN)                                 |
+| Telegram Bot    | aiogram 3.x                                           |
+| Agent Protocol  | MCP                                                   |
+| CLI             | Click + Rich                                          |
+| Config          | Pydantic Settings + TOML                              |
+| Packaging       | Hatch + uv                                            |
 
 ## Documentation
 
