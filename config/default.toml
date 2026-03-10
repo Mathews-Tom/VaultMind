@@ -78,6 +78,8 @@ graph_weight = 0.05                  # boost from graph path proximity
 page_size = 5
 max_results = 25
 session_ttl = 300                        # seconds before paginated session expires
+hybrid_enabled = true
+bm25_db_path = ""                        # Empty = default ~/.vaultmind/data/bm25.db
 
 [ranking]
 enabled = true

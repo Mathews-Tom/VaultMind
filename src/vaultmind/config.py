@@ -147,6 +147,8 @@ class SearchConfig(BaseSettings):
     page_size: int = 5
     max_results: int = 25
     session_ttl: int = 300
+    hybrid_enabled: bool = True
+    bm25_db_path: str = ""  # Empty = default ~/.vaultmind/data/bm25.db
 
 
 class RankingConfig(BaseSettings):
