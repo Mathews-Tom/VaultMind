@@ -130,9 +130,7 @@ class VaultParser:
 
                 for para in paragraphs:
                     if len((current_chunk + para).encode()) // 4 > max_tokens and current_chunk:
-                        body_text = (
-                            f"{heading}\n\n{current_chunk}" if heading else current_chunk
-                        )
+                        body_text = f"{heading}\n\n{current_chunk}" if heading else current_chunk
                         chunks.append(
                             NoteChunk(
                                 note_path=str(note.path),
@@ -153,9 +151,7 @@ class VaultParser:
                         current_chunk = f"{current_chunk}\n\n{para}" if current_chunk else para
 
                 if current_chunk.strip():
-                    body_text = (
-                        f"{heading}\n\n{current_chunk}" if heading else current_chunk
-                    )
+                    body_text = f"{heading}\n\n{current_chunk}" if heading else current_chunk
                     chunks.append(
                         NoteChunk(
                             note_path=str(note.path),
