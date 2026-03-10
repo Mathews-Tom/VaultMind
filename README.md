@@ -6,20 +6,26 @@
 
 AI-powered personal knowledge management built on Obsidian.
 
-Turns your Obsidian vault into an intelligent second brain — semantic search,
-knowledge graph, Telegram bot, AI thinking partner, Zettelkasten maturation
-pipeline, belief evolution tracking, and MCP integration for connecting Claude
-and other agents directly to your notes.
+Turns your Obsidian vault into an intelligent second brain — hybrid search
+(vector + BM25), knowledge graph, Telegram bot with photo capture, AI thinking
+partner, Zettelkasten maturation pipeline, belief evolution tracking, episodic
+and procedural memory, and MCP integration for connecting Claude and other
+agents directly to your notes.
 
 ## Why VaultMind?
 
 - **Obsidian is the source of truth** — plain markdown files, always
-- **AI augments, never replaces** — semantic search and knowledge graphs surface what you'd miss
-- **Mobile-first capture** — Telegram bot gives full PKM access from your phone
+- **AI augments, never replaces** — hybrid search (vector + BM25) and knowledge graphs surface what you'd miss
+- **Mobile-first capture** — Telegram bot gives full PKM access from your phone, including photo capture via vision models
 - **Agent-native** — Claude Desktop/Code and other AI agents read/write your vault via MCP
 - **Multi-provider LLM** — Anthropic, OpenAI, Gemini, or Ollama for thinking + extraction
+- **Hybrid retrieval** — Reciprocal Rank Fusion merges vector (ChromaDB) and keyword (SQLite FTS5) search results
+- **Contextual embeddings** — chunks carry document-level context (title, type, section, tags) for higher-quality vectors
 - **Zettelkasten maturation** — DBSCAN clustering surfaces fleeting notes ready for permanent synthesis
 - **Belief evolution** — tracks confidence drift, relationship shifts, and stale claims across your knowledge
+- **Episodic memory** — decision-outcome tracking with lessons learned and entity linking
+- **Procedural memory** — mines recurring decision patterns into reusable workflows (experimental)
+- **Note modes** — learning vs. operational mode with activation-based decay scoring
 - **Secure by default** — path traversal protection, input sanitization, injection detection on all vault operations
 - **Smart caching** — SQLite-backed embedding cache eliminates redundant API calls during re-indexing
 - **Your data, your infra** — self-hosted, local-first, no cloud dependency
@@ -106,8 +112,11 @@ Creates the `~/.vaultmind/` directory structure:
 │   └── _meta/
 └── data/
     ├── chromadb/
+    ├── bm25.db
     ├── embedding_cache.db
     ├── knowledge_graph.json
+    ├── activations.db
+    ├── episodes.db
     ├── preferences.db
     └── sessions.db
 ```
@@ -157,6 +166,8 @@ The bot starts with watch mode enabled — vault changes are indexed incremental
 | `vaultmind research "query"` | Search YouTube, analyze transcripts, create vault notes |
 | `vaultmind learn` | Analyze usage patterns, generate insights report |
 | `vaultmind learn --save` | Save insights report to vault |
+| `vaultmind tag-synonyms` | Detect likely tag synonyms and suggest merges |
+| `vaultmind synthesize-workflows` | Mine episodic memory for workflow patterns |
 | `vaultmind stats` | Show vault + graph statistics |
 | `vaultmind stats --metadata-audit` | Audit frontmatter completeness |
 | `vaultmind mcp-serve` | Start MCP server (default profile: researcher) |
@@ -192,6 +203,7 @@ Plain text messages are classified automatically — no command prefix needed:
 | "Tell me about my projects" | Conversational response with vault context |
 | Follow-up after `/think` | Continues thinking session (sticky) |
 | URL in message | Auto-ingests YouTube transcript or article content |
+| Photo/image | Described via vision model, saved as note with image embed |
 
 Capture prefixes: `note:`, `save:`, `capture:`, `remember:`, `jot:`, `log:`
 
@@ -219,9 +231,15 @@ Set `capture_all = true` in `[routing]` config to restore old behavior (all text
 | `/review` | Weekly review with graph insights |
 | `/evolve` | Belief evolution signals (confidence drift, stale claims) |
 | `/mature` | Zettelkasten maturation — clusters ready for synthesis |
+| `/decide <decision>` | Record a decision (creates pending episode) |
+| `/outcome <id> <status> <desc>` | Resolve a decision with outcome and lessons |
+| `/episodes [entity]` | List episodes, optionally filtered by entity |
+| `/workflows` | List active workflow patterns with success rates |
+| `/workflow <id>` | Show workflow steps and details |
 | `/health` | System health check |
 | `/stats` | Vault and graph statistics |
 | Send voice message | Transcribe via Whisper and route as capture or question |
+| Send photo | Describe via vision model and capture as note with image embed |
 
 ## MCP Integration
 
@@ -263,6 +281,7 @@ uv sync --extra mcp
 | `find_duplicates` | Semantic duplicate detection (duplicate/merge bands) |
 | `suggest_links` | Note suggestions (similarity + shared entities + graph distance) |
 | `capture` | Quick-capture to inbox with optional title and tags |
+| `capture_note` | Rich capture with note type, tags, and target folder |
 
 ### MCP Profiles
 
@@ -271,7 +290,7 @@ Profiles control per-agent access. Activate with `--profile <name>`:
 | Profile | Access | Folders |
 | --- | --- | --- |
 | `researcher` (default) | Read-only: search, read, list, graph | All |
-| `planner` | Read/write: + capture, vault_write | `02-projects`, `00-inbox` |
+| `planner` | Read/write: + capture, capture_note, vault_write | `02-projects`, `00-inbox` |
 | `full` | Unrestricted (requires explicit opt-in) | All |
 
 ## Vault Structure
@@ -295,6 +314,7 @@ Notes use YAML frontmatter:
 ```yaml
 ---
 type: project # fleeting | literature | permanent | daily | project | area | person | concept
+mode: operational # learning (default) | operational — affects retrieval ranking
 tags: [python, ai]
 created: 2026-01-15
 entities: [CAIRN, MCP]
@@ -312,7 +332,7 @@ Layered config system:
 | Secrets | `.env` | API keys, bot token |
 | Overrides | Environment variables | `VAULTMIND_*` prefix overrides any setting |
 
-Config sections: `[vault]`, `[llm]`, `[telegram]`, `[routing]`, `[embedding]`, `[chroma]`, `[graph]`, `[watch]`, `[duplicate_detection]`, `[note_suggestions]`, `[search]`, `[ranking]`, `[maturation]`, `[evolution]`, `[digest]`, `[auto_tag]`, `[voice]`, `[ingest]`, `[research]`, `[tracking]`, `[mcp]`.
+Config sections: `[vault]`, `[llm]`, `[telegram]`, `[routing]`, `[embedding]`, `[chroma]`, `[graph]`, `[watch]`, `[duplicate_detection]`, `[note_suggestions]`, `[search]`, `[ranking]`, `[activation]`, `[maturation]`, `[evolution]`, `[digest]`, `[auto_tag]`, `[voice]`, `[ingest]`, `[research]`, `[tracking]`, `[image]`, `[episodic]`, `[procedural]`, `[mcp]`.
 
 See [Configuration Reference](docs/configuration.md) for details on every section.
 
@@ -341,36 +361,41 @@ uv run ruff format src/ tests/
 ## Architecture
 
 ```text
-┌───────────────────────────────────────────────────────────┐
-│                     User Interfaces                       │
-│  Obsidian Desktop │ Obsidian Mobile │ Telegram Bot │ MCP  │
-└────────┬──────────┴────────┬────────┴──────┬───────┴──┬───┘
+┌───────────────────────────────────────────────────────────────┐
+│                       User Interfaces                         │
+│  Obsidian Desktop │ Obsidian Mobile │ Telegram Bot │ MCP      │
+└────────┬──────────┴────────┬────────┴──────┬───────┴──┬───────┘
          │                   │               │          │
          ▼                   ▼               ▼          ▼
-┌───────────────────────────────────────────────────────────┐
-│                      VaultMind Core                       │
-│                                                           │
-│  ┌──────────┐  ┌──────────────┐  ┌─────────────────────┐  │
-│  │  Parser  │  │  Embedder +  │  │  Knowledge Graph    │  │
-│  │ (md+yaml)│  │  ChromaDB    │  │  (nx) + Evolution   │  │
-│  └──────────┘  └──────────────┘  └─────────────────────┘  │
-│                                                           │
-│  ┌──────────────────────┐  ┌────────────────────────────┐ │
-│  │  LLM Abstraction     │  │  Maturation Pipeline       │ │
-│  │  (Anthropic/OpenAI/  │  │  (DBSCAN clustering →     │ │
-│  │   Gemini/Ollama)     │  │   LLM synthesis)          │ │
-│  └──────────────────────┘  └────────────────────────────┘ │
-│                                                           │
-│  ┌──────────────────────┐  ┌────────────────────────────┐ │
-│  │  Research Pipeline   │  │  Preference Tracking       │ │
-│  │  (YouTube → vault)   │  │  (usage analytics)         │ │
-│  └──────────────────────┘  └────────────────────────────┘ │
-└───────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                        VaultMind Core                         │
+│                                                               │
+│  ┌──────────────┐  ┌──────────────────┐  ┌─────────────────┐  │
+│  │ Parser       │  │ Hybrid Search    │  │ Knowledge Graph │  │
+│  │ (contextual  │  │ (ChromaDB +      │  │ (nx) + Belief   │  │
+│  │  chunks)     │  │  BM25 FTS5 + RRF)│  │   Evolution     │  │
+│  └──────────────┘  └──────────────────┘  └─────────────────┘  │
+│                                                               │
+│  ┌──────────────────────┐  ┌──────────────────────────────┐   │
+│  │ LLM Abstraction      │  │ Maturation Pipeline          │   │
+│  │ (Anthropic/OpenAI/   │  │ (DBSCAN clustering →         │   │
+│  │  Gemini/Ollama)      │  │  LLM synthesis)              │   │
+│  │ + Multimodal (vision)│  └──────────────────────────────┘   │
+│  └──────────────────────┘                                     │
+│                                                               │
+│  ┌──────────────────────┐  ┌──────────────────────────────┐   │
+│  │ Memory System        │  │ Research Pipeline            │   │
+│  │ (Episodic: decisions │  │ (YouTube → vault)            │   │
+│  │  + Procedural:       │  ├──────────────────────────────┤   │
+│  │    workflows)        │  │ Preference Tracking          │   │
+│  └──────────────────────┘  │ + Activation Scoring         │   │
+│                            └──────────────────────────────┘   │
+└───────────────────────────────────────────────────────────────┘
          │
          ▼
    ~/.vaultmind/
    ├── vault/     (Obsidian markdown files)
-   └── data/      (ChromaDB + graph + sessions + preferences)
+   └── data/      (ChromaDB + BM25 + graph + episodes + activations + sessions)
 ```
 
 ## Tech Stack

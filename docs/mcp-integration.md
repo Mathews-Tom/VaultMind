@@ -160,6 +160,19 @@ Quick-capture a note to the vault inbox.
 
 **Returns:** Status and path of the created note.
 
+### `capture_note`
+
+Rich note capture with full frontmatter control. Creates the note, writes full YAML frontmatter, and indexes immediately.
+
+**Parameters:**
+- `content` (string, required) — note content (markdown)
+- `title` (string, optional) — note title (auto-generated from first line of content if omitted)
+- `tags` (array of strings, optional) — tags for the note
+- `note_type` (string, optional, default `"fleeting"`) — one of `fleeting`, `literature`, `permanent`, `project`, `concept`
+- `folder` (string, optional, default `"00-inbox"`) — target folder relative to vault root
+
+**Returns:** Status, path, and title of the created note.
+
 ## Profiles
 
 Profiles restrict what an agent can do. They control tool access, folder scope, and write permissions.
@@ -176,7 +189,7 @@ Read-only access for research and Q&A tasks.
 
 Read/write access scoped to project planning.
 
-- **Tools:** All researcher tools + `vault_write`, `capture`
+- **Tools:** All researcher tools + `vault_write`, `capture`, `capture_note`
 - **Folders:** `02-projects`, `00-inbox`
 - **Write:** Yes (max 50KB per note)
 
@@ -220,7 +233,7 @@ Every MCP tool call is logged with:
 
 The `ProfileEnforcer` checks:
 1. Is this tool allowed for the active profile?
-2. Is write access enabled (for `vault_write`, `capture`)?
+2. Is write access enabled (for `vault_write`, `capture`, `capture_note`)?
 3. Is the target path within the allowed folder scope?
 4. Is the content size within limits (for `vault_write`)?
 
