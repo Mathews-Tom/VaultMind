@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import frontmatter
 
-from vaultmind.vault.models import Note, NoteChunk, NoteType
+from vaultmind.vault.models import Note, NoteChunk, NoteMode, NoteType
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -58,6 +58,13 @@ class VaultParser:
         # Infer note type from frontmatter or folder
         note_type = self._infer_type(meta, rel_path)
 
+        # Extract note mode from frontmatter
+        mode_str = meta.get("mode", "learning")
+        try:
+            mode = NoteMode(mode_str)
+        except ValueError:
+            mode = NoteMode.LEARNING
+
         # Extract inline tags from content (merge with frontmatter tags)
         inline_tags = TAG_PATTERN.findall(post.content)
         fm_tags = meta.get("tags", [])
@@ -70,6 +77,7 @@ class VaultParser:
             title=meta.get("title", filepath.stem.replace("-", " ").replace("_", " ")),
             content=post.content,
             note_type=note_type,
+            mode=mode,
             tags=all_tags,
             entities=meta.get("entities", []),
             related=meta.get("related", []),
@@ -121,6 +129,7 @@ class VaultParser:
                         created=note.created.isoformat(),
                         modified=note.modified.isoformat(),
                         status=note.status,
+                        mode=note.mode.value,
                     )
                 )
             else:
@@ -144,6 +153,7 @@ class VaultParser:
                                 created=note.created.isoformat(),
                                 modified=note.modified.isoformat(),
                                 status=note.status,
+                                mode=note.mode.value,
                             )
                         )
                         current_chunk = para
@@ -165,6 +175,7 @@ class VaultParser:
                             created=note.created.isoformat(),
                             modified=note.modified.isoformat(),
                             status=note.status,
+                            mode=note.mode.value,
                         )
                     )
 
