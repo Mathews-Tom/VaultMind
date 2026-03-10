@@ -8,7 +8,7 @@ error types) are encapsulated in each implementation.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from vaultmind.errors import VaultMindError
@@ -26,6 +26,23 @@ class Message:
 
     role: MessageRole
     content: str
+
+
+@dataclass(frozen=True, slots=True)
+class ContentPart:
+    """A single content part within a multimodal message."""
+
+    type: Literal["text", "image_url"]
+    text: str = ""
+    image_url: str = ""  # base64 data URI (data:image/jpeg;base64,...) or URL
+
+
+@dataclass(frozen=True, slots=True)
+class MultimodalMessage:
+    """A multimodal message containing text and/or image parts."""
+
+    role: MessageRole
+    parts: list[ContentPart] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +95,30 @@ class LLMClient(Protocol):
 
         Raises:
             LLMError: On any provider error.
+        """
+        ...
+
+    def complete_multimodal(
+        self,
+        messages: list[Message | MultimodalMessage],
+        model: str,
+        max_tokens: int = 4096,
+        system: str | None = None,
+    ) -> LLMResponse:
+        """Send multimodal messages (text + images) and get a text response.
+
+        Args:
+            messages: Conversation history, may include MultimodalMessage items.
+            model: Provider-specific model identifier (must support vision).
+            max_tokens: Maximum tokens in the response.
+            system: Optional system prompt.
+
+        Returns:
+            LLMResponse with the generated text.
+
+        Raises:
+            LLMError: On any provider error.
+            NotImplementedError: If the provider does not support multimodal input.
         """
         ...
 

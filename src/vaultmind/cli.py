@@ -838,6 +838,71 @@ def auto_tag(
     tagger.save_quarantine()
 
 
+@cli.command("tag-synonyms")
+@click.option(
+    "--min-similarity",
+    default=0.75,
+    show_default=True,
+    help="Minimum string similarity threshold (0.0–1.0)",
+)
+@click.option(
+    "--min-co-occurrence",
+    default=0.5,
+    show_default=True,
+    help="Minimum co-occurrence ratio threshold (0.0–1.0)",
+)
+@click.pass_context
+def tag_synonyms(ctx: click.Context, min_similarity: float, min_co_occurrence: float) -> None:
+    """Detect likely tag synonyms and suggest merges (zero LLM cost)."""
+    from rich.table import Table
+
+    from vaultmind.config import load_settings
+    from vaultmind.indexer.tag_analyzer import compute_tag_stats, find_synonyms
+    from vaultmind.vault import VaultParser
+
+    settings = load_settings(ctx.obj.get("config_path"))
+    parser = VaultParser(settings.vault)
+
+    with console.status("Parsing vault..."):
+        notes = parser.iter_notes()
+
+    with console.status("Analysing tags..."):
+        tag_counts, co_occurrences = compute_tag_stats(notes)
+        synonyms = find_synonyms(
+            tag_counts,
+            co_occurrences,
+            min_similarity=min_similarity,
+            min_co_occurrence=min_co_occurrence,
+        )
+
+    console.print(
+        f"\n[bold]Tag vocabulary:[/bold] {len(tag_counts)} unique tags across {len(notes)} notes"
+    )
+
+    if not synonyms:
+        console.print("[green]✓[/green] No synonym candidates found.")
+        return
+
+    table = Table(show_header=True, header_style="bold magenta", box=None)
+    table.add_column("Tag A")
+    table.add_column("Tag B")
+    table.add_column("Similarity", justify="right")
+    table.add_column("Co-occur ratio", justify="right")
+    table.add_column("Suggested canonical")
+
+    for s in synonyms:
+        table.add_row(
+            s.tag_a,
+            s.tag_b,
+            f"{s.similarity:.0%}",
+            f"{s.co_occurrence_ratio:.0%}",
+            f"[green]{s.suggested_canonical}[/green]",
+        )
+
+    console.print(table)
+    console.print(f"\n[bold]Summary:[/bold] {len(synonyms)} synonym candidate(s) found.")
+
+
 @cli.command("graph-build")
 @click.option("--full", is_flag=True, help="Rebuild entire graph from scratch")
 @click.pass_context

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from vaultmind.bot.handlers import capture as capture_module
 from vaultmind.bot.handlers.bookmark import LastExchange, handle_bookmark
 from vaultmind.bot.handlers.capture import handle_capture
 from vaultmind.bot.handlers.context import HandlerContext
@@ -119,6 +120,9 @@ class CommandHandlers:
 
     async def handle_capture(self, message: Message, text: str) -> None:
         await handle_capture(self._ctx, message, text)
+
+    async def handle_photo(self, message: Message) -> None:
+        await capture_module.handle_photo_capture(self._ctx, message)
 
     async def handle_recall(self, message: Message, query: str) -> None:
         await handle_recall(self._ctx, message, query, self._search_sessions, self._last_exchanges)

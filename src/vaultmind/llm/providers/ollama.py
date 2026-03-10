@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from openai import OpenAI, OpenAIError
 
-from vaultmind.llm.client import LLMError, LLMResponse, Message
+from vaultmind.llm.client import LLMError, LLMResponse, Message, MultimodalMessage
 
 
 class OllamaClient:
@@ -63,3 +63,12 @@ class OllamaClient:
             model=response.model,
             usage=usage,
         )
+
+    def complete_multimodal(
+        self,
+        messages: list[Message | MultimodalMessage],
+        model: str,
+        max_tokens: int = 4096,
+        system: str | None = None,
+    ) -> LLMResponse:
+        raise NotImplementedError("Multimodal not supported for ollama")
