@@ -16,6 +16,7 @@ from vaultmind.bot.handlers.evolve import handle_evolve
 from vaultmind.bot.handlers.graph import handle_graph
 from vaultmind.bot.handlers.health import handle_health
 from vaultmind.bot.handlers.maturation import handle_mature
+from vaultmind.bot.handlers.memory import handle_decide, handle_episodes, handle_outcome
 from vaultmind.bot.handlers.notes import (
     _find_notes_by_date,
     _llm_resolve_date,
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
     from vaultmind.indexer.note_suggester import NoteSuggester
     from vaultmind.indexer.store import VaultStore
     from vaultmind.llm.client import LLMClient
+    from vaultmind.memory.store import EpisodeStore
     from vaultmind.pipeline.maturation import MaturationPipeline
     from vaultmind.vault.parser import VaultParser
 
@@ -67,6 +69,7 @@ class CommandHandlers:
         transcriber: Transcriber | None = None,
         evolution_detector: EvolutionDetector | None = None,
         maturation_pipeline: MaturationPipeline | None = None,
+        episode_store: EpisodeStore | None = None,
     ) -> None:
         self._ctx = HandlerContext(
             settings=settings,
@@ -82,6 +85,7 @@ class CommandHandlers:
         self._note_suggester = note_suggester
         self._evolution_detector = evolution_detector
         self._maturation_pipeline = maturation_pipeline
+        self._episode_store = episode_store
         self._pending_edits: dict[int, dict[str, str]] = {}
         self._search_sessions: dict[int, PaginatedSearch] = {}
         self._last_exchanges: dict[int, LastExchange] = {}
@@ -219,6 +223,24 @@ class CommandHandlers:
             await message.answer("Maturation pipeline is not enabled.")
             return
         await handle_mature(self._ctx, message, args, self._maturation_pipeline)
+
+    async def handle_decide(self, message: Message, decision: str) -> None:
+        if self._episode_store is None:
+            await message.answer("Episodic memory not enabled.")
+            return
+        await handle_decide(self._ctx, message, decision, self._episode_store)
+
+    async def handle_outcome(self, message: Message, args: str) -> None:
+        if self._episode_store is None:
+            await message.answer("Episodic memory not enabled.")
+            return
+        await handle_outcome(self._ctx, message, args, self._episode_store)
+
+    async def handle_episodes(self, message: Message, entity: str) -> None:
+        if self._episode_store is None:
+            await message.answer("Episodic memory not enabled.")
+            return
+        await handle_episodes(self._ctx, message, entity, self._episode_store)
 
     # --- Backward-compat methods (used by tests) ---
 

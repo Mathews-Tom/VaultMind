@@ -55,6 +55,9 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "• `/health` → system health check\n"
             "• `/evolve` → belief evolution signals\n"
             "• `/mature` → Zettelkasten maturation clusters\n"
+            "• `/decide <decision>` → record a decision\n"
+            "• `/outcome <id> <status> <description>` → resolve a decision\n"
+            "• `/episodes [entity]` → list episodes\n"
             "• `/stats` → vault & graph statistics",
             parse_mode="Markdown",
         )
@@ -224,6 +227,33 @@ def register_handlers(handlers: CommandHandlers) -> None:
     async def cmd_mature(message: Message) -> None:
         args = message.text.replace("/mature", "", 1).strip() if message.text else ""
         await handlers.handle_mature(message, args)
+
+    @router.message(Command("decide"))
+    async def cmd_decide(message: Message) -> None:
+        decision = message.text.replace("/decide", "", 1).strip() if message.text else ""
+        if not decision:
+            await message.answer(
+                "Usage: <code>/decide &lt;decision text&gt;</code>", parse_mode="HTML"
+            )
+            return
+        await handlers.handle_decide(message, decision)
+
+    @router.message(Command("outcome"))
+    async def cmd_outcome(message: Message) -> None:
+        args = message.text.replace("/outcome", "", 1).strip() if message.text else ""
+        if not args:
+            await message.answer(
+                "Usage: <code>/outcome &lt;id&gt; &lt;status&gt; [description]</code>\n"
+                "Status: success, failure, partial, unknown",
+                parse_mode="HTML",
+            )
+            return
+        await handlers.handle_outcome(message, args)
+
+    @router.message(Command("episodes"))
+    async def cmd_episodes(message: Message) -> None:
+        entity = message.text.replace("/episodes", "", 1).strip() if message.text else ""
+        await handlers.handle_episodes(message, entity)
 
     @router.message(F.voice)
     async def handle_voice(message: Message) -> None:
