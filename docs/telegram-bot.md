@@ -30,6 +30,7 @@ Messages matching any of these patterns are saved directly to the inbox:
 - **Multiline paste**: 3+ lines (pasting = intentional capture)
 - **Long text**: 500+ characters
 - **URL in message**: Creates a vault note from the YouTube transcript or article content
+- **Photo/image**: Described via vision model, saved as note with `![[images/...]]` embed
 
 The prefix is stripped before saving. The note gets `type: fleeting` frontmatter and is indexed immediately.
 
@@ -90,6 +91,16 @@ The thinking partner draws context from both ChromaDB (semantic search) and the 
 | `/evolve` | `/evolve` | Show belief evolution signals: confidence drift, relationship shifts, stale claims |
 | `/mature` | `/mature` | Show Zettelkasten maturation clusters — groups of fleeting notes ready for synthesis into permanent notes |
 
+### Episodic Memory
+
+| Command | Usage | Description |
+| --- | --- | --- |
+| `/decide` | `/decide Use PostgreSQL for the auth service` | Record a decision (creates a pending episode). Returns episode ID |
+| `/outcome` | `/outcome a1b2c3 success Worked well, low latency` | Resolve a decision with outcome status (`success`, `failure`, `partial`) and description |
+| `/episodes` | `/episodes` or `/episodes Python` | List recent episodes (pending first), optionally filtered by entity |
+| `/workflows` | `/workflows` | List active workflow patterns with success rates (requires procedural memory enabled) |
+| `/workflow` | `/workflow w1x2y3` | Show workflow steps and trigger pattern |
+
 ### System
 
 | Command | Usage | Description |
@@ -98,6 +109,18 @@ The thinking partner draws context from both ChromaDB (semantic search) and the 
 | `/health` | `/health` | System health check — reports status of ChromaDB, graph, watcher, and LLM |
 | `/stats` | `/stats` | Vault and graph statistics (note counts, types, entities, relationships) |
 | `/help` | `/help` | Quick reference for all commands |
+
+## Photo Capture
+
+Send a photo and VaultMind processes it using a vision model (Anthropic or OpenAI):
+
+1. The photo is downloaded and sent to the configured vision model
+2. The model generates a description of the image content
+3. The original image is saved to `00-inbox/images/{timestamp}.jpg` (configurable via `[image].save_originals`)
+4. A fleeting note is created with an `![[images/{filename}]]` embed and the AI description
+5. The note is indexed immediately
+
+Configure the vision model in `[image].vision_model` (default: uses `llm.fast_model`).
 
 ## Voice Messages
 

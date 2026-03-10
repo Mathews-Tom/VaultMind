@@ -24,12 +24,16 @@ src/vaultmind/
 ├── indexer/         # Embedding + vector search layer
 │   ├── embedder.py        # Embedding generation (batched)
 │   ├── embedding_cache.py # SQLite-backed cache (content-hash + provider + model key)
-│   ├── store.py           # ChromaDB vector store interface + search
+│   ├── store.py           # ChromaDB vector store + hybrid search (vector + BM25)
+│   ├── bm25.py            # SQLite FTS5-backed BM25 keyword index
+│   ├── hybrid.py          # Reciprocal Rank Fusion (RRF) combiner
+│   ├── activation.py      # SQLite-backed activation tracking (note access/edit scoring)
 │   ├── duplicate_detector.py  # Semantic duplicate detection (92%/80% bands)
 │   ├── note_suggester.py  # Composite link suggestions (similarity + entities + graph)
 │   ├── auto_tagger.py     # LLM tag classification with quarantine
-│   ├── digest.py          # Weekly metadata-only digest (zero LLM cost)
-│   └── ranking.py         # Post-retrieval ranking (note-type multipliers + temporal decay)
+│   ├── tag_analyzer.py    # Tag synonym/merge detection (string similarity + co-occurrence)
+│   ├── digest.py          # Weekly digest with inbox triage (zero LLM cost)
+│   └── ranking.py         # Post-retrieval ranking (type + mode multipliers + activation + decay)
 │
 ├── graph/           # Knowledge graph layer
 │   ├── knowledge_graph.py # NetworkX graph with JSON persistence
@@ -39,10 +43,10 @@ src/vaultmind/
 │   └── maintenance.py     # Orphan cleanup, stale source pruning, event-driven deletion
 │
 ├── llm/             # Provider-agnostic LLM abstraction
-│   ├── client.py          # LLMClient Protocol, Message, LLMResponse, factory
+│   ├── client.py          # LLMClient Protocol, Message, MultimodalMessage, LLMResponse, factory
 │   └── providers/
-│       ├── anthropic.py   # Anthropic provider (system prompt as dedicated param)
-│       ├── openai.py      # OpenAI provider
+│       ├── anthropic.py   # Anthropic provider (system prompt as dedicated param, multimodal)
+│       ├── openai.py      # OpenAI provider (multimodal via image_url content parts)
 │       ├── gemini.py      # Gemini via OpenAI-compatible endpoint
 │       └── ollama.py      # Ollama via OpenAI-compatible endpoint
 │
@@ -58,7 +62,7 @@ src/vaultmind/
 │   └── handlers/        # Decomposed handler modules
 │       ├── context.py       # HandlerContext dataclass (shared state)
 │       ├── utils.py         # Shared utilities (_is_authorized, _split_message)
-│       ├── capture.py       # Note capture + URL ingestion
+│       ├── capture.py       # Note capture + URL ingestion + photo capture
 │       ├── recall.py        # Semantic search with pagination
 │       ├── think.py         # Thinking partner sessions
 │       ├── graph.py         # Knowledge graph queries
@@ -76,6 +80,7 @@ src/vaultmind/
 │       ├── health.py        # System health check
 │       ├── evolve.py        # Belief evolution signals
 │       ├── maturation.py    # Zettelkasten maturation clusters
+│       ├── memory.py        # Episodic memory commands (/decide, /outcome, /episodes, /workflows)
 │       └── routing.py       # Message intent routing
 │
 ├── pipeline/        # Zettelkasten maturation pipeline
@@ -95,8 +100,14 @@ src/vaultmind/
 │   ├── preferences.py   # SQLite interaction store
 │   └── analyzer.py      # Usage pattern analysis + insights generation
 │
+├── memory/          # Episodic + procedural memory
+│   ├── models.py        # Episode dataclass, OutcomeStatus enum
+│   ├── store.py         # SQLite-backed episode store (CRUD + entity search)
+│   ├── extractor.py     # LLM-based episode extraction from notes
+│   └── procedural.py    # Workflow synthesis from episodic patterns (experimental)
+│
 └── mcp/             # MCP server for agent integration
-    ├── server.py        # MCP server with 9 vault tools
+    ├── server.py        # MCP server with 10 vault tools
     ├── auth.py          # Profile enforcement + audit logging
     └── profiles.py      # Profile loading (researcher/planner/full)
 ```
@@ -106,14 +117,25 @@ src/vaultmind/
 ### Indexing Pipeline
 
 ```
-Markdown files → Parser (heading-aware chunks) → Embedder → ChromaDB
-                    ↓                                ↓
-              Frontmatter metadata              Embedding Cache (SQLite)
+Markdown files → Parser (contextual chunks) → Embedder → ChromaDB
+                    ↓                              ↓          ↓
+              Frontmatter metadata         Embedding Cache   BM25 Index (FTS5)
 ```
 
-1. `VaultParser` reads markdown files and splits by headings into `NoteChunk` objects
+1. `VaultParser` reads markdown files, splits by headings into `NoteChunk` objects, and prepends a contextual prefix (`note: {title} (type: {type}) | section: {heading} | tags: {t1, t2}`) for embedding quality
 2. `Embedder` generates vectors, checking `EmbeddingCache` first (keyed by content hash + provider + model)
-3. `VaultStore` upserts chunks into ChromaDB with metadata (note type, tags, source path)
+3. `VaultStore` upserts chunks into ChromaDB with metadata (note type, mode, tags, source path) and syncs the BM25 FTS5 index in parallel
+
+### Hybrid Search
+
+```
+Query → Vector search (ChromaDB) ─┐
+     → BM25 keyword search (FTS5) ┼→ Reciprocal Rank Fusion → Ranked results
+                                   │        ↓
+                             Activation scoring + mode multipliers
+```
+
+When hybrid search is enabled (default), both vector and keyword results are merged via Reciprocal Rank Fusion (RRF, k=60). Items appearing in both lists get boosted. Post-retrieval ranking applies note-type multipliers, mode multipliers (operational > learning), activation-based scoring, and temporal decay.
 
 ### Watch Pipeline
 
@@ -176,11 +198,24 @@ Knowledge graph snapshots → Confidence drift detection
                             Evolution signals → Digest / /evolve command
 ```
 
+### Episodic Memory
+
+```
+/decide <text> → EpisodeStore (SQLite) → Pending episode
+/outcome <id> <status> <desc> → Resolved episode with lessons
+                                        ↓
+                              ProceduralMemory scans for patterns
+                                        ↓
+                              LLM synthesizes → Workflow (steps + trigger)
+```
+
+Episodic memory tracks decision-outcome pairs. Each episode records the decision, context, outcome, lessons, and linked graph entities. The procedural memory layer (experimental, disabled by default) mines resolved episodes for recurring patterns and synthesizes reusable workflows.
+
 ## Key Design Decisions
 
-### Why heading-aware chunking?
+### Why heading-aware chunking with contextual prefixes?
 
-Arbitrary token-count splits break semantic boundaries. Heading-aware chunking preserves the author's logical structure — a section about "Authentication" stays as one chunk rather than being split mid-paragraph.
+Arbitrary token-count splits break semantic boundaries. Heading-aware chunking preserves the author's logical structure — a section about "Authentication" stays as one chunk rather than being split mid-paragraph. Each chunk is prepended with a contextual prefix (`note: {title} (type: {type}) | section: {heading} | tags: ...`) that gives the embedding model document-level context, producing higher-quality vectors.
 
 ### Why NetworkX + JSON persistence?
 
@@ -200,7 +235,7 @@ All blocking calls (ChromaDB, embedding API, LLM) are wrapped with `asyncio.to_t
 
 ### Why SQLite for everything?
 
-Sessions, embedding cache, preferences, and tag quarantine all use SQLite. It's embedded, requires no server, handles concurrent reads well, and the data volumes are small enough that a full database would be over-engineering.
+Sessions, embedding cache, preferences, tag quarantine, BM25 FTS5 index, activation tracking, and episodic memory all use SQLite. It's embedded, requires no server, handles concurrent reads well, and the data volumes are small enough that a full database would be over-engineering.
 
 ## Security Model
 

@@ -141,21 +141,33 @@ Link suggestion scoring.
 
 ## `[search]`
 
-Search pagination and session management.
+Search pagination, session management, and hybrid retrieval.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `page_size` | int | `5` | Results per page |
 | `max_results` | int | `25` | Maximum total results |
 | `session_ttl` | int | `300` | Paginated session expiry (seconds) |
+| `hybrid_enabled` | bool | `true` | Enable BM25 + vector hybrid search with RRF |
+| `bm25_db_path` | string | `""` | BM25 SQLite path (empty = `~/.vaultmind/data/bm25.db`) |
 
 ## `[ranking]`
 
-Post-retrieval ranking with note-type multipliers and temporal decay.
+Post-retrieval ranking with note-type multipliers, mode multipliers, activation scoring, and temporal decay.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Enable post-retrieval ranking |
+
+## `[activation]`
+
+Activation-based note decay — notes that are accessed, edited, or referenced stay warm. Unused notes decay.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Enable activation tracking |
+| `half_life_days` | float | `14.0` | Exponential decay half-life (days) |
+| `db_path` | string | `""` | SQLite path (empty = `~/.vaultmind/data/activations.db`) |
 
 ## `[maturation]`
 
@@ -205,6 +217,9 @@ Weekly digest generation.
 | `max_suggestions` | int | `5` | Max suggestions per digest |
 | `connection_threshold_low` | float | `0.70` | Lower bound for connection suggestions |
 | `connection_threshold_high` | float | `0.85` | Upper bound for connection suggestions |
+| `inbox_folder` | string | `00-inbox` | Folder to scan for inbox triage |
+| `inbox_age_warning_days` | int | `7` | Age threshold to flag stale inbox notes |
+| `max_inbox_shown` | int | `10` | Max inbox notes shown in triage section |
 
 ## `[auto_tag]`
 
@@ -261,6 +276,39 @@ User preference and usage tracking.
 | `enabled` | bool | `true` | Enable interaction tracking |
 | `db_path` | string | `""` | SQLite path (empty = `~/.vaultmind/data/preferences.db`) |
 
+## `[image]`
+
+Image/photo capture via Telegram bot.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Enable photo capture |
+| `vision_model` | string | `""` | Vision model for image description (empty = `llm.fast_model`) |
+| `max_image_size_bytes` | int | `10000000` | Maximum image size (bytes) |
+| `save_originals` | bool | `true` | Save original images to vault |
+
+## `[episodic]`
+
+Episodic memory — decision-outcome tracking.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Enable episodic memory |
+| `db_path` | string | `""` | SQLite path (empty = `~/.vaultmind/data/episodes.db`) |
+| `auto_extract` | bool | `false` | LLM extraction of episodes from notes (opt-in) |
+| `extraction_model` | string | `""` | Model for extraction (empty = `llm.fast_model`) |
+
+## `[procedural]`
+
+Procedural memory — self-evolving workflow patterns mined from episodic memory. **Experimental, disabled by default.**
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Enable procedural memory (experimental) |
+| `db_path` | string | `""` | SQLite path (empty = `~/.vaultmind/data/workflows.db`) |
+| `min_episodes_for_pattern` | int | `3` | Minimum resolved episodes to form a workflow |
+| `synthesis_model` | string | `""` | Model for workflow synthesis (empty = `llm.fast_model`) |
+
 ## `[mcp]`
 
 MCP server settings and profile definitions.
@@ -284,7 +332,7 @@ write_enabled = false
 
 [mcp.profiles.planner]
 description = "Read/write access for project planning"
-allowed_tools = ["vault_search", "vault_read", "vault_write", "vault_list", "graph_query", "graph_path", "capture"]
+allowed_tools = ["vault_search", "vault_read", "vault_write", "vault_list", "graph_query", "graph_path", "capture", "capture_note"]
 folder_scope = ["02-projects", "00-inbox"]
 write_enabled = true
 max_note_size_bytes = 50000
