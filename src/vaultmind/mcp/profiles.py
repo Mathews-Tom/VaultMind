@@ -27,6 +27,7 @@ DEFAULT_PROFILES: dict[str, dict[str, Any]] = {
             "graph_query",
             "graph_path",
             "capture",
+            "capture_note",
         ],
         "folder_scope": ["02-projects", "00-inbox"],
         "write_enabled": True,

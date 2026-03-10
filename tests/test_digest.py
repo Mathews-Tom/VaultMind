@@ -30,6 +30,9 @@ class FakeDigestConfig:
         max_suggestions: int = 5,
         connection_threshold_low: float = 0.70,
         connection_threshold_high: float = 0.85,
+        inbox_folder: str = "00-inbox",
+        inbox_age_warning_days: int = 7,
+        max_inbox_shown: int = 10,
     ) -> None:
         self.enabled = True
         self.period_days = period_days
@@ -41,6 +44,9 @@ class FakeDigestConfig:
         self.max_suggestions = max_suggestions
         self.connection_threshold_low = connection_threshold_low
         self.connection_threshold_high = connection_threshold_high
+        self.inbox_folder = inbox_folder
+        self.inbox_age_warning_days = inbox_age_warning_days
+        self.max_inbox_shown = max_inbox_shown
 
 
 class FakeStore:
