@@ -14,67 +14,68 @@ Nested keys use `__` as delimiter in env vars: `VAULTMIND_TELEGRAM__BOT_TOKEN`.
 
 Vault filesystem paths and behavior.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `path` | string | `~/.vaultmind/vault` | Root directory of the Obsidian vault |
-| `inbox_folder` | string | `00-inbox` | Folder for quick captures |
-| `daily_folder` | string | `01-daily` | Folder for daily notes |
-| `templates_folder` | string | `06-templates` | Folder for note templates |
-| `meta_folder` | string | `_meta` | Folder for auto-generated reports |
-| `sync_interval_seconds` | int | `300` | Full re-sync interval (seconds) |
-| `excluded_folders` | list | `[".obsidian", ".git", ".trash"]` | Folders to skip during indexing |
+| Key                     | Type   | Default                           | Description                          |
+| ----------------------- | ------ | --------------------------------- | ------------------------------------ |
+| `path`                  | string | `~/.vaultmind/vault`              | Root directory of the Obsidian vault |
+| `inbox_folder`          | string | `00-inbox`                        | Folder for quick captures            |
+| `daily_folder`          | string | `01-daily`                        | Folder for daily notes               |
+| `templates_folder`      | string | `06-templates`                    | Folder for note templates            |
+| `meta_folder`           | string | `_meta`                           | Folder for auto-generated reports    |
+| `sync_interval_seconds` | int    | `300`                             | Full re-sync interval (seconds)      |
+| `excluded_folders`      | list   | `[".obsidian", ".git", ".trash"]` | Folders to skip during indexing      |
 
 ## `[embedding]`
 
 Embedding generation for vector search.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `provider` | string | `openai` | `"openai"` or `"voyage"` |
-| `model` | string | `text-embedding-3-small` | Embedding model name |
-| `dimensions` | int | `1536` | Embedding vector dimensions |
-| `batch_size` | int | `64` | Notes per embedding batch |
-| `cache_enabled` | bool | `true` | Enable SQLite embedding cache |
+| Key             | Type   | Default                  | Description                   |
+| --------------- | ------ | ------------------------ | ----------------------------- |
+| `provider`      | string | `openai`                 | `"openai"` or `"voyage"`      |
+| `model`         | string | `text-embedding-3-small` | Embedding model name          |
+| `dimensions`    | int    | `1536`                   | Embedding vector dimensions   |
+| `batch_size`    | int    | `64`                     | Notes per embedding batch     |
+| `cache_enabled` | bool   | `true`                   | Enable SQLite embedding cache |
 
 ## `[chroma]`
 
 ChromaDB vector store settings.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `persist_dir` | string | `~/.vaultmind/data/chromadb` | ChromaDB data directory |
-| `collection_name` | string | `vault_chunks` | Collection name |
-| `distance_fn` | string | `cosine` | Distance function (`cosine`, `l2`, `ip`) |
+| Key               | Type   | Default                      | Description                              |
+| ----------------- | ------ | ---------------------------- | ---------------------------------------- |
+| `persist_dir`     | string | `~/.vaultmind/data/chromadb` | ChromaDB data directory                  |
+| `collection_name` | string | `vault_chunks`               | Collection name                          |
+| `distance_fn`     | string | `cosine`                     | Distance function (`cosine`, `l2`, `ip`) |
 
 ## `[graph]`
 
 Knowledge graph extraction and persistence.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `persist_path` | string | `~/.vaultmind/data/knowledge_graph.json` | Graph JSON file |
-| `extraction_model` | string | `""` | LLM model for entity extraction (empty = `llm.thinking_model`) |
-| `min_confidence` | float | `0.7` | Minimum confidence for extracted entities |
-| `enrichment_schedule` | string | `0 3 * * *` | Cron schedule for graph enrichment |
+| Key                   | Type   | Default                                  | Description                                                    |
+| --------------------- | ------ | ---------------------------------------- | -------------------------------------------------------------- |
+| `persist_path`        | string | `~/.vaultmind/data/knowledge_graph.json` | Graph JSON file                                                |
+| `extraction_model`    | string | `""`                                     | LLM model for entity extraction (empty = `llm.thinking_model`) |
+| `min_confidence`      | float  | `0.7`                                    | Minimum confidence for extracted entities                      |
+| `enrichment_schedule` | string | `0 3 * * *`                              | Cron schedule for graph enrichment                             |
 
 ## `[llm]`
 
 LLM provider configuration.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `provider` | string | `openai` | `"anthropic"`, `"openai"`, `"gemini"`, `"ollama"` |
-| `thinking_model` | string | — | Primary model for thinking, analysis, extraction |
-| `fast_model` | string | — | Lighter model for routing, tagging, chat |
-| `max_context_notes` | int | `8` | Max notes injected as context |
-| `max_tokens` | int | `4096` | Max response tokens |
-| `ollama_base_url` | string | `http://localhost:11434` | Ollama server URL |
-| `graph_context_enabled` | bool | `true` | Include graph context in thinking sessions |
-| `graph_hop_depth` | int | `2` | Ego subgraph traversal depth |
-| `graph_min_confidence` | float | `0.6` | Min confidence for graph context entities |
-| `graph_max_relationships` | int | `20` | Max relationships in graph context |
+| Key                       | Type   | Default                  | Description                                       |
+| ------------------------- | ------ | ------------------------ | ------------------------------------------------- |
+| `provider`                | string | `openai`                 | `"anthropic"`, `"openai"`, `"gemini"`, `"ollama"` |
+| `thinking_model`          | string | —                        | Primary model for thinking, analysis, extraction  |
+| `fast_model`              | string | —                        | Lighter model for routing, tagging, chat          |
+| `max_context_notes`       | int    | `8`                      | Max notes injected as context                     |
+| `max_tokens`              | int    | `4096`                   | Max response tokens                               |
+| `ollama_base_url`         | string | `http://localhost:11434` | Ollama server URL                                 |
+| `graph_context_enabled`   | bool   | `true`                   | Include graph context in thinking sessions        |
+| `graph_hop_depth`         | int    | `2`                      | Ego subgraph traversal depth                      |
+| `graph_min_confidence`    | float  | `0.6`                    | Min confidence for graph context entities         |
+| `graph_max_relationships` | int    | `20`                     | Max relationships in graph context                |
 
 **API keys** (set in `.env`):
+
 - `VAULTMIND_ANTHROPIC_API_KEY` — Anthropic
 - `VAULTMIND_OPENAI_API_KEY` — OpenAI (also used for embeddings)
 - `VAULTMIND_GEMINI_API_KEY` — Google Gemini
@@ -86,11 +87,12 @@ Ollama requires no API key.
 
 Telegram bot behavior.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `thinking_session_ttl` | int | `3600` | Thinking session timeout (seconds) |
+| Key                    | Type | Default | Description                        |
+| ---------------------- | ---- | ------- | ---------------------------------- |
+| `thinking_session_ttl` | int  | `3600`  | Thinking session timeout (seconds) |
 
 **Secrets** (set in `.env`):
+
 - `VAULTMIND_TELEGRAM__BOT_TOKEN` — Bot token from @BotFather
 - `VAULTMIND_TELEGRAM__ALLOWED_USER_IDS` — Comma-separated user ID whitelist (empty = allow all)
 
@@ -98,33 +100,33 @@ Telegram bot behavior.
 
 Message classification and routing behavior.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `chat_model` | string | `""` | Model for chat responses (empty = `llm.fast_model`) |
-| `chat_max_tokens` | int | `1024` | Max tokens for chat responses |
-| `vault_context_enabled` | bool | `true` | Include vault search results in conversational responses |
-| `max_context_chunks` | int | `4` | Max chunks for context augmentation |
-| `capture_all` | bool | `false` | Bypass routing — all text becomes a capture |
+| Key                     | Type   | Default | Description                                              |
+| ----------------------- | ------ | ------- | -------------------------------------------------------- |
+| `chat_model`            | string | `""`    | Model for chat responses (empty = `llm.fast_model`)      |
+| `chat_max_tokens`       | int    | `1024`  | Max tokens for chat responses                            |
+| `vault_context_enabled` | bool   | `true`  | Include vault search results in conversational responses |
+| `max_context_chunks`    | int    | `4`     | Max chunks for context augmentation                      |
+| `capture_all`           | bool   | `false` | Bypass routing — all text becomes a capture              |
 
 ## `[watch]`
 
 File watcher behavior for incremental indexing.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `debounce_ms` | int | `500` | Debounce window for rapid saves (ms) |
-| `hash_stability_check` | bool | `true` | Two-stage hash check to avoid partial writes |
-| `reextract_graph` | bool | `false` | Re-extract graph entities on file change (LLM call per note) |
-| `batch_graph_interval_seconds` | int | `300` | Batch window for graph re-extraction when enabled |
+| Key                            | Type | Default | Description                                                  |
+| ------------------------------ | ---- | ------- | ------------------------------------------------------------ |
+| `debounce_ms`                  | int  | `500`   | Debounce window for rapid saves (ms)                         |
+| `hash_stability_check`         | bool | `true`  | Two-stage hash check to avoid partial writes                 |
+| `reextract_graph`              | bool | `false` | Re-extract graph entities on file change (LLM call per note) |
+| `batch_graph_interval_seconds` | int  | `300`   | Batch window for graph re-extraction when enabled            |
 
 ## `[duplicate_detection]`
 
 Semantic duplicate detection thresholds.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable automatic duplicate detection |
-| `min_content_length` | int | `100` | Skip notes shorter than this |
+| Key                  | Type | Default | Description                          |
+| -------------------- | ---- | ------- | ------------------------------------ |
+| `enabled`            | bool | `true`  | Enable automatic duplicate detection |
+| `min_content_length` | int  | `100`   | Skip notes shorter than this         |
 
 Similarity bands: duplicate (>= 92%), merge candidate (80-92%).
 
@@ -132,105 +134,105 @@ Similarity bands: duplicate (>= 92%), merge candidate (80-92%).
 
 Link suggestion scoring.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable note suggestions |
-| `min_content_length` | int | `100` | Skip notes shorter than this |
-| `entity_weight` | float | `0.1` | Score boost per shared graph entity |
-| `graph_weight` | float | `0.05` | Score boost from graph path proximity |
+| Key                  | Type  | Default | Description                           |
+| -------------------- | ----- | ------- | ------------------------------------- |
+| `enabled`            | bool  | `true`  | Enable note suggestions               |
+| `min_content_length` | int   | `100`   | Skip notes shorter than this          |
+| `entity_weight`      | float | `0.1`   | Score boost per shared graph entity   |
+| `graph_weight`       | float | `0.05`  | Score boost from graph path proximity |
 
 ## `[search]`
 
 Search pagination, session management, and hybrid retrieval.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `page_size` | int | `5` | Results per page |
-| `max_results` | int | `25` | Maximum total results |
-| `session_ttl` | int | `300` | Paginated session expiry (seconds) |
-| `hybrid_enabled` | bool | `true` | Enable BM25 + vector hybrid search with RRF |
-| `bm25_db_path` | string | `""` | BM25 SQLite path (empty = `~/.vaultmind/data/bm25.db`) |
+| Key              | Type   | Default | Description                                            |
+| ---------------- | ------ | ------- | ------------------------------------------------------ |
+| `page_size`      | int    | `5`     | Results per page                                       |
+| `max_results`    | int    | `25`    | Maximum total results                                  |
+| `session_ttl`    | int    | `300`   | Paginated session expiry (seconds)                     |
+| `hybrid_enabled` | bool   | `true`  | Enable BM25 + vector hybrid search with RRF            |
+| `bm25_db_path`   | string | `""`    | BM25 SQLite path (empty = `~/.vaultmind/data/bm25.db`) |
 
 ## `[ranking]`
 
 Post-retrieval ranking with note-type multipliers, mode multipliers, activation scoring, and temporal decay.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable post-retrieval ranking |
+| Key       | Type | Default | Description                   |
+| --------- | ---- | ------- | ----------------------------- |
+| `enabled` | bool | `true`  | Enable post-retrieval ranking |
 
 ## `[activation]`
 
 Activation-based note decay — notes that are accessed, edited, or referenced stay warm. Unused notes decay.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable activation tracking |
-| `half_life_days` | float | `14.0` | Exponential decay half-life (days) |
-| `db_path` | string | `""` | SQLite path (empty = `~/.vaultmind/data/activations.db`) |
+| Key              | Type   | Default | Description                                              |
+| ---------------- | ------ | ------- | -------------------------------------------------------- |
+| `enabled`        | bool   | `true`  | Enable activation tracking                               |
+| `half_life_days` | float  | `14.0`  | Exponential decay half-life (days)                       |
+| `db_path`        | string | `""`    | SQLite path (empty = `~/.vaultmind/data/activations.db`) |
 
 ## `[maturation]`
 
 Zettelkasten maturation pipeline — clusters fleeting/literature notes for synthesis into permanent notes.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable maturation pipeline |
-| `schedule_day` | string | `sunday` | Day of the week for scheduled maturation |
-| `schedule_hour` | int | `9` | Hour (UTC) for scheduled maturation |
-| `timezone` | string | `UTC` | Timezone for scheduling |
-| `min_cluster_size` | int | `3` | Minimum notes per cluster |
-| `max_clusters_per_digest` | int | `3` | Max clusters per maturation digest |
-| `cluster_eps` | float | `0.25` | DBSCAN epsilon (distance threshold) |
-| `synthesis_max_tokens` | int | `1500` | Max tokens for synthesis output |
-| `synthesis_model` | string | `""` | Model for synthesis (empty = `llm.thinking_model`) |
-| `target_note_types` | list | `["fleeting", "literature"]` | Note types eligible for clustering |
-| `dismissed_cluster_expiry_days` | int | `90` | Days before dismissed clusters resurface |
-| `inbox_folder` | string | `00-inbox` | Folder to check for maturation candidates |
+| Key                             | Type   | Default                      | Description                                        |
+| ------------------------------- | ------ | ---------------------------- | -------------------------------------------------- |
+| `enabled`                       | bool   | `true`                       | Enable maturation pipeline                         |
+| `schedule_day`                  | string | `sunday`                     | Day of the week for scheduled maturation           |
+| `schedule_hour`                 | int    | `9`                          | Hour (UTC) for scheduled maturation                |
+| `timezone`                      | string | `UTC`                        | Timezone for scheduling                            |
+| `min_cluster_size`              | int    | `3`                          | Minimum notes per cluster                          |
+| `max_clusters_per_digest`       | int    | `3`                          | Max clusters per maturation digest                 |
+| `cluster_eps`                   | float  | `0.25`                       | DBSCAN epsilon (distance threshold)                |
+| `synthesis_max_tokens`          | int    | `1500`                       | Max tokens for synthesis output                    |
+| `synthesis_model`               | string | `""`                         | Model for synthesis (empty = `llm.thinking_model`) |
+| `target_note_types`             | list   | `["fleeting", "literature"]` | Note types eligible for clustering                 |
+| `dismissed_cluster_expiry_days` | int    | `90`                         | Days before dismissed clusters resurface           |
+| `inbox_folder`                  | string | `00-inbox`                   | Folder to check for maturation candidates          |
 
 ## `[evolution]`
 
 Belief evolution tracking — detects confidence drift, relationship shifts, and stale claims.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable evolution tracking |
-| `confidence_drift_threshold` | float | `0.3` | Minimum drift to flag |
-| `stale_days` | int | `180` | Days before a high-confidence claim is flagged stale |
-| `min_confidence_for_stale` | float | `0.8` | Minimum confidence to consider for staleness |
-| `max_results` | int | `10` | Max evolution signals per query |
-| `include_in_digest` | bool | `true` | Include evolution signals in weekly digest |
+| Key                          | Type  | Default | Description                                          |
+| ---------------------------- | ----- | ------- | ---------------------------------------------------- |
+| `enabled`                    | bool  | `true`  | Enable evolution tracking                            |
+| `confidence_drift_threshold` | float | `0.3`   | Minimum drift to flag                                |
+| `stale_days`                 | int   | `180`   | Days before a high-confidence claim is flagged stale |
+| `min_confidence_for_stale`   | float | `0.8`   | Minimum confidence to consider for staleness         |
+| `max_results`                | int   | `10`    | Max evolution signals per query                      |
+| `include_in_digest`          | bool  | `true`  | Include evolution signals in weekly digest           |
 
 ## `[digest]`
 
 Weekly digest generation.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable weekly digest |
-| `period_days` | int | `7` | Digest period (days) |
-| `schedule_hour` | int | `8` | Hour (UTC) for scheduled digest |
-| `timezone` | string | `UTC` | Timezone |
-| `save_to_vault` | bool | `true` | Save digest as a vault note |
-| `send_telegram` | bool | `true` | Send digest via Telegram |
-| `max_trending` | int | `10` | Max trending topics |
-| `max_suggestions` | int | `5` | Max suggestions per digest |
-| `connection_threshold_low` | float | `0.70` | Lower bound for connection suggestions |
-| `connection_threshold_high` | float | `0.85` | Upper bound for connection suggestions |
-| `inbox_folder` | string | `00-inbox` | Folder to scan for inbox triage |
-| `inbox_age_warning_days` | int | `7` | Age threshold to flag stale inbox notes |
-| `max_inbox_shown` | int | `10` | Max inbox notes shown in triage section |
+| Key                         | Type   | Default    | Description                             |
+| --------------------------- | ------ | ---------- | --------------------------------------- |
+| `enabled`                   | bool   | `true`     | Enable weekly digest                    |
+| `period_days`               | int    | `7`        | Digest period (days)                    |
+| `schedule_hour`             | int    | `8`        | Hour (UTC) for scheduled digest         |
+| `timezone`                  | string | `UTC`      | Timezone                                |
+| `save_to_vault`             | bool   | `true`     | Save digest as a vault note             |
+| `send_telegram`             | bool   | `true`     | Send digest via Telegram                |
+| `max_trending`              | int    | `10`       | Max trending topics                     |
+| `max_suggestions`           | int    | `5`        | Max suggestions per digest              |
+| `connection_threshold_low`  | float  | `0.70`     | Lower bound for connection suggestions  |
+| `connection_threshold_high` | float  | `0.85`     | Upper bound for connection suggestions  |
+| `inbox_folder`              | string | `00-inbox` | Folder to scan for inbox triage         |
+| `inbox_age_warning_days`    | int    | `7`        | Age threshold to flag stale inbox notes |
+| `max_inbox_shown`           | int    | `10`       | Max inbox notes shown in triage section |
 
 ## `[auto_tag]`
 
 LLM-based automatic tag suggestions.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable auto-tagging |
-| `max_tags_per_note` | int | `2` | Max tags suggested per note |
-| `min_content_length` | int | `100` | Skip notes shorter than this |
-| `tagging_model` | string | `""` | Model for tagging (empty = `llm.fast_model`) |
+| Key                  | Type   | Default | Description                                  |
+| -------------------- | ------ | ------- | -------------------------------------------- |
+| `enabled`            | bool   | `true`  | Enable auto-tagging                          |
+| `max_tags_per_note`  | int    | `2`     | Max tags suggested per note                  |
+| `min_content_length` | int    | `100`   | Skip notes shorter than this                 |
+| `tagging_model`      | string | `""`    | Model for tagging (empty = `llm.fast_model`) |
 
 New tags are quarantined at `~/.vaultmind/data/tag_quarantine.json` for user approval.
 
@@ -238,11 +240,11 @@ New tags are quarantined at `~/.vaultmind/data/tag_quarantine.json` for user app
 
 Voice message transcription.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable voice transcription |
-| `whisper_model` | string | `whisper-1` | OpenAI Whisper model |
-| `language` | string | `""` | Language hint (empty = auto-detect) |
+| Key             | Type   | Default     | Description                         |
+| --------------- | ------ | ----------- | ----------------------------------- |
+| `enabled`       | bool   | `true`      | Enable voice transcription          |
+| `whisper_model` | string | `whisper-1` | OpenAI Whisper model                |
+| `language`      | string | `""`        | Language hint (empty = auto-detect) |
 
 Requires `VAULTMIND_OPENAI_API_KEY` in `.env`.
 
@@ -250,74 +252,74 @@ Requires `VAULTMIND_OPENAI_API_KEY` in `.env`.
 
 URL ingestion settings (YouTube transcripts, article content).
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable URL ingestion |
-| `youtube_language` | string | `en` | Preferred transcript language |
-| `max_content_length` | int | `100000` | Max content length (characters) |
-| `inbox_folder` | string | `00-inbox` | Target folder for ingested notes |
+| Key                  | Type   | Default    | Description                      |
+| -------------------- | ------ | ---------- | -------------------------------- |
+| `enabled`            | bool   | `true`     | Enable URL ingestion             |
+| `youtube_language`   | string | `en`       | Preferred transcript language    |
+| `max_content_length` | int    | `100000`   | Max content length (characters)  |
+| `inbox_folder`       | string | `00-inbox` | Target folder for ingested notes |
 
 ## `[research]`
 
 Research pipeline settings (`vaultmind research` command).
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `max_results` | int | `5` | Max YouTube results per query |
-| `output_folder` | string | `research` | Vault subfolder for research notes |
-| `youtube_language` | string | `en` | Preferred transcript language |
+| Key                | Type   | Default    | Description                        |
+| ------------------ | ------ | ---------- | ---------------------------------- |
+| `max_results`      | int    | `5`        | Max YouTube results per query      |
+| `output_folder`    | string | `research` | Vault subfolder for research notes |
+| `youtube_language` | string | `en`       | Preferred transcript language      |
 
 ## `[tracking]`
 
 User preference and usage tracking.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable interaction tracking |
-| `db_path` | string | `""` | SQLite path (empty = `~/.vaultmind/data/preferences.db`) |
+| Key       | Type   | Default | Description                                              |
+| --------- | ------ | ------- | -------------------------------------------------------- |
+| `enabled` | bool   | `true`  | Enable interaction tracking                              |
+| `db_path` | string | `""`    | SQLite path (empty = `~/.vaultmind/data/preferences.db`) |
 
 ## `[image]`
 
 Image/photo capture via Telegram bot.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable photo capture |
-| `vision_model` | string | `""` | Vision model for image description (empty = `llm.fast_model`) |
-| `max_image_size_bytes` | int | `10000000` | Maximum image size (bytes) |
-| `save_originals` | bool | `true` | Save original images to vault |
+| Key                    | Type   | Default    | Description                                                   |
+| ---------------------- | ------ | ---------- | ------------------------------------------------------------- |
+| `enabled`              | bool   | `true`     | Enable photo capture                                          |
+| `vision_model`         | string | `""`       | Vision model for image description (empty = `llm.fast_model`) |
+| `max_image_size_bytes` | int    | `10000000` | Maximum image size (bytes)                                    |
+| `save_originals`       | bool   | `true`     | Save original images to vault                                 |
 
 ## `[episodic]`
 
 Episodic memory — decision-outcome tracking.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | Enable episodic memory |
-| `db_path` | string | `""` | SQLite path (empty = `~/.vaultmind/data/episodes.db`) |
-| `auto_extract` | bool | `false` | LLM extraction of episodes from notes (opt-in) |
-| `extraction_model` | string | `""` | Model for extraction (empty = `llm.fast_model`) |
+| Key                | Type   | Default | Description                                           |
+| ------------------ | ------ | ------- | ----------------------------------------------------- |
+| `enabled`          | bool   | `true`  | Enable episodic memory                                |
+| `db_path`          | string | `""`    | SQLite path (empty = `~/.vaultmind/data/episodes.db`) |
+| `auto_extract`     | bool   | `false` | LLM extraction of episodes from notes (opt-in)        |
+| `extraction_model` | string | `""`    | Model for extraction (empty = `llm.fast_model`)       |
 
 ## `[procedural]`
 
 Procedural memory — self-evolving workflow patterns mined from episodic memory. **Experimental, disabled by default.**
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `false` | Enable procedural memory (experimental) |
-| `db_path` | string | `""` | SQLite path (empty = `~/.vaultmind/data/workflows.db`) |
-| `min_episodes_for_pattern` | int | `3` | Minimum resolved episodes to form a workflow |
-| `synthesis_model` | string | `""` | Model for workflow synthesis (empty = `llm.fast_model`) |
+| Key                        | Type   | Default | Description                                             |
+| -------------------------- | ------ | ------- | ------------------------------------------------------- |
+| `enabled`                  | bool   | `false` | Enable procedural memory (experimental)                 |
+| `db_path`                  | string | `""`    | SQLite path (empty = `~/.vaultmind/data/workflows.db`)  |
+| `min_episodes_for_pattern` | int    | `3`     | Minimum resolved episodes to form a workflow            |
+| `synthesis_model`          | string | `""`    | Model for workflow synthesis (empty = `llm.fast_model`) |
 
 ## `[mcp]`
 
 MCP server settings and profile definitions.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `false` | Enable MCP server |
-| `host` | string | `127.0.0.1` | Bind address |
-| `port` | int | `8765` | Bind port |
+| Key       | Type   | Default     | Description       |
+| --------- | ------ | ----------- | ----------------- |
+| `enabled` | bool   | `false`     | Enable MCP server |
+| `host`    | string | `127.0.0.1` | Bind address      |
+| `port`    | int    | `8765`      | Bind port         |
 
 ### Profile definitions
 

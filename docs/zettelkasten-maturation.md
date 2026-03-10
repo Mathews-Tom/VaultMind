@@ -39,7 +39,7 @@ Clusters you dismiss are tracked and won't resurface until `maturation.dismissed
 
 ### Telegram Bot
 
-```
+```text
 /mature
 ```
 
@@ -77,7 +77,7 @@ inbox_folder = "00-inbox"
 
 ## Pipeline Architecture
 
-```
+```text
 src/vaultmind/pipeline/
 ├── clustering.py    # DBSCAN on ChromaDB embeddings
 ├── synthesis.py     # LLM synthesis → permanent note with wikilinks

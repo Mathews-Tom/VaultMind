@@ -4,11 +4,11 @@
 
 1. Create a bot via [@BotFather](https://t.me/botfather) on Telegram
 2. Set the bot token in `.env`:
-   ```
+   ```text
    VAULTMIND_TELEGRAM__BOT_TOKEN=123456:ABC-DEF...
    ```
 3. Optionally restrict access to specific users:
-   ```
+   ```text
    VAULTMIND_TELEGRAM__ALLOWED_USER_IDS=[123456789,987654321]
    ```
 4. Start the bot:
@@ -52,32 +52,32 @@ Set `capture_all = true` in `[routing]` config to bypass routing and capture all
 
 ### Capture and Notes
 
-| Command | Usage | Description |
-| --- | --- | --- |
-| `/daily` | `/daily` | Get or create today's daily note |
-| `/notes` | `/notes yesterday` | Find notes by date. Accepts natural language: `yesterday`, `last week`, `over the weekend`, `2026-02-20` |
-| `/read` | `/read my-note.md` | Read full note content. Accepts path, filename, or search term |
-| `/edit` | `/edit my-note.md add a summary` | AI-assisted edit. Shows a diff preview with confirm/cancel buttons |
-| `/delete` | `/delete my-note.md` | Delete a note. Shows confirmation with inline keyboard |
-| `/bookmark` | `/bookmark My Insights` | Save the current thinking session or last Q&A exchange to vault as a permanent note |
+| Command     | Usage                            | Description                                                                                              |
+| ----------- | -------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `/daily`    | `/daily`                         | Get or create today's daily note                                                                         |
+| `/notes`    | `/notes yesterday`               | Find notes by date. Accepts natural language: `yesterday`, `last week`, `over the weekend`, `2026-02-20` |
+| `/read`     | `/read my-note.md`               | Read full note content. Accepts path, filename, or search term                                           |
+| `/edit`     | `/edit my-note.md add a summary` | AI-assisted edit. Shows a diff preview with confirm/cancel buttons                                       |
+| `/delete`   | `/delete my-note.md`             | Delete a note. Shows confirmation with inline keyboard                                                   |
+| `/bookmark` | `/bookmark My Insights`          | Save the current thinking session or last Q&A exchange to vault as a permanent note                      |
 
 ### Search and Discovery
 
-| Command | Usage | Description |
-| --- | --- | --- |
-| `/recall` | `/recall machine learning` | Semantic search over the vault. Results are paginated (5 per page) with navigation buttons |
-| `/suggest` | `/suggest my-note.md` | Find notes worth linking. Uses composite scoring: semantic similarity + shared graph entities + graph distance |
-| `/duplicates` | `/duplicates my-note.md` | Find duplicate or merge-candidate notes. Bands: duplicate (>= 92%), merge (80-92%) |
+| Command       | Usage                      | Description                                                                                                    |
+| ------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `/recall`     | `/recall machine learning` | Semantic search over the vault. Results are paginated (5 per page) with navigation buttons                     |
+| `/suggest`    | `/suggest my-note.md`      | Find notes worth linking. Uses composite scoring: semantic similarity + shared graph entities + graph distance |
+| `/duplicates` | `/duplicates my-note.md`   | Find duplicate or merge-candidate notes. Bands: duplicate (>= 92%), merge (80-92%)                             |
 
 ### Thinking Partner
 
-| Command | Usage | Description |
-| --- | --- | --- |
-| `/think` | `/think Should I learn Rust?` | Start a thinking partner session. The session persists across bot restarts (SQLite-backed) |
-| `/think explore:` | `/think explore: future of PKM` | Divergent ideation — generates multiple angles and possibilities |
-| `/think critique:` | `/think critique: my startup idea` | Stress-tests an idea, finds weaknesses and counterarguments |
-| `/think synthesize:` | `/think synthesize: AI + education` | Connects dots across domains, finds non-obvious relationships |
-| `/think plan:` | `/think plan: migrate to Kubernetes` | Creates a structured execution plan with steps and dependencies |
+| Command              | Usage                                | Description                                                                                |
+| -------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `/think`             | `/think Should I learn Rust?`        | Start a thinking partner session. The session persists across bot restarts (SQLite-backed) |
+| `/think explore:`    | `/think explore: future of PKM`      | Divergent ideation — generates multiple angles and possibilities                           |
+| `/think critique:`   | `/think critique: my startup idea`   | Stress-tests an idea, finds weaknesses and counterarguments                                |
+| `/think synthesize:` | `/think synthesize: AI + education`  | Connects dots across domains, finds non-obvious relationships                              |
+| `/think plan:`       | `/think plan: migrate to Kubernetes` | Creates a structured execution plan with steps and dependencies                            |
 
 After starting a `/think` session, follow-up messages within the TTL (default: 1 hour) continue the same session automatically. No need to use `/think` again.
 
@@ -85,30 +85,30 @@ The thinking partner draws context from both ChromaDB (semantic search) and the 
 
 ### Knowledge Graph
 
-| Command | Usage | Description |
-| --- | --- | --- |
-| `/graph` | `/graph Python` | Query an entity's connections, neighbors, and relationships in the knowledge graph |
-| `/evolve` | `/evolve` | Show belief evolution signals: confidence drift, relationship shifts, stale claims |
-| `/mature` | `/mature` | Show Zettelkasten maturation clusters — groups of fleeting notes ready for synthesis into permanent notes |
+| Command   | Usage           | Description                                                                                               |
+| --------- | --------------- | --------------------------------------------------------------------------------------------------------- |
+| `/graph`  | `/graph Python` | Query an entity's connections, neighbors, and relationships in the knowledge graph                        |
+| `/evolve` | `/evolve`       | Show belief evolution signals: confidence drift, relationship shifts, stale claims                        |
+| `/mature` | `/mature`       | Show Zettelkasten maturation clusters — groups of fleeting notes ready for synthesis into permanent notes |
 
 ### Episodic Memory
 
-| Command | Usage | Description |
-| --- | --- | --- |
-| `/decide` | `/decide Use PostgreSQL for the auth service` | Record a decision (creates a pending episode). Returns episode ID |
-| `/outcome` | `/outcome a1b2c3 success Worked well, low latency` | Resolve a decision with outcome status (`success`, `failure`, `partial`) and description |
-| `/episodes` | `/episodes` or `/episodes Python` | List recent episodes (pending first), optionally filtered by entity |
-| `/workflows` | `/workflows` | List active workflow patterns with success rates (requires procedural memory enabled) |
-| `/workflow` | `/workflow w1x2y3` | Show workflow steps and trigger pattern |
+| Command      | Usage                                              | Description                                                                              |
+| ------------ | -------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `/decide`    | `/decide Use PostgreSQL for the auth service`      | Record a decision (creates a pending episode). Returns episode ID                        |
+| `/outcome`   | `/outcome a1b2c3 success Worked well, low latency` | Resolve a decision with outcome status (`success`, `failure`, `partial`) and description |
+| `/episodes`  | `/episodes` or `/episodes Python`                  | List recent episodes (pending first), optionally filtered by entity                      |
+| `/workflows` | `/workflows`                                       | List active workflow patterns with success rates (requires procedural memory enabled)    |
+| `/workflow`  | `/workflow w1x2y3`                                 | Show workflow steps and trigger pattern                                                  |
 
 ### System
 
-| Command | Usage | Description |
-| --- | --- | --- |
+| Command   | Usage     | Description                                                                    |
+| --------- | --------- | ------------------------------------------------------------------------------ |
 | `/review` | `/review` | Weekly review with graph insights, trending topics, and connection suggestions |
-| `/health` | `/health` | System health check — reports status of ChromaDB, graph, watcher, and LLM |
-| `/stats` | `/stats` | Vault and graph statistics (note counts, types, entities, relationships) |
-| `/help` | `/help` | Quick reference for all commands |
+| `/health` | `/health` | System health check — reports status of ChromaDB, graph, watcher, and LLM      |
+| `/stats`  | `/stats`  | Vault and graph statistics (note counts, types, entities, relationships)       |
+| `/help`   | `/help`   | Quick reference for all commands                                               |
 
 ## Photo Capture
 
