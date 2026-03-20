@@ -37,9 +37,11 @@ def create_mcp_server(
     note_suggester: object | None = None,
     enforcer: ProfileEnforcer | None = None,
     audit_logger: AuditLogger | None = None,
+    # New introspection dependencies
     episode_store: object | None = None,
     procedural_memory: object | None = None,
     evolution_detector: object | None = None,
+    preference_store: object | None = None,
 ) -> Any:  # Returns mcp.server.Server (optional dep)
     """Create and configure the MCP server with vault tools.
 
@@ -285,8 +287,14 @@ def create_mcp_server(
             ),
             Tool(
                 name="vault_stats",
-                description="Vault health metrics: note counts by type/folder, graph size.",
-                inputSchema={"type": "object", "properties": {}},
+                description=(
+                    "Vault health metrics: note counts by type/folder,"
+                    " graph size, index coverage."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
             ),
             Tool(
                 name="episode_query",
@@ -328,7 +336,8 @@ def create_mcp_server(
             Tool(
                 name="graph_evolution",
                 description=(
-                    "Belief evolution signals: confidence drift, relationship shifts, stale claims."
+                    "Belief evolution signals: confidence drift,"
+                    " relationship shifts, stale claims."
                 ),
                 inputSchema={
                     "type": "object",
@@ -386,6 +395,7 @@ def create_mcp_server(
                 episode_store=episode_store,
                 procedural_memory=procedural_memory,
                 evolution_detector=evolution_detector,
+                preference_store=preference_store,
             )
             text = json.dumps(result, indent=2, default=str)
 
@@ -423,6 +433,7 @@ def _dispatch_tool(
     episode_store: object | None = None,
     procedural_memory: object | None = None,
     evolution_detector: object | None = None,
+    preference_store: object | None = None,
 ) -> dict[str, Any]:
     """Route tool calls to the appropriate handler."""
 
@@ -625,29 +636,33 @@ def _dispatch_tool(
         total = 0
         for md in vault_path.rglob("*.md"):
             rel = md.relative_to(vault_path)
-            if any(p.startswith(".") for p in rel.parts):
+            parts = rel.parts
+            # Skip excluded folders
+            if any(p.startswith(".") for p in parts):
                 continue
             total += 1
-            folder = rel.parts[0] if len(rel.parts) > 1 else "(root)"
+            folder = parts[0] if len(parts) > 1 else "(root)"
             by_folder[folder] = by_folder.get(folder, 0) + 1
+            # Parse type from frontmatter (quick scan)
             try:
                 text = md.read_text(encoding="utf-8")[:500]
                 if text.startswith("---"):
                     for line in text.split("\n")[1:20]:
                         if line.startswith("type:"):
-                            ntype = line.split(":", 1)[1].strip()
-                            by_type[ntype] = by_type.get(ntype, 0) + 1
+                            note_type = line.split(":", 1)[1].strip()
+                            by_type[note_type] = by_type.get(note_type, 0) + 1
                             break
                         if line == "---":
                             break
             except Exception:
                 pass
         graph_stats = graph.stats
+        graph_info = {"entities": graph_stats["nodes"], "edges": graph_stats["edges"]}
         return {
             "total_notes": total,
             "by_type": by_type,
             "by_folder": by_folder,
-            "graph": {"entities": graph_stats["nodes"], "edges": graph_stats["edges"]},
+            "graph": graph_info,
         }
 
     elif name == "episode_query":
@@ -659,12 +674,16 @@ def _dispatch_tool(
         limit = args.get("limit", 10)
         entity = args.get("entity")
         status = args.get("status")
+
         if entity:
             episodes = episode_store.search_by_entity(entity, limit=limit)
         elif status == "pending":
             episodes = episode_store.query_pending(limit=limit)
+        elif status == "resolved":
+            episodes = episode_store.query_resolved(limit=limit)
         else:
             episodes = episode_store.query_resolved(limit=limit)
+
         return {
             "episodes": [
                 {
@@ -729,10 +748,10 @@ def _dispatch_tool(
         }
 
     elif name == "recent_activity":
-        from datetime import datetime, timedelta
+        from datetime import datetime
 
         days = args.get("days", 7)
-        cutoff = (datetime.now() - timedelta(days=days)).timestamp()
+        cutoff = datetime.now().timestamp() - (days * 86400)
         created: list[str] = []
         modified: list[str] = []
         for md in vault_path.rglob("*.md"):

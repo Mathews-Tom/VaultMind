@@ -289,6 +289,17 @@ class MCPConfig(BaseSettings):
     profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
+class LoopsConfig(BaseSettings):
+    """Compound loop job configuration."""
+
+    insight_enabled: bool = True
+    insight_interval_days: int = 7
+    evolution_enabled: bool = True
+    evolution_interval_days: int = 7
+    procedural_enabled: bool = False  # requires [procedural].enabled = true
+    procedural_interval_days: int = 7
+
+
 class SchedulerConfig(BaseSettings):
     """Background scheduler configuration."""
 
@@ -332,6 +343,7 @@ class Settings(BaseSettings):
     procedural: ProceduralConfig = Field(default_factory=ProceduralConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    loops: LoopsConfig = Field(default_factory=LoopsConfig)
 
     # API keys — always from env vars
     anthropic_api_key: str = ""
