@@ -613,6 +613,7 @@ def bot(ctx: click.Context) -> None:
     # Wire up incremental watch mode
     from vaultmind.graph.maintenance import GraphMaintainer
     from vaultmind.vault.events import (
+        AnyVaultEvent,
         NoteCreatedEvent,
         NoteDeletedEvent,
         NoteModifiedEvent,
@@ -740,6 +741,15 @@ def bot(ctx: click.Context) -> None:
             state_path=sched_state,
             notifier=notifier,
         )
+
+    # Bridge vault events to scheduler for event-triggered loops
+    if scheduler is not None:
+
+        async def _on_note_event_for_scheduler(event: AnyVaultEvent) -> None:
+            scheduler.record_event(type(event).__name__)  # type: ignore[union-attr]
+
+        event_bus.subscribe(NoteCreatedEvent, _on_note_event_for_scheduler)  # type: ignore[arg-type]
+        event_bus.subscribe(NoteModifiedEvent, _on_note_event_for_scheduler)  # type: ignore[arg-type]
 
     async def _run_bot_with_watcher() -> None:
         watcher.start()
