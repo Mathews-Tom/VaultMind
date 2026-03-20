@@ -288,8 +288,7 @@ def create_mcp_server(
             Tool(
                 name="vault_stats",
                 description=(
-                    "Vault health metrics: note counts by type/folder,"
-                    " graph size, index coverage."
+                    "Vault health metrics: note counts by type/folder, graph size, index coverage."
                 ),
                 inputSchema={
                     "type": "object",
@@ -336,8 +335,7 @@ def create_mcp_server(
             Tool(
                 name="graph_evolution",
                 description=(
-                    "Belief evolution signals: confidence drift,"
-                    " relationship shifts, stale claims."
+                    "Belief evolution signals: confidence drift, relationship shifts, stale claims."
                 ),
                 inputSchema={
                     "type": "object",
@@ -641,8 +639,8 @@ def _dispatch_tool(
             if any(p.startswith(".") for p in parts):
                 continue
             total += 1
-            folder = parts[0] if len(parts) > 1 else "(root)"
-            by_folder[folder] = by_folder.get(folder, 0) + 1
+            folder_name = str(parts[0]) if len(parts) > 1 else "(root)"
+            by_folder[folder_name] = by_folder.get(folder_name, 0) + 1
             # Parse type from frontmatter (quick scan)
             try:
                 text = md.read_text(encoding="utf-8")[:500]
@@ -755,14 +753,17 @@ def _dispatch_tool(
         created: list[str] = []
         modified: list[str] = []
         for md in vault_path.rglob("*.md"):
-            rel = str(md.relative_to(vault_path))
-            if any(p.startswith(".") for p in md.relative_to(vault_path).parts):
+            rel_path_parts = md.relative_to(vault_path).parts
+            if any(p.startswith(".") for p in rel_path_parts):
                 continue
+            rel_str = str(md.relative_to(vault_path))
             stat = md.stat()
-            if stat.st_birthtime >= cutoff:
-                created.append(rel)
+            # st_birthtime is macOS-only; fall back to st_ctime on Linux
+            birth = getattr(stat, "st_birthtime", stat.st_ctime)
+            if birth >= cutoff:
+                created.append(rel_str)
             elif stat.st_mtime >= cutoff:
-                modified.append(rel)
+                modified.append(rel_str)
         return {
             "days": days,
             "created": sorted(created),
