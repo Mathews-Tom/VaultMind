@@ -579,6 +579,18 @@ def bot(ctx: click.Context) -> None:
         procedural_memory = ProceduralMemory(procedural_db)
         console.print("[green]✓[/green] Procedural memory enabled")
 
+    # Preference store (for insight loop + bot handlers)
+    from vaultmind.tracking.preferences import PreferenceStore
+
+    pref_db = (
+        Path(settings.tracking.db_path)
+        if settings.tracking.db_path
+        else VAULTMIND_HOME / "data" / "preferences.db"
+    )
+    preference_store: PreferenceStore | None = (
+        PreferenceStore(pref_db) if settings.tracking.enabled else None
+    )
+
     handlers = CommandHandlers(
         settings=settings,
         store=store,
@@ -674,8 +686,57 @@ def bot(ctx: click.Context) -> None:
                 chat_id=settings.telegram.notification_chat_id,
             )
 
+        # Compound loop jobs
+        jobs: list[ScheduledJob] = [maturation_job]
+
+        if settings.loops.insight_enabled and preference_store is not None:
+            from vaultmind.services.loops.insight_loop import create_insight_executor
+
+            insight_exec = create_insight_executor(preference_store)
+            jobs.append(
+                ScheduledJob(
+                    name="insight_loop",
+                    interval=timedelta(days=settings.loops.insight_interval_days),
+                    execute=insight_exec,
+                )
+            )
+
+        if settings.loops.evolution_enabled and evolution_detector is not None:
+            from vaultmind.services.loops.evolution_loop import create_evolution_executor
+
+            evolution_exec = create_evolution_executor(evolution_detector)
+            jobs.append(
+                ScheduledJob(
+                    name="evolution_loop",
+                    interval=timedelta(days=settings.loops.evolution_interval_days),
+                    execute=evolution_exec,
+                )
+            )
+
+        if (
+            settings.loops.procedural_enabled
+            and settings.procedural.enabled
+            and procedural_memory is not None
+            and episode_store is not None
+        ):
+            from vaultmind.services.loops.procedural_loop import create_procedural_executor
+
+            proc_model = settings.procedural.synthesis_model or settings.llm.fast_model
+            procedural_exec = create_procedural_executor(
+                procedural_memory=procedural_memory,
+                episode_store=episode_store,
+                llm_client=llm_client,
+                model=proc_model,
+            )
+            jobs.append(
+                ScheduledJob(
+                    name="procedural_loop",
+                    interval=timedelta(days=settings.loops.procedural_interval_days),
+                    execute=procedural_exec,
+                )
+            )
         scheduler = SchedulerService(
-            jobs=[maturation_job],
+            jobs=jobs,
             state_path=sched_state,
             notifier=notifier,
         )
