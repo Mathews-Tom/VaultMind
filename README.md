@@ -293,11 +293,11 @@ uv sync --extra mcp
 
 Profiles control per-agent access. Activate with `--profile <name>`:
 
-| Profile                | Access                                           | Folders                   |
-| ---------------------- | ------------------------------------------------ | ------------------------- |
-| `researcher` (default) | Read-only: search, read, list, graph, introspection tools        | All                       |
-| `planner`              | Read/write: + capture, capture_note, vault_write, introspection  | `02-projects`, `00-inbox` |
-| `full`                 | Unrestricted (requires explicit opt-in)          | All                       |
+| Profile                | Access                                                          | Folders                   |
+| ---------------------- | --------------------------------------------------------------- | ------------------------- |
+| `researcher` (default) | Read-only: search, read, list, graph, introspection tools       | All                       |
+| `planner`              | Read/write: + capture, capture_note, vault_write, introspection | `02-projects`, `00-inbox` |
+| `full`                 | Unrestricted (requires explicit opt-in)                         | All                       |
 
 ## Vault Structure
 

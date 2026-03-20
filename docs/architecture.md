@@ -256,11 +256,11 @@ Vault Events → Event Bus → Scheduler (threshold check) → Loop Job (state i
 
 **Three loop jobs:**
 
-| Loop | Input | Detects | Notifies When |
-|------|-------|---------|---------------|
-| Insight | PreferenceStore | Search trends, acceptance rate shifts, volume changes | >15% rate shift or >50% volume change |
-| Evolution | EvolutionDetector | Belief drift signals, escalating trends | High-severity signal or 3+ consecutive scan appearances |
-| Procedural | EpisodeStore + LLM | Recurring decision patterns → workflows | New workflow synthesized from episodes |
+| Loop       | Input              | Detects                                               | Notifies When                                           |
+| ---------- | ------------------ | ----------------------------------------------------- | ------------------------------------------------------- |
+| Insight    | PreferenceStore    | Search trends, acceptance rate shifts, volume changes | >15% rate shift or >50% volume change                   |
+| Evolution  | EvolutionDetector  | Belief drift signals, escalating trends               | High-severity signal or 3+ consecutive scan appearances |
+| Procedural | EpisodeStore + LLM | Recurring decision patterns → workflows               | New workflow synthesized from episodes                  |
 
 **Event-driven triggering:** Vault events (NoteCreated, NoteModified) accumulate per-job. When a configurable threshold is met (default 10) and cooldown period has passed (default 1 hour), the loop fires early outside its normal schedule.
 

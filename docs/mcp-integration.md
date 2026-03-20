@@ -193,12 +193,12 @@ Vault health metrics: note counts by type and folder, knowledge graph size.
 
 **Returns:**
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `total_notes` | integer | Total markdown files in vault |
-| `by_type` | object | Note counts grouped by frontmatter `type` |
-| `by_folder` | object | Note counts grouped by top-level folder |
-| `graph` | object | `{entities, edges}` — knowledge graph node/edge counts |
+| Field         | Type    | Description                                            |
+| ------------- | ------- | ------------------------------------------------------ |
+| `total_notes` | integer | Total markdown files in vault                          |
+| `by_type`     | object  | Note counts grouped by frontmatter `type`              |
+| `by_folder`   | object  | Note counts grouped by top-level folder                |
+| `graph`       | object  | `{entities, edges}` — knowledge graph node/edge counts |
 
 ### `episode_query`
 
@@ -206,11 +206,11 @@ Search episodic memory for past decisions and outcomes.
 
 **Parameters:**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `entity` | string | No | Filter episodes by entity name |
-| `status` | string | No | `"pending"` or `"resolved"` |
-| `limit` | integer | No | Max results (default 10) |
+| Parameter | Type    | Required | Description                    |
+| --------- | ------- | -------- | ------------------------------ |
+| `entity`  | string  | No       | Filter episodes by entity name |
+| `status`  | string  | No       | `"pending"` or `"resolved"`    |
+| `limit`   | integer | No       | Max results (default 10)       |
 
 **Returns:** `{episodes: [...], count}` — each episode includes `episode_id`, `decision`, `context`, `outcome`, `status`, `lessons`, `entities`, `created`.
 
@@ -220,9 +220,9 @@ Find a matching procedural workflow for a given context.
 
 **Parameters:**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `context` | string | Yes | Context to match against workflow trigger patterns |
+| Parameter | Type   | Required | Description                                        |
+| --------- | ------ | -------- | -------------------------------------------------- |
+| `context` | string | Yes      | Context to match against workflow trigger patterns |
 
 **Returns:** `{workflow: {workflow_id, name, description, steps, trigger_pattern, success_rate, usage_count}}` or `{workflow: null}` if no match.
 
@@ -232,9 +232,9 @@ Belief evolution signals: confidence drift, relationship shifts, stale claims.
 
 **Parameters:**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `min_severity` | number | No | Minimum severity threshold 0.0–1.0 (default 0.0) |
+| Parameter      | Type   | Required | Description                                      |
+| -------------- | ------ | -------- | ------------------------------------------------ |
+| `min_severity` | number | No       | Minimum severity threshold 0.0–1.0 (default 0.0) |
 
 **Returns:** `{signals: [...], count}` — each signal includes `evolution_id`, `entity_a`, `entity_b`, `signal_type`, `detail`, `severity`, `source_notes`.
 
@@ -244,9 +244,9 @@ Recent vault activity: notes created or modified in the last N days.
 
 **Parameters:**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `days` | integer | No | Lookback period in days (default 7) |
+| Parameter | Type    | Required | Description                         |
+| --------- | ------- | -------- | ----------------------------------- |
+| `days`    | integer | No       | Lookback period in days (default 7) |
 
 **Returns:** `{days, created: [...], modified: [...], created_count, modified_count}` — file paths relative to vault root.
 
