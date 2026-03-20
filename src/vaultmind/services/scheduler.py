@@ -43,6 +43,9 @@ class ScheduledJob:
     interval: timedelta
     execute: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
     completion_check: Callable[[dict[str, Any]], bool] | None = field(default=None)
+    trigger_event_types: list[str] | None = field(default=None)
+    trigger_threshold: int = field(default=10)
+    trigger_cooldown: timedelta = field(default_factory=lambda: timedelta(hours=1))
 
     @staticmethod
     def legacy(
@@ -50,7 +53,10 @@ class ScheduledJob:
         interval: timedelta,
         execute: Callable[[], Awaitable[None]],
     ) -> ScheduledJob:
-        """Create a job from a legacy no-arg async callable."""
+        """Create a job from a legacy no-arg async callable.
+
+        Note: legacy jobs do not support event-triggered early runs.
+        """
         return ScheduledJob(
             name=name,
             interval=interval,
@@ -85,6 +91,9 @@ class SchedulerService:
         self._state: dict[str, Any] = self._load_state()
         self._running = False
         self._notifier = notifier
+        self._event_counts: dict[str, dict[str, int]] = {}  # {job_name: {event_type: count}}
+        self._last_triggered: dict[str, datetime] = {}  # {job_name: last_trigger_time}
+        self._pending_triggers: set[str] = set()
 
     def _load_state(self) -> dict[str, Any]:
         if not self._state_path.exists():
@@ -130,6 +139,13 @@ class SchedulerService:
                 # Skip completed jobs
                 if job_state is not None and job_state.get("completed", False):
                     continue
+
+                # Check for event-triggered early runs
+                if job.name in self._pending_triggers:
+                    self._pending_triggers.discard(job.name)
+                    await self._run_job(job)
+                    continue
+
                 last_run_str = job_state.get("last_run") if job_state else None
                 if job.should_run(now, last_run_str):
                     await self._run_job(job)
@@ -138,6 +154,42 @@ class SchedulerService:
     def stop(self) -> None:
         """Stop the scheduler loop."""
         self._running = False
+
+    def record_event(self, event_type_name: str) -> None:
+        """Record a vault event that may trigger early loop runs.
+
+        Called by the event bus subscriber. Checks if any job's threshold
+        is met and the cooldown period has passed.
+        """
+        for job in self._jobs:
+            if job.trigger_event_types is None:
+                continue
+            if event_type_name not in job.trigger_event_types:
+                continue
+
+            # Initialize counter
+            if job.name not in self._event_counts:
+                self._event_counts[job.name] = {}
+            counts = self._event_counts[job.name]
+            counts[event_type_name] = counts.get(event_type_name, 0) + 1
+
+            total = sum(counts.values())
+            if total >= job.trigger_threshold:
+                # Check cooldown
+                last = self._last_triggered.get(job.name)
+                now = datetime.now(UTC)
+                if last is not None and (now - last) < job.trigger_cooldown:
+                    logger.debug("Scheduler: job '%s' threshold met but in cooldown", job.name)
+                    continue
+
+                logger.info(
+                    "Scheduler: event trigger for job '%s' (%d events)",
+                    job.name,
+                    total,
+                )
+                self._event_counts[job.name] = {}  # Reset counters
+                self._last_triggered[job.name] = now
+                self._pending_triggers.add(job.name)
 
     async def _run_job(self, job: ScheduledJob) -> None:
         """Execute a job and update state."""
