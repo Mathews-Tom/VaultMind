@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from vaultmind.bot.notifier import Notifier
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,11 +74,17 @@ class ScheduledJob:
 class SchedulerService:
     """Asyncio-native scheduler for periodic background tasks."""
 
-    def __init__(self, jobs: list[ScheduledJob], state_path: Path) -> None:
+    def __init__(
+        self,
+        jobs: list[ScheduledJob],
+        state_path: Path,
+        notifier: Notifier | None = None,
+    ) -> None:
         self._jobs = jobs
         self._state_path = state_path
         self._state: dict[str, Any] = self._load_state()
         self._running = False
+        self._notifier = notifier
 
     def _load_state(self) -> dict[str, Any]:
         if not self._state_path.exists():
@@ -156,6 +164,14 @@ class SchedulerService:
         if job.completion_check is not None and job.completion_check(inner_state):
             job_state["completed"] = True
             logger.info("Scheduler: job '%s' marked completed", job.name)
+
+        # Send notification if job produced one
+        notification = inner_state.get("notification")
+        if notification and self._notifier is not None:
+            try:
+                await self._notifier.send_if_significant(str(notification))
+            except Exception:
+                logger.exception("Scheduler: notification send failed for '%s'", job.name)
 
         self._state[job.name] = job_state
         self._save_state()

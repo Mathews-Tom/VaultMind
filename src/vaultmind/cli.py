@@ -663,9 +663,21 @@ def bot(ctx: click.Context) -> None:
             if settings.scheduler.state_path
             else Path.home() / ".vaultmind" / "data" / "scheduler_state.json"
         )
+
+        # Proactive notifier
+        from vaultmind.bot.notifier import Notifier
+
+        notifier: Notifier | None = None
+        if settings.telegram.notification_chat_id:
+            notifier = Notifier(
+                bot=tg_bot,
+                chat_id=settings.telegram.notification_chat_id,
+            )
+
         scheduler = SchedulerService(
             jobs=[maturation_job],
             state_path=sched_state,
+            notifier=notifier,
         )
 
     async def _run_bot_with_watcher() -> None:
