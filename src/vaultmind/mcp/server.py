@@ -37,6 +37,11 @@ def create_mcp_server(
     note_suggester: object | None = None,
     enforcer: ProfileEnforcer | None = None,
     audit_logger: AuditLogger | None = None,
+    # New introspection dependencies
+    episode_store: object | None = None,
+    procedural_memory: object | None = None,
+    evolution_detector: object | None = None,
+    preference_store: object | None = None,
 ) -> Any:  # Returns mcp.server.Server (optional dep)
     """Create and configure the MCP server with vault tools.
 
@@ -280,6 +285,85 @@ def create_mcp_server(
                     "required": ["content"],
                 },
             ),
+            Tool(
+                name="vault_stats",
+                description=(
+                    "Vault health metrics: note counts by type/folder,"
+                    " graph size, index coverage."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="episode_query",
+                description="Search episodic memory for past decisions and outcomes.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "entity": {
+                            "type": "string",
+                            "description": "Filter episodes by entity name (optional)",
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "resolved"],
+                            "description": "Filter by status (optional)",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (default 10)",
+                            "default": 10,
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="workflow_suggest",
+                description="Find matching procedural workflow for a given context.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "context": {
+                            "type": "string",
+                            "description": "Context to match against workflow trigger patterns",
+                        },
+                    },
+                    "required": ["context"],
+                },
+            ),
+            Tool(
+                name="graph_evolution",
+                description=(
+                    "Belief evolution signals: confidence drift,"
+                    " relationship shifts, stale claims."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "min_severity": {
+                            "type": "number",
+                            "description": "Minimum severity threshold (0.0-1.0, default 0.0)",
+                            "default": 0.0,
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="recent_activity",
+                description="Recent vault activity: notes created/modified in the last N days.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "days": {
+                            "type": "integer",
+                            "description": "Lookback period in days (default 7)",
+                            "default": 7,
+                        },
+                    },
+                },
+            ),
         ]
 
     @server.call_tool()  # type: ignore[misc,untyped-decorator,unused-ignore]
@@ -308,6 +392,10 @@ def create_mcp_server(
                 parser,
                 duplicate_detector=duplicate_detector,
                 note_suggester=note_suggester,
+                episode_store=episode_store,
+                procedural_memory=procedural_memory,
+                evolution_detector=evolution_detector,
+                preference_store=preference_store,
             )
             text = json.dumps(result, indent=2, default=str)
 
@@ -342,6 +430,10 @@ def _dispatch_tool(
     *,
     duplicate_detector: object | None = None,
     note_suggester: object | None = None,
+    episode_store: object | None = None,
+    procedural_memory: object | None = None,
+    evolution_detector: object | None = None,
+    preference_store: object | None = None,
 ) -> dict[str, Any]:
     """Route tool calls to the appropriate handler."""
 
@@ -537,6 +629,147 @@ def _dispatch_tool(
 
         rel_path = f"{target_folder}/{filename}"
         return {"status": "ok", "path": rel_path, "title": title}
+
+    elif name == "vault_stats":
+        by_type: dict[str, int] = {}
+        by_folder: dict[str, int] = {}
+        total = 0
+        for md in vault_path.rglob("*.md"):
+            rel = md.relative_to(vault_path)
+            parts = rel.parts
+            # Skip excluded folders
+            if any(p.startswith(".") for p in parts):
+                continue
+            total += 1
+            folder = parts[0] if len(parts) > 1 else "(root)"
+            by_folder[folder] = by_folder.get(folder, 0) + 1
+            # Parse type from frontmatter (quick scan)
+            try:
+                text = md.read_text(encoding="utf-8")[:500]
+                if text.startswith("---"):
+                    for line in text.split("\n")[1:20]:
+                        if line.startswith("type:"):
+                            note_type = line.split(":", 1)[1].strip()
+                            by_type[note_type] = by_type.get(note_type, 0) + 1
+                            break
+                        if line == "---":
+                            break
+            except Exception:
+                pass
+        graph_stats = graph.stats
+        graph_info = {"entities": graph_stats["nodes"], "edges": graph_stats["edges"]}
+        return {
+            "total_notes": total,
+            "by_type": by_type,
+            "by_folder": by_folder,
+            "graph": graph_info,
+        }
+
+    elif name == "episode_query":
+        if episode_store is None:
+            return {"error": "Episodic memory is not configured"}
+        from vaultmind.memory.store import EpisodeStore
+
+        assert isinstance(episode_store, EpisodeStore)
+        limit = args.get("limit", 10)
+        entity = args.get("entity")
+        status = args.get("status")
+
+        if entity:
+            episodes = episode_store.search_by_entity(entity, limit=limit)
+        elif status == "pending":
+            episodes = episode_store.query_pending(limit=limit)
+        elif status == "resolved":
+            episodes = episode_store.query_resolved(limit=limit)
+        else:
+            episodes = episode_store.query_resolved(limit=limit)
+
+        return {
+            "episodes": [
+                {
+                    "episode_id": ep.episode_id,
+                    "decision": ep.decision,
+                    "context": ep.context,
+                    "outcome": ep.outcome,
+                    "status": ep.outcome_status.value,
+                    "lessons": ep.lessons,
+                    "entities": ep.entities,
+                    "created": ep.created.isoformat() if ep.created else None,
+                }
+                for ep in episodes
+            ],
+            "count": len(episodes),
+        }
+
+    elif name == "workflow_suggest":
+        if procedural_memory is None:
+            return {"error": "Procedural memory is not configured"}
+        from vaultmind.memory.procedural import ProceduralMemory
+
+        assert isinstance(procedural_memory, ProceduralMemory)
+        workflow = procedural_memory.suggest_workflow(args["context"])
+        if workflow is None:
+            return {"workflow": None, "message": "No matching workflow found"}
+        return {
+            "workflow": {
+                "workflow_id": workflow.workflow_id,
+                "name": workflow.name,
+                "description": workflow.description,
+                "steps": workflow.steps,
+                "trigger_pattern": workflow.trigger_pattern,
+                "success_rate": workflow.success_rate,
+                "usage_count": workflow.usage_count,
+            }
+        }
+
+    elif name == "graph_evolution":
+        if evolution_detector is None:
+            return {"error": "Evolution detection is not configured"}
+        from vaultmind.graph.evolution import EvolutionDetector
+
+        assert isinstance(evolution_detector, EvolutionDetector)
+        signals = evolution_detector.scan()
+        min_sev = args.get("min_severity", 0.0)
+        filtered = [s for s in signals if s.severity >= min_sev]
+        return {
+            "signals": [
+                {
+                    "evolution_id": s.evolution_id,
+                    "entity_a": s.entity_a,
+                    "entity_b": s.entity_b,
+                    "signal_type": s.signal_type,
+                    "detail": s.detail,
+                    "severity": s.severity,
+                    "source_notes": s.source_notes,
+                }
+                for s in filtered
+            ],
+            "count": len(filtered),
+        }
+
+    elif name == "recent_activity":
+        from datetime import datetime
+
+        days = args.get("days", 7)
+        cutoff = datetime.now().timestamp() - (days * 86400)
+        created: list[str] = []
+        modified: list[str] = []
+        for md in vault_path.rglob("*.md"):
+            rel = str(md.relative_to(vault_path))
+            if any(p.startswith(".") for p in md.relative_to(vault_path).parts):
+                continue
+            stat = md.stat()
+            if stat.st_birthtime >= cutoff:
+                created.append(rel)
+            elif stat.st_mtime >= cutoff:
+                modified.append(rel)
+        return {
+            "days": days,
+            "created": sorted(created),
+            "modified": sorted(modified),
+            "created_count": len(created),
+            "modified_count": len(modified),
+        }
 
     else:
         return {"error": f"Unknown tool: {name}"}
