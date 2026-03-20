@@ -104,6 +104,7 @@ class TelegramConfig(BaseSettings):
         description="Telegram user IDs allowed to use the bot. Empty = allow all.",
     )
     thinking_session_ttl: int = 3600  # seconds
+    notification_chat_id: int = 0  # chat ID for proactive notifications; 0 = disabled
 
 
 class RoutingConfig(BaseSettings):
