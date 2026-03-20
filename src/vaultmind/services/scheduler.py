@@ -2,6 +2,7 @@
 
 Runs periodic jobs (e.g., maturation digest) as background tasks.
 Persists last-run timestamps to survive bot restarts.
+Supports state-aware compound loops via execute(state) -> state protocol.
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -20,13 +21,39 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _wrap_legacy_execute(
+    fn: Callable[[], Awaitable[None]],
+) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+    """Wrap a legacy no-arg async callable to match the stateful execute protocol."""
+
+    async def wrapper(state: dict[str, Any]) -> dict[str, Any]:
+        await fn()
+        return state
+
+    return wrapper
+
+
 @dataclass
 class ScheduledJob:
     """A periodic job definition."""
 
     name: str
     interval: timedelta
-    execute: Callable[[], Awaitable[None]]
+    execute: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+    completion_check: Callable[[dict[str, Any]], bool] | None = field(default=None)
+
+    @staticmethod
+    def legacy(
+        name: str,
+        interval: timedelta,
+        execute: Callable[[], Awaitable[None]],
+    ) -> ScheduledJob:
+        """Create a job from a legacy no-arg async callable."""
+        return ScheduledJob(
+            name=name,
+            interval=interval,
+            execute=_wrap_legacy_execute(execute),
+        )
 
     def is_overdue(self, last_run_iso: str) -> bool:
         """Check if this job should have run since last_run."""
@@ -52,13 +79,25 @@ class SchedulerService:
         self._running = False
 
     def _load_state(self) -> dict[str, Any]:
-        if self._state_path.exists():
-            return dict(json.loads(self._state_path.read_text()))
-        return {}
+        if not self._state_path.exists():
+            return {}
+        raw: dict[str, Any] = dict(json.loads(self._state_path.read_text()))
+        # Migrate old format: plain ISO string -> new dict format
+        for key, val in raw.items():
+            if isinstance(val, str):
+                raw[key] = {
+                    "last_run": val,
+                    "run_count": 0,
+                    "state": {},
+                    "completed": False,
+                }
+        return raw
 
     def _save_state(self) -> None:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._state_path.write_text(json.dumps(self._state, default=str))
+        tmp = self._state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._state, default=str))
+        tmp.replace(self._state_path)
 
     async def run(self) -> None:
         """Start the scheduler loop. Fires missed jobs on startup."""
@@ -66,19 +105,24 @@ class SchedulerService:
 
         # Check for missed jobs on startup
         for job in self._jobs:
-            last_run = self._state.get(job.name)
-            if isinstance(last_run, str) and job.is_overdue(last_run):
-                logger.info("Scheduler: firing missed job '%s'", job.name)
-                await self._run_job(job)
-            elif last_run is None:
+            job_state = self._state.get(job.name)
+            if job_state is None:
                 logger.info("Scheduler: first run of job '%s'", job.name)
                 await self._run_job(job)
+            elif not job_state.get("completed", False):
+                last_run = job_state.get("last_run")
+                if isinstance(last_run, str) and job.is_overdue(last_run):
+                    logger.info("Scheduler: firing missed job '%s'", job.name)
+                    await self._run_job(job)
 
         while self._running:
             now = datetime.now(UTC)
             for job in self._jobs:
-                last_run = self._state.get(job.name)
-                last_run_str = str(last_run) if last_run is not None else None
+                job_state = self._state.get(job.name)
+                # Skip completed jobs
+                if job_state is not None and job_state.get("completed", False):
+                    continue
+                last_run_str = job_state.get("last_run") if job_state else None
                 if job.should_run(now, last_run_str):
                     await self._run_job(job)
             await asyncio.sleep(60)
@@ -89,9 +133,43 @@ class SchedulerService:
 
     async def _run_job(self, job: ScheduledJob) -> None:
         """Execute a job and update state."""
+        job_state: dict[str, Any] = self._state.get(
+            job.name,
+            {"state": {}, "run_count": 0, "completed": False},
+        )
+
+        # Skip if already marked completed
+        if job_state.get("completed", False):
+            return
+
+        inner_state: dict[str, Any] = job_state.get("state") or {}
         try:
-            await job.execute()
+            inner_state = await job.execute(inner_state)
         except Exception:
             logger.exception("Scheduler: job '%s' failed", job.name)
-        self._state[job.name] = datetime.now(UTC).isoformat()
+
+        job_state["state"] = inner_state
+        job_state["run_count"] = job_state.get("run_count", 0) + 1
+        job_state["last_run"] = datetime.now(UTC).isoformat()
+
+        # Check completion after execute
+        if job.completion_check is not None and job.completion_check(inner_state):
+            job_state["completed"] = True
+            logger.info("Scheduler: job '%s' marked completed", job.name)
+
+        self._state[job.name] = job_state
         self._save_state()
+
+    def reset_job(self, name: str) -> None:
+        """Clear completion flag, reset state and run_count for a job."""
+        entry = self._state.get(name, {})
+        entry["completed"] = False
+        entry["state"] = {}
+        entry["run_count"] = 0
+        self._state[name] = entry
+        self._save_state()
+
+    def get_job_state(self, name: str) -> dict[str, Any]:
+        """Return the inner state dict for a job (for external inspection)."""
+        entry = self._state.get(name, {})
+        return dict(entry.get("state") or {})
