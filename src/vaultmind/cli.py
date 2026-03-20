@@ -653,14 +653,19 @@ def bot(ctx: click.Context) -> None:
                 )
             maturation_pipeline.mark_run()
 
-        maturation_job = ScheduledJob(
+        maturation_job = ScheduledJob.legacy(
             name="maturation_digest",
             interval=timedelta(days=7),
             execute=_maturation_digest,
         )
+        sched_state = (
+            Path(settings.scheduler.state_path)
+            if settings.scheduler.state_path
+            else Path.home() / ".vaultmind" / "data" / "scheduler_state.json"
+        )
         scheduler = SchedulerService(
             jobs=[maturation_job],
-            state_path=Path.home() / ".vaultmind" / "data" / "scheduler_state.json",
+            state_path=sched_state,
         )
 
     async def _run_bot_with_watcher() -> None:

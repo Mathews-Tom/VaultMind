@@ -288,6 +288,12 @@ class MCPConfig(BaseSettings):
     profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
+class SchedulerConfig(BaseSettings):
+    """Background scheduler configuration."""
+
+    state_path: str = ""  # Empty = default ~/.vaultmind/data/scheduler_state.json
+
+
 class Settings(BaseSettings):
     """Root configuration — aggregates all sub-configs."""
 
@@ -324,6 +330,7 @@ class Settings(BaseSettings):
     episodic: EpisodicConfig = Field(default_factory=EpisodicConfig)
     procedural: ProceduralConfig = Field(default_factory=ProceduralConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
 
     # API keys — always from env vars
     anthropic_api_key: str = ""
