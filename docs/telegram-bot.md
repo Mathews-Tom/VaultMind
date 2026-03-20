@@ -110,6 +110,27 @@ The thinking partner draws context from both ChromaDB (semantic search) and the 
 | `/stats`  | `/stats`  | Vault and graph statistics (note counts, types, entities, relationships)       |
 | `/help`   | `/help`   | Quick reference for all commands                                               |
 
+## Proactive Notifications
+
+VaultMind can send proactive messages to your Telegram chat when scheduled compound loops detect significant changes. This requires `notification_chat_id` to be set in config.
+
+### Configuration
+
+```toml
+[telegram]
+notification_chat_id = 123456789  # Your Telegram chat ID; 0 = disabled
+```
+
+### What Gets Notified
+
+| Loop       | Triggers Notification When                                                            |
+| ---------- | ------------------------------------------------------------------------------------- |
+| Insight    | New trending searches, acceptance rate shift >15%, interaction volume change >50%     |
+| Evolution  | High-severity belief drift signal, or entity appearing in 3+ consecutive weekly scans |
+| Procedural | New workflow pattern synthesized from episodic memory                                 |
+
+Notifications are gated by a significance filter — trivial results (< 20 chars) are dropped. Messages exceeding Telegram's 4096-char limit are automatically split.
+
 ## Photo Capture
 
 Send a photo and VaultMind processes it using a vision model (Anthropic or OpenAI):

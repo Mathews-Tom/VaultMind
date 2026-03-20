@@ -58,6 +58,7 @@ src/vaultmind/
 │   ├── session_store.py # SQLite-backed thinking session persistence
 │   ├── sanitize.py      # Input sanitization (length, null bytes, injection detection)
 │   ├── transcribe.py    # OpenAI Whisper API voice transcription
+│   ├── notifier.py      # Proactive Telegram notifications from scheduler
 │   ├── formatter.py     # Rich formatting utilities
 │   └── handlers/        # Decomposed handler modules
 │       ├── context.py       # HandlerContext dataclass (shared state)
@@ -88,8 +89,12 @@ src/vaultmind/
 │   ├── synthesis.py     # LLM synthesis (cluster → permanent Zettelkasten note)
 │   └── maturation.py    # Pipeline orchestrator (clustering → digest → synthesis)
 │
-├── services/        # Background job scheduling
-│   └── scheduler.py     # Asyncio-native scheduler with persistent state
+├── services/        # Background job scheduling + compound loops
+│   ├── scheduler.py     # State-aware compound loop scheduler with event triggering
+│   └── loops/           # Compound loop jobs
+│       ├── insight_loop.py     # Usage pattern shift detection
+│       ├── evolution_loop.py   # Belief drift trend accumulation
+│       └── procedural_loop.py  # Workflow synthesis from episodes
 │
 ├── research/        # External source research
 │   ├── pipeline.py      # YouTube search → transcript → LLM analysis → vault notes
@@ -106,8 +111,8 @@ src/vaultmind/
 │   ├── extractor.py     # LLM-based episode extraction from notes
 │   └── procedural.py    # Workflow synthesis from episodic patterns (experimental)
 │
-└── mcp/             # MCP server for agent integration
-    ├── server.py        # MCP server with 10 vault tools
+└── mcp/         # MCP server — 15 tools for vault CRUD, graph, memory introspection
+    ├── server.py        # MCP server with 15 vault tools
     ├── auth.py          # Profile enforcement + audit logging
     └── profiles.py      # Profile loading (researcher/planner/full)
 ```
@@ -236,6 +241,28 @@ All blocking calls (ChromaDB, embedding API, LLM) are wrapped with `asyncio.to_t
 ### Why SQLite for everything?
 
 Sessions, embedding cache, preferences, tag quarantine, BM25 FTS5 index, activation tracking, and episodic memory all use SQLite. It's embedded, requires no server, handles concurrent reads well, and the data volumes are small enough that a full database would be over-engineering.
+
+## Compound Loop Engine
+
+The scheduler (`services/scheduler.py`) supports state-aware compound loops where each run reads prior-run output as input. This enables cross-cycle pattern recognition.
+
+**Architecture:**
+
+```text
+Vault Events → Event Bus → Scheduler (threshold check) → Loop Job (state in → state out) → Notifier (Telegram)
+                                                              ↕
+                                                     JSON state file (atomic writes)
+```
+
+**Three loop jobs:**
+
+| Loop       | Input              | Detects                                               | Notifies When                                           |
+| ---------- | ------------------ | ----------------------------------------------------- | ------------------------------------------------------- |
+| Insight    | PreferenceStore    | Search trends, acceptance rate shifts, volume changes | >15% rate shift or >50% volume change                   |
+| Evolution  | EvolutionDetector  | Belief drift signals, escalating trends               | High-severity signal or 3+ consecutive scan appearances |
+| Procedural | EpisodeStore + LLM | Recurring decision patterns → workflows               | New workflow synthesized from episodes                  |
+
+**Event-driven triggering:** Vault events (NoteCreated, NoteModified) accumulate per-job. When a configurable threshold is met (default 10) and cooldown period has passed (default 1 hour), the loop fires early outside its normal schedule.
 
 ## Security Model
 

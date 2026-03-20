@@ -185,6 +185,71 @@ Rich note capture with full frontmatter control. Creates the note, writes full Y
 
 **Returns:** Status, path, and title of the created note.
 
+### `vault_stats`
+
+Vault health metrics: note counts by type and folder, knowledge graph size.
+
+**Parameters:** None
+
+**Returns:**
+
+| Field         | Type    | Description                                            |
+| ------------- | ------- | ------------------------------------------------------ |
+| `total_notes` | integer | Total markdown files in vault                          |
+| `by_type`     | object  | Note counts grouped by frontmatter `type`              |
+| `by_folder`   | object  | Note counts grouped by top-level folder                |
+| `graph`       | object  | `{entities, edges}` — knowledge graph node/edge counts |
+
+### `episode_query`
+
+Search episodic memory for past decisions and outcomes.
+
+**Parameters:**
+
+| Parameter | Type    | Required | Description                    |
+| --------- | ------- | -------- | ------------------------------ |
+| `entity`  | string  | No       | Filter episodes by entity name |
+| `status`  | string  | No       | `"pending"` or `"resolved"`    |
+| `limit`   | integer | No       | Max results (default 10)       |
+
+**Returns:** `{episodes: [...], count}` — each episode includes `episode_id`, `decision`, `context`, `outcome`, `status`, `lessons`, `entities`, `created`.
+
+### `workflow_suggest`
+
+Find a matching procedural workflow for a given context.
+
+**Parameters:**
+
+| Parameter | Type   | Required | Description                                        |
+| --------- | ------ | -------- | -------------------------------------------------- |
+| `context` | string | Yes      | Context to match against workflow trigger patterns |
+
+**Returns:** `{workflow: {workflow_id, name, description, steps, trigger_pattern, success_rate, usage_count}}` or `{workflow: null}` if no match.
+
+### `graph_evolution`
+
+Belief evolution signals: confidence drift, relationship shifts, stale claims.
+
+**Parameters:**
+
+| Parameter      | Type   | Required | Description                                      |
+| -------------- | ------ | -------- | ------------------------------------------------ |
+| `min_severity` | number | No       | Minimum severity threshold 0.0–1.0 (default 0.0) |
+
+**Returns:** `{signals: [...], count}` — each signal includes `evolution_id`, `entity_a`, `entity_b`, `signal_type`, `detail`, `severity`, `source_notes`.
+
+### `recent_activity`
+
+Recent vault activity: notes created or modified in the last N days.
+
+**Parameters:**
+
+| Parameter | Type    | Required | Description                         |
+| --------- | ------- | -------- | ----------------------------------- |
+| `days`    | integer | No       | Lookback period in days (default 7) |
+
+**Returns:** `{days, created: [...], modified: [...], created_count, modified_count}` — file paths relative to vault root.
+
 ## Profiles
 
 Profiles restrict what an agent can do. They control tool access, folder scope, and write permissions.
@@ -193,7 +258,7 @@ Profiles restrict what an agent can do. They control tool access, folder scope, 
 
 Read-only access for research and Q&A tasks.
 
-- **Tools:** `vault_search`, `vault_read`, `vault_list`, `graph_query`, `graph_path`
+- **Tools:** `vault_search`, `vault_read`, `vault_list`, `graph_query`, `graph_path`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`
 - **Folders:** All
 - **Write:** No
 
@@ -201,7 +266,7 @@ Read-only access for research and Q&A tasks.
 
 Read/write access scoped to project planning.
 
-- **Tools:** All researcher tools + `vault_write`, `capture`, `capture_note`
+- **Tools:** All researcher tools + `vault_write`, `capture`, `capture_note`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`
 - **Folders:** `02-projects`, `00-inbox`
 - **Write:** Yes (max 50KB per note)
 
