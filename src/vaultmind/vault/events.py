@@ -57,8 +57,31 @@ class NoteDeletedEvent(VaultEvent):
     """A note was deleted and its chunks removed from the index."""
 
 
+@dataclass(frozen=True, slots=True)
+class LoopCompletedEvent(VaultEvent):
+    """A scheduled loop job completed a run."""
+
+    job_name: str = ""
+    had_notification: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class InsightDetectedEvent(VaultEvent):
+    """A loop detected a significant insight worth surfacing."""
+
+    insight_type: str = ""  # "usage_shift", "belief_drift", "new_workflow"
+    summary: str = ""
+    severity: float = 0.0
+
+
 # Union of all subscribable event types
-type AnyVaultEvent = NoteCreatedEvent | NoteModifiedEvent | NoteDeletedEvent
+type AnyVaultEvent = (
+    NoteCreatedEvent
+    | NoteModifiedEvent
+    | NoteDeletedEvent
+    | LoopCompletedEvent
+    | InsightDetectedEvent
+)
 
 # Callback signature: async fn(event) -> None
 type EventCallback = Callable[[AnyVaultEvent], Coroutine[Any, Any, None]]
