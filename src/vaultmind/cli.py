@@ -746,10 +746,10 @@ def bot(ctx: click.Context) -> None:
     if scheduler is not None:
 
         async def _on_note_event_for_scheduler(event: AnyVaultEvent) -> None:
-            scheduler.record_event(type(event).__name__)  # type: ignore[union-attr]
+            scheduler.record_event(type(event).__name__)
 
-        event_bus.subscribe(NoteCreatedEvent, _on_note_event_for_scheduler)  # type: ignore[arg-type]
-        event_bus.subscribe(NoteModifiedEvent, _on_note_event_for_scheduler)  # type: ignore[arg-type]
+        event_bus.subscribe(NoteCreatedEvent, _on_note_event_for_scheduler)
+        event_bus.subscribe(NoteModifiedEvent, _on_note_event_for_scheduler)
 
     async def _run_bot_with_watcher() -> None:
         watcher.start()
