@@ -9,8 +9,8 @@ AI-powered personal knowledge management built on Obsidian.
 Turns your Obsidian vault into an intelligent second brain — hybrid search
 (vector + BM25), knowledge graph, Telegram bot with photo capture, AI thinking
 partner, Zettelkasten maturation pipeline, belief evolution tracking, episodic
-and procedural memory, and MCP integration for connecting Claude and other
-agents directly to your notes.
+and procedural memory, MCP integration for connecting Claude and other
+agents directly to your notes, and compound loop engine for proactive insights.
 
 ## Why VaultMind?
 
@@ -25,6 +25,7 @@ agents directly to your notes.
 - **Belief evolution** — tracks confidence drift, relationship shifts, and stale claims across your knowledge
 - **Episodic memory** — decision-outcome tracking with lessons learned and entity linking
 - **Procedural memory** — mines recurring decision patterns into reusable workflows (experimental)
+- **Compound loops** — scheduler accumulates state across runs, detects usage shifts, belief drift trends, and new workflow patterns; pushes insights to Telegram proactively
 - **Note modes** — learning vs. operational mode with activation-based decay scoring
 - **Secure by default** — path traversal protection, input sanitization, injection detection on all vault operations
 - **Smart caching** — SQLite-backed embedding cache eliminates redundant API calls during re-indexing
@@ -270,18 +271,23 @@ uv sync --extra mcp
 
 ### MCP Tools
 
-| Tool              | Description                                                      |
-| ----------------- | ---------------------------------------------------------------- |
-| `vault_search`    | Semantic search with optional note type filter                   |
-| `vault_read`      | Read full note by relative path                                  |
-| `vault_write`     | Create/overwrite note + auto-reindex                             |
-| `vault_list`      | List folder contents with optional tag/type filter               |
-| `graph_query`     | Entity neighbors and relationships (configurable depth)          |
-| `graph_path`      | Shortest path between two entities                               |
-| `find_duplicates` | Semantic duplicate detection (duplicate/merge bands)             |
-| `suggest_links`   | Note suggestions (similarity + shared entities + graph distance) |
-| `capture`         | Quick-capture to inbox with optional title and tags              |
-| `capture_note`    | Rich capture with note type, tags, and target folder             |
+| Tool               | Description                                                      |
+| ------------------ | ---------------------------------------------------------------- |
+| `vault_search`     | Semantic search with optional note type filter                   |
+| `vault_read`       | Read full note by relative path                                  |
+| `vault_write`      | Create/overwrite note + auto-reindex                             |
+| `vault_list`       | List folder contents with optional tag/type filter               |
+| `graph_query`      | Entity neighbors and relationships (configurable depth)          |
+| `graph_path`       | Shortest path between two entities                               |
+| `find_duplicates`  | Semantic duplicate detection (duplicate/merge bands)             |
+| `suggest_links`    | Note suggestions (similarity + shared entities + graph distance) |
+| `capture`          | Quick-capture to inbox with optional title and tags              |
+| `capture_note`     | Rich capture with note type, tags, and target folder             |
+| `vault_stats`      | Vault health metrics: note counts by type/folder, graph size     |
+| `episode_query`    | Search episodic memory for past decisions and outcomes           |
+| `workflow_suggest` | Find matching procedural workflow for a given context            |
+| `graph_evolution`  | Belief evolution signals: confidence drift, relationship shifts  |
+| `recent_activity`  | Notes created or modified in the last N days                     |
 
 ### MCP Profiles
 
@@ -289,8 +295,8 @@ Profiles control per-agent access. Activate with `--profile <name>`:
 
 | Profile                | Access                                           | Folders                   |
 | ---------------------- | ------------------------------------------------ | ------------------------- |
-| `researcher` (default) | Read-only: search, read, list, graph             | All                       |
-| `planner`              | Read/write: + capture, capture_note, vault_write | `02-projects`, `00-inbox` |
+| `researcher` (default) | Read-only: search, read, list, graph, introspection tools        | All                       |
+| `planner`              | Read/write: + capture, capture_note, vault_write, introspection  | `02-projects`, `00-inbox` |
 | `full`                 | Unrestricted (requires explicit opt-in)          | All                       |
 
 ## Vault Structure

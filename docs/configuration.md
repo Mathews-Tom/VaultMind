@@ -46,6 +46,17 @@ ChromaDB vector store settings.
 | `collection_name` | string | `vault_chunks`               | Collection name                          |
 | `distance_fn`     | string | `cosine`                     | Distance function (`cosine`, `l2`, `ip`) |
 
+## `[scheduler]`
+
+Scheduler
+
+```toml
+[scheduler]
+state_path = ""  # default: ~/.vaultmind/data/scheduler_state.json
+```
+
+Persistent state file for the compound loop scheduler. Stores last-run timestamps, run counts, job state dicts, and completion flags. Uses atomic writes (write-to-tmp, rename) to prevent corruption.
+
 ## `[graph]`
 
 Knowledge graph extraction and persistence.
@@ -95,6 +106,15 @@ Telegram bot behavior.
 
 - `VAULTMIND_TELEGRAM__BOT_TOKEN` — Bot token from @BotFather
 - `VAULTMIND_TELEGRAM__ALLOWED_USER_IDS` — Comma-separated user ID whitelist (empty = allow all)
+
+### Proactive Notifications
+
+```toml
+[telegram]
+notification_chat_id = 0  # Telegram chat ID for proactive messages; 0 = disabled
+```
+
+When set to a non-zero chat ID, scheduled loop jobs can send proactive notifications to this chat when they detect significant changes (new search trends, belief drift, workflow patterns). The chat ID is the numeric Telegram chat identifier.
 
 ## `[routing]`
 
@@ -310,6 +330,20 @@ Procedural memory — self-evolving workflow patterns mined from episodic memory
 | `db_path`                  | string | `""`    | SQLite path (empty = `~/.vaultmind/data/workflows.db`)  |
 | `min_episodes_for_pattern` | int    | `3`     | Minimum resolved episodes to form a workflow            |
 | `synthesis_model`          | string | `""`    | Model for workflow synthesis (empty = `llm.fast_model`) |
+
+## Compound Loops
+
+```toml
+[loops]
+insight_enabled = true        # Usage pattern analysis loop
+insight_interval_days = 7
+evolution_enabled = true       # Belief evolution tracking loop
+evolution_interval_days = 7
+procedural_enabled = false     # Workflow synthesis loop (requires [procedural].enabled)
+procedural_interval_days = 7
+```
+
+Per-loop enable flags and schedule intervals. The procedural loop additionally requires `[procedural].enabled = true`. All loops are state-aware — each run reads and extends its prior-run state, enabling cross-cycle pattern recognition.
 
 ## `[mcp]`
 
