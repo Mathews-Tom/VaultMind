@@ -39,6 +39,7 @@ async def handle_think(
         topic=topic,
         store=ctx.store,
         graph=ctx.graph,
+        episode_store=ctx.episode_store,
     )
 
     if last_exchanges is not None:
