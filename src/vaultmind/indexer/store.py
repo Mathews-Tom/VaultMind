@@ -189,21 +189,36 @@ class VaultStore:
         n_results: int = 5,
         where: dict[str, Any] | None = None,
         ranking_enabled: bool = True,
+        knowledge_graph: Any = None,
+        ranking_config: Any = None,
     ) -> list[dict[str, Any]]:
-        """Semantic search with note-type-aware ranking.
+        """Semantic search with composite ranking.
+
+        Args:
+            query: Natural language search query.
+            n_results: Number of results to return.
+            where: Optional ChromaDB metadata filter.
+            ranking_enabled: If False, return results with raw scores only.
+            knowledge_graph: Optional KnowledgeGraph for connection density scoring.
+            ranking_config: Optional RankingConfig with weight overrides.
 
         Returns results sorted by ranked score instead of raw distance.
         """
         from vaultmind.indexer.ranking import rank_results
 
         hits = self.search(query, n_results=n_results, where=where)
-        ranked = rank_results(hits, enabled=ranking_enabled)
+        ranked = rank_results(
+            hits,
+            enabled=ranking_enabled,
+            knowledge_graph=knowledge_graph,
+            ranking_config=ranking_config,
+        )
         return [
             {
                 "chunk_id": r.chunk_id,
                 "content": r.content,
                 "metadata": r.metadata,
-                "distance": 1.0 - r.raw_score,  # preserve original distance format
+                "distance": 1.0 - r.raw_score,
                 "raw_score": r.raw_score,
                 "final_score": r.final_score,
             }
