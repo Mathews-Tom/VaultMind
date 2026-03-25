@@ -220,6 +220,46 @@ class EpisodeStore:
         ).fetchall()
         return [_row_to_episode(r) for r in rows]
 
+    def archive_old_resolved(self, age_days: int = 365) -> int:
+        """Archive resolved episodes older than age_days.
+
+        Sets outcome_status to 'archived' for old resolved (non-pending) episodes.
+        Returns the number of episodes archived.
+        """
+        from datetime import timedelta
+
+        cutoff = (datetime.now() - timedelta(days=age_days)).isoformat()
+        cursor = self._conn.execute(
+            """
+            UPDATE episodes
+            SET outcome_status = 'archived'
+            WHERE outcome_status NOT IN ('pending', 'archived') AND created < ?
+            """,
+            (cutoff,),
+        )
+        self._conn.commit()
+        archived = cursor.rowcount
+        if archived > 0:
+            logger.info("Archived %d old resolved episodes", archived)
+        return archived
+
+    def query_archived(self, limit: int = 100) -> list[Episode]:
+        """Return archived episodes ordered by created desc."""
+        rows = self._conn.execute(
+            "SELECT * FROM episodes WHERE outcome_status = 'archived'"
+            " ORDER BY created DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_episode(r) for r in rows]
+
+    def count_entity_references(self, entity: str) -> int:
+        """Count how many episodes reference a given entity."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM episodes WHERE lower(entities) LIKE ?",
+            (f'%"{entity.lower()}"%',),
+        ).fetchone()
+        return row[0] if row else 0
+
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()

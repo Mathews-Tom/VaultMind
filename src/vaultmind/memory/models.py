@@ -13,6 +13,7 @@ class OutcomeStatus(StrEnum):
     FAILURE = "failure"
     PARTIAL = "partial"
     UNKNOWN = "unknown"
+    ARCHIVED = "archived"
 
 
 class MemoryHorizon(StrEnum):
