@@ -210,6 +210,12 @@ enabled = false
 host = "127.0.0.1"
 port = 8765
 
+[mcp.audit]
+enabled = true
+level = "standard"
+log_search_queries = false
+retention_days = 90
+
 # MCP Profile definitions — customize per-agent access
 # Activate with: vaultmind mcp-serve --profile <name>
 # Default (no flag): researcher (read-only)
