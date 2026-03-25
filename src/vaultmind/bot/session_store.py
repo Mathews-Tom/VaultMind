@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,6 +27,23 @@ class SessionStore:
                 created_at REAL NOT NULL,
                 last_active REAL NOT NULL,
                 PRIMARY KEY (user_id, session_name)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS thinking_session_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                session_name TEXT NOT NULL,
+                batch_number INTEGER NOT NULL,
+                start_turn_index INTEGER NOT NULL,
+                end_turn_index INTEGER NOT NULL,
+                summary_text TEXT NOT NULL,
+                key_topics TEXT NOT NULL,
+                open_questions TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                UNIQUE (user_id, session_name, batch_number)
             )
             """
         )
@@ -66,6 +83,10 @@ class SessionStore:
             "DELETE FROM thinking_sessions WHERE user_id = ? AND session_name = ?",
             (user_id, session_name),
         )
+        self._conn.execute(
+            "DELETE FROM thinking_session_summaries WHERE user_id = ? AND session_name = ?",
+            (user_id, session_name),
+        )
         self._conn.commit()
 
     def cleanup_expired(self, ttl: int) -> int:
@@ -83,6 +104,97 @@ class SessionStore:
             (user_id, session_name),
         ).fetchone()
         return row is not None
+
+    def get_summaries(self, user_id: int, session_name: str = "default") -> list[dict[str, Any]]:
+        """Retrieve all summaries for a session, ordered by batch_number ascending."""
+        rows = self._conn.execute(
+            """
+            SELECT batch_number, start_turn_index, end_turn_index,
+                   summary_text, key_topics, open_questions
+            FROM thinking_session_summaries
+            WHERE user_id = ? AND session_name = ?
+            ORDER BY batch_number ASC
+            """,
+            (user_id, session_name),
+        ).fetchall()
+        return [
+            {
+                "batch_number": r[0],
+                "start_turn": r[1],
+                "end_turn": r[2],
+                "summary": r[3],
+                "topics": json.loads(r[4]),
+                "questions": json.loads(r[5]),
+            }
+            for r in rows
+        ]
+
+    def save_summary(
+        self,
+        user_id: int,
+        session_name: str,
+        batch_number: int,
+        start_turn_index: int,
+        end_turn_index: int,
+        summary_text: str,
+        key_topics: list[str],
+        open_questions: list[str],
+    ) -> None:
+        """Save a batch summary. Uses INSERT OR REPLACE for idempotency."""
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO thinking_session_summaries
+            (user_id, session_name, batch_number, start_turn_index, end_turn_index,
+             summary_text, key_topics, open_questions, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                session_name,
+                batch_number,
+                start_turn_index,
+                end_turn_index,
+                summary_text,
+                json.dumps(key_topics),
+                json.dumps(open_questions),
+                time.time(),
+            ),
+        )
+        self._conn.commit()
+
+    def count_turns(self, user_id: int, session_name: str = "default") -> int:
+        """Count total turns in the session history. Returns 0 if no session."""
+        history = self.load(user_id, session_name)
+        if history is None:
+            return 0
+        return len(history)
+
+    def get_unsummarized_batch(
+        self,
+        user_id: int,
+        session_name: str,
+        recent_turns_to_keep: int,
+        batch_size: int,
+    ) -> tuple[list[dict[str, str]], int, int] | None:
+        """Get the oldest batch of turns eligible for summarization.
+
+        Returns (turns_to_summarize, start_turn_idx, end_turn_idx) or None if
+        no summarization is needed.
+        """
+        history = self.load(user_id, session_name)
+        if history is None or len(history) <= recent_turns_to_keep:
+            return None
+
+        summaries = self.get_summaries(user_id, session_name)
+        next_start = summaries[-1]["end_turn"] + 1 if summaries else 0
+
+        next_end = next_start + batch_size - 1
+
+        # Don't eat into the recent turns we want to keep in full
+        if next_end >= len(history) - recent_turns_to_keep:
+            return None
+
+        return history[next_start : next_end + 1], next_start, next_end
 
     def close(self) -> None:
         self._conn.close()

@@ -66,6 +66,7 @@ class ThinkingPartner:
         graph_context_builder: GraphContextBuilder | None = None,
     ) -> None:
         self.llm_config = llm_config
+        self._telegram_config = telegram_config
         self.session_ttl = telegram_config.thinking_session_ttl
         self._client = llm_client
         self._store = session_store
@@ -119,8 +120,8 @@ class ThinkingPartner:
         if graph_context_str:
             full_context = f"{vault_context}\n\n{graph_context_str}"
 
-        # Build messages
-        messages = self._build_messages(session, topic, full_context, mode)
+        # Build messages (includes summaries of older turns if available)
+        messages = self._build_messages(session, topic, full_context, mode, user_id)
 
         try:
             response = await asyncio.to_thread(
@@ -138,6 +139,10 @@ class ThinkingPartner:
 
             if self._store is not None:
                 self._store.save(user_id, session.history)
+
+                # Trigger async summarization if enabled
+                if self._telegram_config.thinking_summarization_enabled:
+                    asyncio.ensure_future(self._summarize_if_needed(user_id))
 
             return reply
 
@@ -202,12 +207,28 @@ class ThinkingPartner:
         topic: str,
         vault_context: str,
         mode: str,
+        user_id: int = 0,
     ) -> list[Message]:
-        """Build the message history."""
+        """Build the message history with optional summaries of older turns."""
         messages: list[Message] = []
 
-        # Include session history (previous turns)
-        for turn in session.history[-6:]:  # Last 6 turns to stay within context
+        # Include summaries of older turns (if available)
+        if self._store is not None and user_id:
+            summaries = self._store.get_summaries(user_id)
+            for summary in summaries:
+                summary_msg = (
+                    f"[Summary of earlier conversation — "
+                    f"turns {summary['start_turn']}-{summary['end_turn']}]\n"
+                    f"{summary['summary']}\n"
+                    f"Key topics: {', '.join(summary['topics'])}"
+                )
+                if summary["questions"]:
+                    summary_msg += f"\nOpen questions: {', '.join(summary['questions'])}"
+                messages.append(Message(role="assistant", content=summary_msg))
+
+        # Include recent turns in full
+        recent_n = self._telegram_config.thinking_recent_turns_to_keep
+        for turn in session.history[-recent_n:]:
             messages.append(Message(role="user", content=turn["user"]))
             messages.append(Message(role="assistant", content=turn["assistant"]))
 
@@ -221,6 +242,105 @@ class ThinkingPartner:
         messages.append(Message(role="user", content=user_message))
 
         return messages
+
+    async def _summarize_if_needed(self, user_id: int, session_name: str = "default") -> None:
+        """Check if summarization is needed and run it asynchronously."""
+        if self._store is None:
+            return
+
+        turn_count = self._store.count_turns(user_id, session_name)
+        threshold = self._telegram_config.thinking_message_count_threshold // 2
+        if turn_count < threshold:
+            return
+
+        batch = self._store.get_unsummarized_batch(
+            user_id,
+            session_name,
+            self._telegram_config.thinking_recent_turns_to_keep,
+            self._telegram_config.thinking_batch_size,
+        )
+        if batch is None:
+            return
+
+        turns, start_idx, end_idx = batch
+        try:
+            summary_data = await asyncio.to_thread(self._generate_summary, turns)
+
+            existing = self._store.get_summaries(user_id, session_name)
+            next_batch = len(existing)
+
+            self._store.save_summary(
+                user_id=user_id,
+                session_name=session_name,
+                batch_number=next_batch,
+                start_turn_index=start_idx,
+                end_turn_index=end_idx,
+                summary_text=str(summary_data["summary"]),
+                key_topics=list(summary_data["topics"]),
+                open_questions=list(summary_data["questions"]),
+            )
+            logger.info(
+                "Summarized turns %d-%d for user %d session %s",
+                start_idx,
+                end_idx,
+                user_id,
+                session_name,
+            )
+        except Exception:
+            logger.warning("Session summarization failed", exc_info=True)
+
+    def _generate_summary(self, turns: list[dict[str, str]]) -> dict[str, list[str] | str]:
+        """Generate an LLM summary of a batch of conversation turns."""
+        conversation_text = "\n".join(
+            f"User: {turn['user']}\nAssistant: {turn['assistant']}" for turn in turns
+        )
+
+        prompt = (
+            "Summarize this thinking partner conversation excerpt. "
+            "Extract the essential insights and open threads.\n\n"
+            f"Conversation:\n{conversation_text}\n\n"
+            "Format your response exactly as:\n"
+            "SUMMARY: [2-3 sentence summary]\n"
+            "TOPICS: [comma-separated list of main topics]\n"
+            'QUESTIONS: [comma-separated list of open questions, or "none"]'
+        )
+
+        response = self._client.complete(
+            messages=[Message(role="user", content=prompt)],
+            model=self.llm_config.fast_model,
+            max_tokens=self._telegram_config.thinking_summary_max_tokens,
+            system=(
+                "You are a conversation summarizer. "
+                "Be concise and extract only essential information."
+            ),
+        )
+
+        return self._parse_summary_response(response.text)
+
+    @staticmethod
+    def _parse_summary_response(text: str) -> dict[str, list[str] | str]:
+        """Parse structured summary from LLM response."""
+        summary = ""
+        topics: list[str] = []
+        questions: list[str] = []
+
+        for line in text.strip().splitlines():
+            line = line.strip()
+            if line.upper().startswith("SUMMARY:"):
+                summary = line[len("SUMMARY:") :].strip()
+            elif line.upper().startswith("TOPICS:"):
+                raw = line[len("TOPICS:") :].strip()
+                topics = [t.strip() for t in raw.split(",") if t.strip()]
+            elif line.upper().startswith("QUESTIONS:"):
+                raw = line[len("QUESTIONS:") :].strip()
+                if raw.lower() != "none":
+                    questions = [q.strip() for q in raw.split(",") if q.strip()]
+
+        return {
+            "summary": summary or "No summary generated.",
+            "topics": topics,
+            "questions": questions,
+        }
 
     def _get_session(self, user_id: int) -> _ThinkingSession:
         """Get or create a thinking session for a user."""
