@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING, Any
 
 import chromadb
@@ -191,6 +192,7 @@ class VaultStore:
         ranking_enabled: bool = True,
         knowledge_graph: Any = None,
         ranking_config: Any = None,
+        reranker: Any = None,
     ) -> list[dict[str, Any]]:
         """Semantic search with composite ranking.
 
@@ -201,12 +203,29 @@ class VaultStore:
             ranking_enabled: If False, return results with raw scores only.
             knowledge_graph: Optional KnowledgeGraph for connection density scoring.
             ranking_config: Optional RankingConfig with weight overrides.
+            reranker: Optional CrossEncoderReranker for two-stage refinement.
 
         Returns results sorted by ranked score instead of raw distance.
         """
         from vaultmind.indexer.ranking import rank_results
 
-        hits = self.search(query, n_results=n_results, where=where)
+        fetch_n = n_results * 4 if reranker is not None else n_results
+        hits = self.search(query, n_results=fetch_n, where=where)
+
+        if reranker is not None:
+            from vaultmind.indexer.reranker import CrossEncoderReranker
+
+            assert isinstance(reranker, CrossEncoderReranker)
+            reranked = reranker.rerank(query, hits, content_key="content", top_k=n_results * 2)
+            hits = []
+            for doc, ce_score in reranked:
+                doc = dict(doc)  # copy to avoid mutation
+                doc["reranker_score"] = ce_score
+                # Normalize CE score to [0, 1] via sigmoid
+                normalized = 1.0 / (1.0 + math.exp(-ce_score))
+                doc["distance"] = 1.0 - normalized  # lower distance = better
+                hits.append(doc)
+
         ranked = rank_results(
             hits,
             enabled=ranking_enabled,
@@ -221,6 +240,7 @@ class VaultStore:
                 "distance": 1.0 - r.raw_score,
                 "raw_score": r.raw_score,
                 "final_score": r.final_score,
+                "reranker_score": r.reranker_score,
             }
             for r in ranked
         ]

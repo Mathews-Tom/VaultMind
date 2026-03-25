@@ -58,6 +58,7 @@ class RankedResult:
     connection_density_score: float = 0.0
     activation_score_value: float = 0.0
     note_type_score: float = 0.0
+    reranker_score: float = 0.0
 
 
 def compute_semantic_score(raw_score: float) -> float:
@@ -277,6 +278,7 @@ def rank_results(
                 connection_density_score=connection_density,
                 activation_score_value=activation,
                 note_type_score=nt,
+                reranker_score=float(hit.get("reranker_score", 0.0)),
             )
         )
 
