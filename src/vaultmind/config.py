@@ -105,6 +105,11 @@ class TelegramConfig(BaseSettings):
     )
     thinking_session_ttl: int = 3600  # seconds
     notification_chat_id: int = 0  # chat ID for proactive notifications; 0 = disabled
+    thinking_summarization_enabled: bool = True
+    thinking_message_count_threshold: int = 20
+    thinking_recent_turns_to_keep: int = 6
+    thinking_batch_size: int = 4
+    thinking_summary_max_tokens: int = 400
 
 
 class RoutingConfig(BaseSettings):
