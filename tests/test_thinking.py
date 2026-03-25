@@ -22,6 +22,8 @@ class _FakeLLMConfig:
     fast_model: str = "test-model"
     max_context_notes: int = 3
     max_tokens: int = 100
+    single_pass_extraction_enabled: bool = False
+    extraction_confidence_threshold: float = 0.7
 
 
 @dataclass
