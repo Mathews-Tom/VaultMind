@@ -309,6 +309,19 @@ class ProceduralConfig(BaseSettings):
     synthesis_model: str = ""  # Empty = use llm.fast_model
 
 
+class MCPRetryConfig(BaseSettings):
+    """MCP tool execution retry configuration."""
+
+    enabled: bool = True
+    max_retries: int = 1
+    use_llm_correction: bool = True
+    correction_model: str = ""  # Empty = use llm.fast_model
+    timeout_seconds: int = 30
+    retryable_errors: list[str] = Field(
+        default_factory=lambda: ["ValueError", "LLMError", "TimeoutError", "ConnectionError"]
+    )
+
+
 class MCPConfig(BaseSettings):
     """MCP server configuration."""
 
@@ -371,6 +384,7 @@ class Settings(BaseSettings):
     episodic: EpisodicConfig = Field(default_factory=EpisodicConfig)
     procedural: ProceduralConfig = Field(default_factory=ProceduralConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+    mcp_retry: MCPRetryConfig = Field(default_factory=MCPRetryConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
 

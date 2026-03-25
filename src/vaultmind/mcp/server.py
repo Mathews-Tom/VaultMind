@@ -42,6 +42,7 @@ def create_mcp_server(
     procedural_memory: object | None = None,
     evolution_detector: object | None = None,
     preference_store: object | None = None,
+    retry_executor: object | None = None,
 ) -> Any:  # Returns mcp.server.Server (optional dep)
     """Create and configure the MCP server with vault tools.
 
@@ -381,20 +382,26 @@ def create_mcp_server(
                 if name == "vault_write" and "content" in arguments:
                     enforcer.check_size(arguments["content"])
 
-            result = _dispatch_tool(
-                name,
-                arguments,
-                vault_path,
-                store,
-                graph,
-                parser,
-                duplicate_detector=duplicate_detector,
-                note_suggester=note_suggester,
-                episode_store=episode_store,
-                procedural_memory=procedural_memory,
-                evolution_detector=evolution_detector,
-                preference_store=preference_store,
-            )
+            dispatch_kwargs: dict[str, Any] = {
+                "vault_path": vault_path,
+                "store": store,
+                "graph": graph,
+                "parser": parser,
+                "duplicate_detector": duplicate_detector,
+                "note_suggester": note_suggester,
+                "episode_store": episode_store,
+                "procedural_memory": procedural_memory,
+                "evolution_detector": evolution_detector,
+                "preference_store": preference_store,
+            }
+
+            if retry_executor is not None:
+                from vaultmind.mcp.retry import ToolRetryExecutor
+
+                assert isinstance(retry_executor, ToolRetryExecutor)
+                result = retry_executor.execute(name, arguments, _dispatch_tool, dispatch_kwargs)
+            else:
+                result = _dispatch_tool(name, arguments, **dispatch_kwargs)
             text = json.dumps(result, indent=2, default=str)
 
             # Audit log success
