@@ -101,6 +101,14 @@ class VaultParser:
         if not body.strip():
             return []
 
+        from vaultmind.indexer.importance import compute_importance
+
+        note_importance = compute_importance(
+            content=note.content,
+            tags=note.tags,
+            entities=note.entities,
+        )
+
         sections = self._split_by_headings(body)
         chunks: list[NoteChunk] = []
 
@@ -130,6 +138,7 @@ class VaultParser:
                         modified=note.modified.isoformat(),
                         status=note.status,
                         mode=note.mode.value,
+                        importance_score=note_importance,
                     )
                 )
             else:

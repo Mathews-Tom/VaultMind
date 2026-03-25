@@ -59,6 +59,7 @@ class RankedResult:
     activation_score_value: float = 0.0
     note_type_score: float = 0.0
     reranker_score: float = 0.0
+    importance_score: float = 0.0
 
 
 def compute_semantic_score(raw_score: float) -> float:
@@ -235,6 +236,7 @@ def rank_results(
         status = meta.get("status", "")
         mode = meta.get("mode", "")
         activation = float(hit.get("activation_score", 0.0))
+        importance = float(meta.get("importance_score", 0.0))
 
         sem = compute_semantic_score(raw)
         rec = compute_recency_score(created_at, half_life)
@@ -265,6 +267,10 @@ def rank_results(
             config=ranking_config,
         )
 
+        # Importance boost: up to 15% additional for high-importance notes
+        if importance > 0:
+            final *= 1.0 + 0.15 * importance
+
         ranked.append(
             RankedResult(
                 chunk_id=hit.get("chunk_id", ""),
@@ -279,6 +285,7 @@ def rank_results(
                 activation_score_value=activation,
                 note_type_score=nt,
                 reranker_score=float(hit.get("reranker_score", 0.0)),
+                importance_score=importance,
             )
         )
 

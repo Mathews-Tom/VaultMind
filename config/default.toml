@@ -101,6 +101,7 @@ recency_half_life_days = 30.0
 reranker_enabled = false
 reranker_model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 reranker_top_k = 20
+importance_scoring_enabled = true
 
 [maturation]
 enabled = true
