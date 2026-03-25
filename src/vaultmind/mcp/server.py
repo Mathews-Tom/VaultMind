@@ -367,6 +367,9 @@ def create_mcp_server(
 
     @server.call_tool()  # type: ignore[misc,untyped-decorator,unused-ignore]
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        import time as _time
+
+        _start = _time.perf_counter()
         try:
             # Profile enforcement
             if enforcer is not None:
@@ -403,22 +406,51 @@ def create_mcp_server(
             else:
                 result = _dispatch_tool(name, arguments, **dispatch_kwargs)
             text = json.dumps(result, indent=2, default=str)
+            _duration_ms = int((_time.perf_counter() - _start) * 1000)
+
+            # Build change detail for audit
+            change_detail = _build_change_detail(name, arguments, result)
+            output_summary = _build_output_summary(name, result)
 
             # Audit log success
             if audit_logger is not None and enforcer is not None:
-                audit_logger.log(enforcer.policy.name, name, arguments, "OK")
+                audit_logger.log(
+                    enforcer.policy.name,
+                    name,
+                    arguments,
+                    "OK",
+                    duration_ms=_duration_ms,
+                    change_detail=change_detail,
+                    output_summary=output_summary,
+                )
 
             return [TextContent(type="text", text=text)]
         except ProfileError as e:
+            _duration_ms = int((_time.perf_counter() - _start) * 1000)
             # Audit log denial
             if audit_logger is not None and enforcer is not None:
-                audit_logger.log(enforcer.policy.name, name, arguments, "DENIED", reason=str(e))
+                audit_logger.log(
+                    enforcer.policy.name,
+                    name,
+                    arguments,
+                    "DENIED",
+                    reason=str(e),
+                    duration_ms=_duration_ms,
+                )
             err = json.dumps({"error": str(e)})
             return [TextContent(type="text", text=err)]
         except Exception as e:
+            _duration_ms = int((_time.perf_counter() - _start) * 1000)
             logger.exception("Tool %s failed", name)
             if audit_logger is not None and enforcer is not None:
-                audit_logger.log(enforcer.policy.name, name, arguments, "ERROR", reason=str(e))
+                audit_logger.log(
+                    enforcer.policy.name,
+                    name,
+                    arguments,
+                    "ERROR",
+                    reason=str(e),
+                    duration_ms=_duration_ms,
+                )
             err = json.dumps({"error": str(e)})
             return [TextContent(type="text", text=err)]
 
@@ -781,3 +813,65 @@ def _dispatch_tool(
 
     else:
         return {"error": f"Unknown tool: {name}"}
+
+
+def _build_change_detail(
+    name: str, args: dict[str, Any], result: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Build tool-specific change detail for audit logging."""
+    if name == "vault_write":
+        return {
+            "type": "vault_write",
+            "note_path": args.get("path", ""),
+            "size_bytes": len(args.get("content", "").encode()),
+            "was_new": result.get("status") == "ok",
+        }
+    if name in ("capture", "capture_note"):
+        return {
+            "type": name,
+            "note_path": result.get("path", ""),
+            "title": result.get("title", ""),
+        }
+    if name == "vault_search":
+        return {
+            "type": "vault_search",
+            "result_count": result.get("count", 0),
+        }
+    if name == "vault_read":
+        return {
+            "type": "vault_read",
+            "note_path": args.get("path", ""),
+        }
+    if name in ("graph_query", "graph_path"):
+        return {
+            "type": name,
+            "entity": args.get("entity", args.get("source", "")),
+        }
+    if name == "find_duplicates":
+        return {
+            "type": "find_duplicates",
+            "note_path": args.get("note_path", ""),
+            "matches_found": result.get("count", 0),
+        }
+    if name == "suggest_links":
+        return {
+            "type": "suggest_links",
+            "note_path": args.get("note_path", ""),
+            "suggestions_count": result.get("count", 0),
+        }
+    return None
+
+
+def _build_output_summary(name: str, result: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a compact output summary for audit logging."""
+    if name == "vault_search":
+        return {"count": result.get("count", 0)}
+    if name in ("vault_write", "capture", "capture_note"):
+        return {"status": result.get("status", ""), "path": result.get("path", "")}
+    if name == "vault_stats":
+        return {"total_notes": result.get("total_notes", 0)}
+    if name in ("find_duplicates", "suggest_links"):
+        return {"count": result.get("count", 0)}
+    if name in ("episode_query", "graph_evolution", "recent_activity"):
+        return {"count": result.get("count", 0)}
+    return None
