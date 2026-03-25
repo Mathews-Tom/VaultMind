@@ -157,6 +157,9 @@ class SearchConfig(BaseSettings):
     session_ttl: int = 300
     hybrid_enabled: bool = True
     bm25_db_path: str = ""  # Empty = default ~/.vaultmind/data/bm25.db
+    cache_enabled: bool = True
+    cache_max_entries: int = 50
+    cache_similarity_threshold: float = 0.85
 
 
 class RankingConfig(BaseSettings):
