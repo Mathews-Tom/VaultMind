@@ -171,6 +171,9 @@ class RankingConfig(BaseSettings):
     connection_max_hops: int = 2
     entity_confidence_threshold: float = 0.6
     recency_half_life_days: float = 30.0
+    reranker_enabled: bool = False
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranker_top_k: int = 20
 
     @model_validator(mode="after")
     def _check_weights_sum(self) -> RankingConfig:

@@ -98,6 +98,9 @@ note_type_weight = 0.10
 connection_max_hops = 2
 entity_confidence_threshold = 0.6
 recency_half_life_days = 30.0
+reranker_enabled = false
+reranker_model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+reranker_top_k = 20
 
 [maturation]
 enabled = true

@@ -41,6 +41,7 @@ dependencies = [
 [project.optional-dependencies]
 mcp = ["mcp>=1.0,<2"]
 whisper = ["openai-whisper>=20231117"]
+reranker = ["sentence-transformers>=3.0,<4"]
 dev = [
     "pytest>=8.0,<9",
     "pytest-asyncio>=0.23,<1",
