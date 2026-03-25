@@ -92,6 +92,7 @@ class NoteChunk(BaseModel):
     modified: str = ""
     status: str = ""
     mode: str = ""
+    importance_score: float = 0.0
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -99,7 +100,7 @@ class NoteChunk(BaseModel):
         """Unique identifier for this chunk."""
         return f"{self.note_path}::{self.chunk_idx}"
 
-    def to_chroma_metadata(self) -> dict[str, str | int]:
+    def to_chroma_metadata(self) -> dict[str, str | int | float]:
         """Convert to ChromaDB-compatible metadata dict."""
         return {
             "note_path": self.note_path,
@@ -112,5 +113,6 @@ class NoteChunk(BaseModel):
             "modified": self.modified,
             "status": self.status,
             "mode": self.mode,
+            "importance_score": self.importance_score,
             "chunk_idx": self.chunk_idx,
         }

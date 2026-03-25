@@ -174,6 +174,7 @@ class RankingConfig(BaseSettings):
     reranker_enabled: bool = False
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     reranker_top_k: int = 20
+    importance_scoring_enabled: bool = True
 
     @model_validator(mode="after")
     def _check_weights_sum(self) -> RankingConfig:
