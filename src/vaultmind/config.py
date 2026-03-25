@@ -322,6 +322,15 @@ class MCPRetryConfig(BaseSettings):
     )
 
 
+class MCPAuditConfig(BaseSettings):
+    """MCP audit logging configuration."""
+
+    enabled: bool = True
+    level: str = "standard"  # minimal / standard / verbose
+    log_search_queries: bool = False
+    retention_days: int = 90
+
+
 class MCPConfig(BaseSettings):
     """MCP server configuration."""
 
@@ -329,6 +338,7 @@ class MCPConfig(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8765
     profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    audit: MCPAuditConfig = Field(default_factory=MCPAuditConfig)
 
 
 class LoopsConfig(BaseSettings):
