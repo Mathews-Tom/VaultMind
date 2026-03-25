@@ -345,6 +345,21 @@ class LoopsConfig(BaseSettings):
     procedural_schedule: str = ""
 
 
+class HealthConfig(BaseSettings):
+    """System health monitoring configuration."""
+
+    enabled: bool = True
+    check_interval_seconds: int = 60
+    check_chromadb: bool = True
+    check_sqlite: bool = True
+    check_graph_file: bool = True
+    check_llm: bool = True
+    check_bot: bool = True
+    check_vault_access: bool = True
+    chromadb_latency_warn_ms: int = 1000
+    retention_days: int = 30
+
+
 class SchedulerConfig(BaseSettings):
     """Background scheduler configuration."""
 
@@ -390,6 +405,7 @@ class Settings(BaseSettings):
     mcp_retry: MCPRetryConfig = Field(default_factory=MCPRetryConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     loops: LoopsConfig = Field(default_factory=LoopsConfig)
+    health: HealthConfig = Field(default_factory=HealthConfig)
 
     # API keys — always from env vars
     anthropic_api_key: str = ""
