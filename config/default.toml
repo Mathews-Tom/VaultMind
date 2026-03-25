@@ -185,6 +185,14 @@ db_path = ""                                # Empty = default ~/.vaultmind/data/
 min_episodes_for_pattern = 3
 synthesis_model = ""                        # Empty = use llm.fast_model
 
+[mcp_retry]
+enabled = true
+max_retries = 1
+use_llm_correction = true
+correction_model = ""
+timeout_seconds = 30
+retryable_errors = ["ValueError", "LLMError", "TimeoutError", "ConnectionError"]
+
 [mcp]
 enabled = false
 host = "127.0.0.1"
