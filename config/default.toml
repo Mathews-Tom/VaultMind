@@ -41,6 +41,8 @@ graph_context_enabled = true
 graph_hop_depth = 2
 graph_min_confidence = 0.6
 graph_max_relationships = 20
+single_pass_extraction_enabled = true
+extraction_confidence_threshold = 0.7
 
 # Provider-specific model examples:
 #   anthropic:  claude-sonnet-4-20250514, claude-opus-4-20250514

@@ -26,6 +26,8 @@ class _FakeLLMConfig:
     graph_hop_depth: int = 2
     graph_min_confidence: float = 0.6
     graph_max_relationships: int = 20
+    single_pass_extraction_enabled: bool = False
+    extraction_confidence_threshold: float = 0.7
 
 
 @dataclass

@@ -38,6 +38,30 @@ When referencing their notes, use [[Note Title]] format.
 When the Knowledge Graph Context section is present, use those entity relationships
 to inform your analysis — they represent explicit connections the user has established.
 Be direct, substantive, and avoid generic advice. You know this person's work — act like it.
+
+---
+
+**OPTIONAL: Structured Extraction (for system processing only)**
+
+If your response mentions specific entities (people, projects, tools, concepts, organizations),
+you may optionally tag them using XML to help improve the knowledge graph. These tags are
+automatically parsed and removed before the response is shown to the user.
+
+Tagging guidelines:
+- Only tag entities you are confident about (confidence >= 0.75)
+- Entity types: person, project, concept, tool, organization, event, location
+- Relationship types: related_to, part_of, depends_on, created_by, \
+influences, mentioned_in, competes_with, preceded_by
+
+Tag formats:
+- <vm:entity name="..." type="..." confidence="0.X">brief description</vm:entity>
+- <vm:relationship from="entity1" to="entity2" type="..." confidence="0.X" />
+- <vm:episode decision="..." context="..." \
+status="pending|success|failure"><lesson>...</lesson>\
+<entity>...</entity></vm:episode>
+
+Do NOT overuse tags. Focus on the most significant entities and relationships.
+Incorrect or missing tags have no penalty — the user will never see them.
 """
 
 THINKING_MODES = {
@@ -132,9 +156,12 @@ class ThinkingPartner:
                 system=THINKING_SYSTEM_PROMPT,
             )
 
-            reply = response.text
+            raw_reply = response.text
 
-            # Update session history
+            # Extract entities/relationships and strip tags from response
+            reply = await self._apply_extraction(raw_reply, graph)
+
+            # Update session history (with clean response, tags stripped)
             session.add_turn(topic, reply)
 
             if self._store is not None:
@@ -200,6 +227,69 @@ class ThinkingPartner:
                 parts.append(f"  Connections: {', '.join(rels)}")
 
         return "\n".join(parts) if parts else "No specific vault context found for this topic."
+
+    async def _apply_extraction(
+        self,
+        raw_response: str,
+        graph: KnowledgeGraph,
+    ) -> str:
+        """Parse extraction tags from response, apply graph updates, return clean text."""
+        if not self.llm_config.single_pass_extraction_enabled:
+            return raw_response
+
+        from vaultmind.bot.extraction_parser import parse_extraction_tags
+
+        result = await asyncio.to_thread(parse_extraction_tags, raw_response)
+
+        threshold = self.llm_config.extraction_confidence_threshold
+
+        # Apply entity updates
+        for entity in result.entities:
+            if entity.confidence < threshold:
+                continue
+            try:
+                graph.add_entity(
+                    name=entity.name,
+                    entity_type=entity.type,
+                    confidence=entity.confidence,
+                )
+            except Exception:
+                logger.debug("Failed to add extracted entity: %s", entity.name, exc_info=True)
+
+        # Apply relationship updates
+        for rel in result.relationships:
+            if rel.confidence < threshold:
+                continue
+            try:
+                graph.add_relationship(
+                    source=rel.source,
+                    target=rel.target,
+                    relation=rel.relation_type,
+                    confidence=rel.confidence,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to add extracted relationship: %s -> %s",
+                    rel.source,
+                    rel.target,
+                    exc_info=True,
+                )
+
+        # Persist graph if anything was extracted
+        if result.entities or result.relationships:
+            try:
+                await asyncio.to_thread(graph.save)
+            except Exception:
+                logger.warning("Failed to save graph after extraction", exc_info=True)
+
+        if result.entities or result.relationships:
+            logger.info(
+                "Extracted %d entities, %d relationships from thinking response",
+                len(result.entities),
+                len(result.relationships),
+            )
+
+        return result.clean_response
 
     def _build_messages(
         self,
