@@ -93,6 +93,8 @@ class LLMConfig(BaseSettings):
     graph_hop_depth: int = 2
     graph_min_confidence: float = 0.6
     graph_max_relationships: int = 20
+    single_pass_extraction_enabled: bool = True
+    extraction_confidence_threshold: float = 0.7
 
 
 class TelegramConfig(BaseSettings):
