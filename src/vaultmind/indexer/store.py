@@ -31,10 +31,12 @@ class VaultStore:
         chroma_config: ChromaConfig,
         embedder: Embedder,
         bm25: BM25Index | None = None,
+        search_cache: Any = None,
     ) -> None:
         self.config = chroma_config
         self.embedder = embedder
         self._bm25 = bm25
+        self._search_cache = search_cache
 
         self._client = chromadb.PersistentClient(
             path=str(chroma_config.persist_dir),
@@ -156,6 +158,12 @@ class VaultStore:
         """
         query_embedding = self.embedder.embed_query(query)
 
+        # Check search cache (only for unfiltered queries)
+        if self._search_cache is not None and where is None:
+            cached = self._search_cache.get(query, query_embedding, n_results)
+            if cached is not None:
+                return list(cached)
+
         kwargs: dict[str, Any] = {
             "query_embeddings": [query_embedding],
             "n_results": n_results,
@@ -181,6 +189,10 @@ class VaultStore:
                         "distance": dists[0][i] if dists else 0.0,
                     }
                 )
+
+        # Store in cache (only unfiltered queries)
+        if self._search_cache is not None and where is None:
+            self._search_cache.put(query, query_embedding, hits, n_results)
 
         return hits
 

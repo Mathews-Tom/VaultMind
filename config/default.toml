@@ -87,6 +87,9 @@ max_results = 25
 session_ttl = 300                        # seconds before paginated session expires
 hybrid_enabled = true
 bm25_db_path = ""                        # Empty = default ~/.vaultmind/data/bm25.db
+cache_enabled = true
+cache_max_entries = 50
+cache_similarity_threshold = 0.85
 
 [ranking]
 enabled = true
