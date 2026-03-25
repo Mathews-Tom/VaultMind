@@ -83,6 +83,14 @@ bm25_db_path = ""                        # Empty = default ~/.vaultmind/data/bm2
 
 [ranking]
 enabled = true
+semantic_weight = 0.40
+recency_weight = 0.20
+connection_density_weight = 0.25
+activation_weight = 0.05
+note_type_weight = 0.10
+connection_max_hops = 2
+entity_confidence_threshold = 0.6
+recency_half_life_days = 30.0
 
 [maturation]
 enabled = true

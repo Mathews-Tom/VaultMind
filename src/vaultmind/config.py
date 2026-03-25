@@ -15,7 +15,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 VAULTMIND_HOME = Path.home() / ".vaultmind"
@@ -156,6 +156,28 @@ class RankingConfig(BaseSettings):
     """Search result ranking configuration."""
 
     enabled: bool = True
+    semantic_weight: float = 0.40
+    recency_weight: float = 0.20
+    connection_density_weight: float = 0.25
+    activation_weight: float = 0.05
+    note_type_weight: float = 0.10
+    connection_max_hops: int = 2
+    entity_confidence_threshold: float = 0.6
+    recency_half_life_days: float = 30.0
+
+    @model_validator(mode="after")
+    def _check_weights_sum(self) -> RankingConfig:
+        total = (
+            self.semantic_weight
+            + self.recency_weight
+            + self.connection_density_weight
+            + self.activation_weight
+            + self.note_type_weight
+        )
+        if abs(total - 1.0) > 0.05:
+            msg = f"Ranking weights must sum to ~1.0 (±0.05), got {total:.4f}"
+            raise ValueError(msg)
+        return self
 
 
 class EvolutionConfig(BaseSettings):
