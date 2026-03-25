@@ -308,6 +308,15 @@ class EpisodicConfig(BaseSettings):
     short_term_days: int = 30  # Episodes older than this auto-promote to long_term
 
 
+class ConsolidationConfig(BaseSettings):
+    """Memory consolidation pipeline configuration."""
+
+    enabled: bool = False  # Opt-in — runs monthly by default
+    retention_days: int = 365
+    min_references_for_promotion: int = 3
+    schedule: str = "0 0 1 * *"  # Monthly on 1st
+
+
 class ProceduralConfig(BaseSettings):
     """Procedural memory configuration."""
 
@@ -419,6 +428,7 @@ class Settings(BaseSettings):
     activation: ActivationConfig = Field(default_factory=ActivationConfig)
     episodic: EpisodicConfig = Field(default_factory=EpisodicConfig)
     procedural: ProceduralConfig = Field(default_factory=ProceduralConfig)
+    consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     mcp_retry: MCPRetryConfig = Field(default_factory=MCPRetryConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)

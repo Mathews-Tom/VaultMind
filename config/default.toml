@@ -187,6 +187,12 @@ auto_extract = false                        # LLM extraction from notes (opt-in)
 extraction_model = ""                       # Empty = use llm.fast_model
 short_term_days = 30                        # Episodes older than this auto-promote to long_term
 
+[consolidation]
+enabled = false                             # Opt-in — runs monthly by default
+retention_days = 365
+min_references_for_promotion = 3
+schedule = "0 0 1 * *"                      # Monthly on 1st
+
 [procedural]
 enabled = false                             # Experimental — disabled by default
 db_path = ""                                # Empty = default ~/.vaultmind/data/procedural.db
