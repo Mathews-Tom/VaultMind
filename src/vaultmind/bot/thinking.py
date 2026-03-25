@@ -104,6 +104,7 @@ class ThinkingPartner:
         topic: str,
         store: VaultStore,
         graph: KnowledgeGraph,
+        episode_store: object | None = None,
     ) -> str:
         """Process a thinking request — retrieves context and generates response."""
 
@@ -119,7 +120,9 @@ class ThinkingPartner:
         session = self._get_session(user_id)
 
         # Retrieve vault context (offload sync I/O to thread pool)
-        vault_context = await asyncio.to_thread(self._build_vault_context, topic, store, graph)
+        vault_context = await asyncio.to_thread(
+            self._build_vault_context, topic, store, graph, episode_store
+        )
 
         # Build graph context via entity extraction (if available)
         graph_context_str = ""
@@ -182,8 +185,9 @@ class ThinkingPartner:
         topic: str,
         store: VaultStore,
         graph: KnowledgeGraph,
+        episode_store: object | None = None,
     ) -> str:
-        """Retrieve relevant context from vault and knowledge graph."""
+        """Retrieve relevant context from vault, knowledge graph, and episodic memory."""
         parts: list[str] = []
 
         # Semantic search for relevant notes
@@ -226,7 +230,49 @@ class ThinkingPartner:
                 rels = [f"{r['relation']} → {r['target']}" for r in neighbors["outgoing"][:5]]
                 parts.append(f"  Connections: {', '.join(rels)}")
 
+        # Episodic memory context — surface relevant past decisions
+        if episode_store is not None:
+            self._add_episodic_context(parts, topic, episode_store)
+
         return "\n".join(parts) if parts else "No specific vault context found for this topic."
+
+    def _add_episodic_context(
+        self,
+        parts: list[str],
+        topic: str,
+        episode_store: object,
+    ) -> None:
+        """Query episodic memory for relevant past decisions and inject into context."""
+        from vaultmind.memory.store import EpisodeStore
+
+        if not isinstance(episode_store, EpisodeStore):
+            return
+
+        topic_words = [w for w in topic.split() if len(w) >= 3]
+        seen: set[str] = set()
+        episodic_added = False
+
+        for word in topic_words[:5]:
+            try:
+                episodes = episode_store.search_by_entity(word, limit=3)
+            except Exception:
+                logger.debug("Episodic search failed for '%s'", word, exc_info=True)
+                continue
+
+            for ep in episodes:
+                if ep.episode_id in seen:
+                    continue
+                seen.add(ep.episode_id)
+
+                if not episodic_added:
+                    parts.append("\n## Past Decisions\n")
+                    episodic_added = True
+
+                status = ep.outcome_status.value
+                outcome = ep.outcome or "pending"
+                parts.append(f"- **{ep.decision}** -> {outcome} ({status})")
+                if ep.lessons:
+                    parts.append(f"  Lessons: {'; '.join(ep.lessons[:3])}")
 
     async def _apply_extraction(
         self,
