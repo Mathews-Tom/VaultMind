@@ -15,6 +15,13 @@ class OutcomeStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class MemoryHorizon(StrEnum):
+    """Temporal classification for episodic memory retrieval."""
+
+    SHORT_TERM = "short_term"
+    LONG_TERM = "long_term"
+
+
 @dataclass
 class Episode:
     episode_id: str
@@ -28,3 +35,4 @@ class Episode:
     created: datetime
     resolved: datetime | None = None
     tags: list[str] = field(default_factory=list)
+    memory_horizon: MemoryHorizon = MemoryHorizon.SHORT_TERM

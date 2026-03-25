@@ -302,6 +302,7 @@ class EpisodicConfig(BaseSettings):
     db_path: str = ""  # default: ~/.vaultmind/data/episodes.db
     auto_extract: bool = False  # LLM extraction from notes (opt-in)
     extraction_model: str = ""  # Empty = use llm.fast_model
+    short_term_days: int = 30  # Episodes older than this auto-promote to long_term
 
 
 class ProceduralConfig(BaseSettings):

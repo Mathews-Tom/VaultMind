@@ -182,6 +182,7 @@ enabled = true
 db_path = ""                                # Empty = default ~/.vaultmind/data/episodes.db
 auto_extract = false                        # LLM extraction from notes (opt-in)
 extraction_model = ""                       # Empty = use llm.fast_model
+short_term_days = 30                        # Episodes older than this auto-promote to long_term
 
 [procedural]
 enabled = false                             # Experimental — disabled by default
