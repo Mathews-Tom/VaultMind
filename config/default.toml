@@ -221,3 +221,14 @@ allowed_tools = ["*"]
 folder_scope = ["*"]
 write_enabled = true
 requires_confirmation = true
+
+[loops]
+insight_enabled = true
+insight_interval_days = 7
+insight_schedule = ""                        # Cron expression; empty = derive from interval_days
+evolution_enabled = true
+evolution_interval_days = 7
+evolution_schedule = ""
+procedural_enabled = false
+procedural_interval_days = 7
+procedural_schedule = ""

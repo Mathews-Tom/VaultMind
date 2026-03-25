@@ -336,10 +336,13 @@ class LoopsConfig(BaseSettings):
 
     insight_enabled: bool = True
     insight_interval_days: int = 7
+    insight_schedule: str = ""  # Cron expression; empty = derive from interval_days
     evolution_enabled: bool = True
     evolution_interval_days: int = 7
+    evolution_schedule: str = ""
     procedural_enabled: bool = False  # requires [procedural].enabled = true
     procedural_interval_days: int = 7
+    procedural_schedule: str = ""
 
 
 class SchedulerConfig(BaseSettings):

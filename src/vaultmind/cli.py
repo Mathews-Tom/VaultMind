@@ -692,24 +692,36 @@ def bot(ctx: click.Context) -> None:
 
         if settings.loops.insight_enabled and preference_store is not None:
             from vaultmind.services.loops.insight_loop import create_insight_executor
+            from vaultmind.services.scheduler import resolve_cron_expr
 
             insight_exec = create_insight_executor(preference_store)
+            insight_cron = resolve_cron_expr(
+                settings.loops.insight_schedule,
+                settings.loops.insight_interval_days,
+            )
             jobs.append(
                 ScheduledJob(
                     name="insight_loop",
                     interval=timedelta(days=settings.loops.insight_interval_days),
+                    cron_expr=insight_cron,
                     execute=insight_exec,
                 )
             )
 
         if settings.loops.evolution_enabled and evolution_detector is not None:
             from vaultmind.services.loops.evolution_loop import create_evolution_executor
+            from vaultmind.services.scheduler import resolve_cron_expr
 
             evolution_exec = create_evolution_executor(evolution_detector)
+            evolution_cron = resolve_cron_expr(
+                settings.loops.evolution_schedule,
+                settings.loops.evolution_interval_days,
+            )
             jobs.append(
                 ScheduledJob(
                     name="evolution_loop",
                     interval=timedelta(days=settings.loops.evolution_interval_days),
+                    cron_expr=evolution_cron,
                     execute=evolution_exec,
                 )
             )
@@ -721,6 +733,7 @@ def bot(ctx: click.Context) -> None:
             and episode_store is not None
         ):
             from vaultmind.services.loops.procedural_loop import create_procedural_executor
+            from vaultmind.services.scheduler import resolve_cron_expr
 
             proc_model = settings.procedural.synthesis_model or settings.llm.fast_model
             procedural_exec = create_procedural_executor(
@@ -729,10 +742,15 @@ def bot(ctx: click.Context) -> None:
                 llm_client=llm_client,
                 model=proc_model,
             )
+            procedural_cron = resolve_cron_expr(
+                settings.loops.procedural_schedule,
+                settings.loops.procedural_interval_days,
+            )
             jobs.append(
                 ScheduledJob(
                     name="procedural_loop",
                     interval=timedelta(days=settings.loops.procedural_interval_days),
+                    cron_expr=procedural_cron,
                     execute=procedural_exec,
                 )
             )

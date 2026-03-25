@@ -35,6 +35,35 @@ def _wrap_legacy_execute(
     return wrapper
 
 
+def resolve_cron_expr(schedule: str, interval_days: int) -> str:
+    """Resolve a cron expression from explicit schedule or interval_days fallback.
+
+    If schedule is a non-empty string:
+      - If it looks like a cron expression (contains spaces + digits), use it directly
+      - Otherwise try nl_to_cron() for natural language conversion
+    If schedule is empty, convert interval_days to cron.
+    """
+    if schedule.strip():
+        from vaultmind.services.cron import CronSchedule, nl_to_cron
+
+        # Try as raw cron first
+        if CronSchedule.validate(schedule.strip()):
+            return schedule.strip()
+        # Try natural language
+        result = nl_to_cron(schedule.strip())
+        if result is not None:
+            return result.expression
+        logger.warning(
+            "Invalid schedule '%s', falling back to interval_days=%d",
+            schedule,
+            interval_days,
+        )
+
+    from vaultmind.services.cron import interval_days_to_cron
+
+    return interval_days_to_cron(interval_days)
+
+
 @dataclass
 class ScheduledJob:
     """A periodic job definition."""
@@ -42,6 +71,7 @@ class ScheduledJob:
     name: str
     interval: timedelta
     execute: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+    cron_expr: str = ""  # Optional cron expression; takes priority over interval
     completion_check: Callable[[dict[str, Any]], bool] | None = field(default=None)
     trigger_event_types: list[str] | None = field(default=None)
     trigger_threshold: int = field(default=10)
@@ -65,6 +95,11 @@ class ScheduledJob:
 
     def is_overdue(self, last_run_iso: str) -> bool:
         """Check if this job should have run since last_run."""
+        if self.cron_expr:
+            from vaultmind.services.cron import CronSchedule
+
+            schedule = CronSchedule(expression=self.cron_expr, description="")
+            return schedule.is_overdue(last_run_iso)
         last = datetime.fromisoformat(last_run_iso)
         if last.tzinfo is None:
             last = last.replace(tzinfo=UTC)
