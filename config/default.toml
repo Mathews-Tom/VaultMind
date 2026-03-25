@@ -185,6 +185,18 @@ db_path = ""                                # Empty = default ~/.vaultmind/data/
 min_episodes_for_pattern = 3
 synthesis_model = ""                        # Empty = use llm.fast_model
 
+[health]
+enabled = true
+check_interval_seconds = 60
+check_chromadb = true
+check_sqlite = true
+check_graph_file = true
+check_llm = true
+check_bot = true
+check_vault_access = true
+chromadb_latency_warn_ms = 1000
+retention_days = 30
+
 [mcp_retry]
 enabled = true
 max_retries = 1
