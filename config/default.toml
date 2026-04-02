@@ -12,6 +12,50 @@ meta_folder = "_meta"
 sync_interval_seconds = 300
 excluded_folders = [".obsidian", ".git", ".trash"]
 
+[memory_profile]
+enabled = true
+identity_folder = "_meta/identity"
+user_note_name = "user.md"
+system_note_name = "system.md"
+promoted_memory_note_name = "memory.md"
+priorities_note_name = "priorities.md"
+daily_log_folder = "_meta/daily-logs"
+recent_daily_logs = 3
+promoted_memory_max_chars = 12000
+
+[proactivity]
+mode = "observer"                           # "observer", "advisor", "assistant", "partner"
+require_confirmation_for_external_send = true
+require_confirmation_for_destructive_actions = true
+allow_local_automation = false
+allow_external_side_effects = false
+
+[heartbeat]
+enabled = false
+schedule = "*/30 * * * *"
+timezone = "UTC"
+active_hours_start = 8
+active_hours_end = 18
+snapshot_state_path = ""                    # Empty = default ~/.vaultmind/data/heartbeat_state.json
+max_snapshot_items = 50
+max_actions_per_run = 5
+
+[drafts]
+enabled = false
+active_folder = "_meta/drafts/active"
+sent_folder = "_meta/drafts/sent"
+expired_folder = "_meta/drafts/expired"
+expiry_hours = 24
+require_human_approval = true
+voice_match_limit = 5
+
+[integrations]
+enabled = false
+manifest_path = ""                          # Empty = default ~/.vaultmind/data/integrations.json
+default_capability = "read"                 # "read", "draft", "write"
+sanitize_external_text = true
+audit_retention_days = 90
+
 [embedding]
 provider = "openai"           # "openai" or "voyage"
 model = "text-embedding-3-small"

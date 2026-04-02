@@ -41,6 +41,65 @@ class VaultConfig(BaseSettings):
         return v.resolve()
 
 
+class MemoryProfileConfig(BaseSettings):
+    """Curated identity-memory layout and promotion guardrails."""
+
+    enabled: bool = True
+    identity_folder: str = "_meta/identity"
+    user_note_name: str = "user.md"
+    system_note_name: str = "system.md"
+    promoted_memory_note_name: str = "memory.md"
+    priorities_note_name: str = "priorities.md"
+    daily_log_folder: str = "_meta/daily-logs"
+    recent_daily_logs: int = 3
+    promoted_memory_max_chars: int = 12_000
+
+
+class ProactivityConfig(BaseSettings):
+    """Global autonomy and confirmation boundaries."""
+
+    mode: Literal["observer", "advisor", "assistant", "partner"] = "observer"
+    require_confirmation_for_external_send: bool = True
+    require_confirmation_for_destructive_actions: bool = True
+    allow_local_automation: bool = False
+    allow_external_side_effects: bool = False
+
+
+class HeartbeatConfig(BaseSettings):
+    """Deterministic proactive-state collection boundaries."""
+
+    enabled: bool = False
+    schedule: str = "*/30 * * * *"
+    timezone: str = "UTC"
+    active_hours_start: int = 8
+    active_hours_end: int = 18
+    snapshot_state_path: str = ""  # Empty = default ~/.vaultmind/data/heartbeat_state.json
+    max_snapshot_items: int = 50
+    max_actions_per_run: int = 5
+
+
+class DraftsConfig(BaseSettings):
+    """Draft lifecycle storage and approval defaults."""
+
+    enabled: bool = False
+    active_folder: str = "_meta/drafts/active"
+    sent_folder: str = "_meta/drafts/sent"
+    expired_folder: str = "_meta/drafts/expired"
+    expiry_hours: int = 24
+    require_human_approval: bool = True
+    voice_match_limit: int = 5
+
+
+class IntegrationsConfig(BaseSettings):
+    """External system policy defaults and manifest location."""
+
+    enabled: bool = False
+    manifest_path: str = ""  # Empty = default ~/.vaultmind/data/integrations.json
+    default_capability: Literal["read", "draft", "write"] = "read"
+    sanitize_external_text: bool = True
+    audit_retention_days: int = 90
+
+
 class EmbeddingConfig(BaseSettings):
     """Embedding model configuration."""
 
@@ -405,6 +464,11 @@ class Settings(BaseSettings):
     )
 
     vault: VaultConfig = Field(default_factory=lambda: VaultConfig(path=VAULTMIND_HOME / "vault"))
+    memory_profile: MemoryProfileConfig = Field(default_factory=MemoryProfileConfig)
+    proactivity: ProactivityConfig = Field(default_factory=ProactivityConfig)
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    drafts: DraftsConfig = Field(default_factory=DraftsConfig)
+    integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     chroma: ChromaConfig = Field(default_factory=ChromaConfig)
     graph: GraphConfig = Field(default_factory=GraphConfig)
