@@ -4,6 +4,8 @@
 
 VaultMind is structured as a set of composable modules around a central principle: **the Obsidian vault is the canonical store**. All other systems (ChromaDB, knowledge graph, preferences DB) are derived indexes that can be rebuilt from the vault at any time.
 
+Architectural prep is now in place for five additional runtime capabilities that are not fully implemented yet: curated identity memory, explicit proactivity policy, bounded heartbeat orchestration, draft lifecycle management, and permission-scoped integrations. The configuration and decision records for these capabilities are part of the codebase so later implementation can land against stable boundaries.
+
 ## Module Map
 
 ```text
@@ -96,6 +98,9 @@ src/vaultmind/
 │       ├── evolution_loop.py   # Belief drift trend accumulation
 │       └── procedural_loop.py  # Workflow synthesis from episodes
 │
+├── drafts/          # Planned draft lifecycle subsystem (active/sent/expired)
+├── integrations/    # Planned permission-scoped external adapters
+│
 ├── research/        # External source research
 │   ├── pipeline.py      # YouTube search → transcript → LLM analysis → vault notes
 │   ├── searcher.py      # YouTube search backend (yt-dlp)
@@ -170,16 +175,24 @@ The router uses heuristics (regex, length, line count) before falling back to LL
 ### Thinking Partner
 
 ```text
-User topic → Entity extraction (LLM) → Ego subgraph (NetworkX)
+User topic → Identity memory (planned always-loaded tier)
+          → Entity extraction (LLM) → Ego subgraph (NetworkX)
                                            ↓
                                     Vault search (ChromaDB)
                                            ↓
                                     Context assembly → LLM response
                                            ↓
-                                    Session store (SQLite)
+                            Session store (SQLite) → promotion pipeline (planned)
 ```
 
 Multi-turn sessions persist to SQLite with `(user_id, session_name)` composite key. Follow-up messages within the TTL continue the same session automatically.
+
+The architectural boundary is now explicit:
+
+- identity memory: a small curated vault-backed context tier
+- retrieval memory: search and graph-derived context assembled per request
+- episodic memory: decision and outcome ledger
+- promoted memory: distilled durable facts and priorities derived from raw interactions
 
 ### Zettelkasten Maturation
 
@@ -215,6 +228,32 @@ Knowledge graph snapshots → Confidence drift detection
 ```
 
 Episodic memory tracks decision-outcome pairs. Each episode records the decision, context, outcome, lessons, and linked graph entities. The procedural memory layer (experimental, disabled by default) mines resolved episodes for recurring patterns and synthesizes reusable workflows.
+
+### Proactivity Policy
+
+Architectural prep defines a single system-wide autonomy model:
+
+- `observer` — notify only
+- `advisor` — propose drafts and suggestions
+- `assistant` — allow bounded vault-side changes and low-risk automations
+- `partner` — reserved for controlled external actions with confirmation gates still enforced for destructive or irreversible operations
+
+This policy is configuration-driven and intended to become the single source of truth for proactive behavior, draft creation, and future integration actions.
+
+### Architectural Control Plane
+
+```text
+config/default.toml
+    ↓
+Settings
+    ├─ memory_profile  -> identity note layout, daily-log layout, promotion bounds
+    ├─ proactivity     -> autonomy mode and confirmation boundaries
+    ├─ heartbeat       -> schedule and snapshot limits for proactive orchestration
+    ├─ drafts          -> active/sent/expired folders and approval defaults
+    └─ integrations    -> default capability ceiling and sanitation policy
+```
+
+These settings do not, by themselves, add new behavior. They define the stable boundaries future runtime modules must obey. This keeps later implementation work additive: identity memory can be introduced without changing retrieval, drafts can be added without bypassing policy checks, and integrations can be added under a shared capability model instead of per-adapter special cases.
 
 ## Key Design Decisions
 
@@ -264,6 +303,14 @@ Vault Events → Event Bus → Scheduler (threshold check) → Loop Job (state i
 
 **Event-driven triggering:** Vault events (NoteCreated, NoteModified) accumulate per-job. When a configurable threshold is met (default 10) and cooldown period has passed (default 1 hour), the loop fires early outside its normal schedule.
 
+Architectural prep also reserves a bounded heartbeat orchestration model:
+
+```text
+Deterministic snapshots → diffing → policy check → bounded LLM reasoning → notifications, drafts, or local updates
+```
+
+The existing scheduler remains the execution backbone. Later implementation should add heartbeat snapshot builders and policy-aware action planning rather than replacing the scheduler with a separate runtime.
+
 ## Security Model
 
 - **Path traversal protection** — `vault/security.py` validates all user-supplied paths before filesystem access
@@ -271,3 +318,6 @@ Vault Events → Event Bus → Scheduler (threshold check) → Loop Job (state i
 - **MCP profiles** — `mcp/auth.py` enforces tool access, folder scope, write permissions, and size limits per agent profile
 - **Audit logging** — all MCP tool calls are logged with profile, tool, arguments, and outcome (OK/DENIED/ERROR)
 - **Telegram auth** — configurable user ID whitelist; empty list allows all users
+- **Integration capability boundaries** — architectural prep introduces read, draft, and write capability tiers for external systems
+- **Outbound confirmation gates** — draft creation and external send are intentionally separated so future integrations can keep human approval in the loop
+- **Autonomy policy boundary** — outbound sends, destructive actions, and future integration writes must flow through the global proactivity and capability policy rather than ad hoc handler logic

@@ -24,6 +24,75 @@ Vault filesystem paths and behavior.
 | `sync_interval_seconds` | int    | `300`                             | Full re-sync interval (seconds)      |
 | `excluded_folders`      | list   | `[".obsidian", ".git", ".trash"]` | Folders to skip during indexing      |
 
+## `[memory_profile]`
+
+Curated identity-memory layout and promotion guardrails. This is the control-plane definition for VaultMind's always-available user context and daily-log pipeline.
+
+| Key                         | Type   | Default              | Description                                          |
+| --------------------------- | ------ | -------------------- | ---------------------------------------------------- |
+| `enabled`                   | bool   | `true`               | Enable identity-memory layout management             |
+| `identity_folder`           | string | `_meta/identity`     | Vault folder holding curated identity-memory notes   |
+| `user_note_name`            | string | `user.md`            | User profile note filename                           |
+| `system_note_name`          | string | `system.md`          | System rules and operating-boundaries note filename  |
+| `promoted_memory_note_name` | string | `memory.md`          | Promoted long-term memory note filename              |
+| `priorities_note_name`      | string | `priorities.md`      | Current priorities note filename                     |
+| `daily_log_folder`          | string | `_meta/daily-logs`   | Append-only daily interaction log folder             |
+| `recent_daily_logs`         | int    | `3`                  | Number of recent daily logs to include in context    |
+| `promoted_memory_max_chars` | int    | `12000`              | Ceiling for curated promoted-memory size             |
+
+## `[proactivity]`
+
+Global autonomy policy. This section does not itself perform actions; it defines what later automation layers are allowed to do.
+
+| Key                                          | Type   | Default      | Description                                         |
+| -------------------------------------------- | ------ | ------------ | --------------------------------------------------- |
+| `mode`                                       | string | `observer`   | `observer`, `advisor`, `assistant`, or `partner`    |
+| `require_confirmation_for_external_send`     | bool   | `true`       | Require approval before any outbound external send  |
+| `require_confirmation_for_destructive_actions` | bool | `true`       | Require approval before delete or destructive writes |
+| `allow_local_automation`                     | bool   | `false`      | Allow local vault-side automation                   |
+| `allow_external_side_effects`                | bool   | `false`      | Allow external writes when a later adapter supports them |
+
+## `[heartbeat]`
+
+Deterministic proactive-state collection boundaries for the future heartbeat orchestrator.
+
+| Key                   | Type   | Default    | Description                                             |
+| --------------------- | ------ | ---------- | ------------------------------------------------------- |
+| `enabled`             | bool   | `false`    | Enable heartbeat orchestration                          |
+| `schedule`            | string | `*/30 * * * *` | Cron schedule for heartbeat runs                    |
+| `timezone`            | string | `UTC`      | Timezone for schedule interpretation                    |
+| `active_hours_start`  | int    | `8`        | Start hour for active monitoring window                 |
+| `active_hours_end`    | int    | `18`       | End hour for active monitoring window                   |
+| `snapshot_state_path` | string | `""`       | Snapshot state path (empty = default under `~/.vaultmind/data/`) |
+| `max_snapshot_items`  | int    | `50`       | Maximum items gathered into one heartbeat snapshot      |
+| `max_actions_per_run` | int    | `5`        | Maximum suggested actions emitted per heartbeat run     |
+
+## `[drafts]`
+
+Draft lifecycle storage and approval defaults.
+
+| Key                      | Type   | Default                 | Description                                       |
+| ------------------------ | ------ | ----------------------- | ------------------------------------------------- |
+| `enabled`                | bool   | `false`                 | Enable draft lifecycle support                    |
+| `active_folder`          | string | `_meta/drafts/active`   | Vault folder for live drafts                      |
+| `sent_folder`            | string | `_meta/drafts/sent`     | Vault folder for user-sent replies                |
+| `expired_folder`         | string | `_meta/drafts/expired`  | Vault folder for expired drafts                   |
+| `expiry_hours`           | int    | `24`                    | Draft expiration window                           |
+| `require_human_approval` | bool   | `true`                  | Require review before any send-capable workflow   |
+| `voice_match_limit`      | int    | `5`                     | Max prior sent drafts used for tone matching      |
+
+## `[integrations]`
+
+External adapter policy defaults.
+
+| Key                      | Type   | Default | Description                                                   |
+| ------------------------ | ------ | ------- | ------------------------------------------------------------- |
+| `enabled`                | bool   | `false` | Enable external integration framework                         |
+| `manifest_path`          | string | `""`    | Integration manifest path (empty = default under data dir)    |
+| `default_capability`     | string | `read`  | Default adapter capability ceiling: `read`, `draft`, `write`  |
+| `sanitize_external_text` | bool   | `true`  | Sanitize provider payload text before prompt assembly         |
+| `audit_retention_days`   | int    | `90`    | Retention window for integration audit records                |
+
 ## `[embedding]`
 
 Embedding generation for vector search.
