@@ -195,3 +195,107 @@ class TestFolderIndexProfileWiring:
 
     def test_folder_index_in_planner_allowed_tools(self) -> None:
         assert "list_folder_index" in DEFAULT_PROFILES["planner"]["allowed_tools"]
+
+
+# ---------------------------------------------------------------------------
+# follow_links
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def linked_vault_root(tmp_path: Path) -> Path:
+    """Create a fixture vault with wikilinked notes for follow_links tests."""
+    notes_dir = tmp_path / "02-projects"
+    notes_dir.mkdir(parents=True)
+
+    (notes_dir / "hub.md").write_text(
+        "---\ntitle: Hub Note\ntype: permanent\ncreated: 2026-01-01\n---\n\n"
+        "# Hub Note\n\n"
+        "Links to [[Spoke A]], [[Spoke B]], and [[Missing Target]].\n",
+        encoding="utf-8",
+    )
+    (notes_dir / "spoke-a.md").write_text(
+        "---\ntitle: Spoke A\ntype: permanent\ncreated: 2026-01-02\n---\n\n"
+        "# Spoke A\n\nLinks back to [[Hub Note]].\n",
+        encoding="utf-8",
+    )
+    (notes_dir / "spoke-b.md").write_text(
+        "---\ntitle: Spoke B\ntype: permanent\ncreated: 2026-01-03\n---\n\n"
+        "# Spoke B\n\nNo backlink to the hub.\n",
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+@pytest.fixture
+def linked_parser(linked_vault_root: Path) -> VaultParser:
+    return VaultParser(VaultConfig(path=linked_vault_root))  # type: ignore[arg-type]
+
+
+class TestFollowLinks:
+    def test_follow_links_returns_out_links(
+        self, linked_vault_root: Path, linked_parser: VaultParser
+    ) -> None:
+        result = _dispatch(
+            "follow_links", {"path": "02-projects/hub.md"}, linked_vault_root, linked_parser
+        )
+        assert result["title"] == "Hub Note"
+        out_titles = {link["title"] for link in result["out_links"]}
+        assert out_titles == {"Spoke A", "Spoke B", "Missing Target"}
+        assert result["out_link_count"] == 3
+
+    def test_follow_links_resolves_out_link_paths(
+        self, linked_vault_root: Path, linked_parser: VaultParser
+    ) -> None:
+        result = _dispatch(
+            "follow_links", {"path": "02-projects/hub.md"}, linked_vault_root, linked_parser
+        )
+        by_title = {link["title"]: link["path"] for link in result["out_links"]}
+        assert by_title["Spoke A"] == "02-projects/spoke-a.md"
+        assert by_title["Missing Target"] is None
+
+    def test_follow_links_returns_backlinks(
+        self, linked_vault_root: Path, linked_parser: VaultParser
+    ) -> None:
+        result = _dispatch(
+            "follow_links", {"path": "02-projects/hub.md"}, linked_vault_root, linked_parser
+        )
+        backlink_titles = {link["title"] for link in result["backlinks"]}
+        assert backlink_titles == {"Spoke A"}
+        assert result["backlink_count"] == 1
+        backlink = result["backlinks"][0]
+        assert backlink["path"] == "02-projects/spoke-a.md"
+
+    def test_follow_links_never_returns_body_text(
+        self, linked_vault_root: Path, linked_parser: VaultParser
+    ) -> None:
+        result = _dispatch(
+            "follow_links", {"path": "02-projects/hub.md"}, linked_vault_root, linked_parser
+        )
+        assert "content" not in result
+        assert "No backlink to the hub" not in str(result)
+
+    def test_follow_links_missing_note_returns_error(
+        self, linked_vault_root: Path, linked_parser: VaultParser
+    ) -> None:
+        result = _dispatch(
+            "follow_links", {"path": "02-projects/nope.md"}, linked_vault_root, linked_parser
+        )
+        assert "error" in result
+
+    def test_follow_links_path_traversal_blocked(
+        self, linked_vault_root: Path, linked_parser: VaultParser
+    ) -> None:
+        result = _dispatch(
+            "follow_links", {"path": "../../etc/passwd"}, linked_vault_root, linked_parser
+        )
+        assert "error" in result
+        assert "not allowed" in result["error"]
+
+
+class TestFollowLinksProfileWiring:
+    def test_follow_links_in_researcher_allowed_tools(self) -> None:
+        assert "follow_links" in DEFAULT_PROFILES["researcher"]["allowed_tools"]
+
+    def test_follow_links_in_planner_allowed_tools(self) -> None:
+        assert "follow_links" in DEFAULT_PROFILES["planner"]["allowed_tools"]

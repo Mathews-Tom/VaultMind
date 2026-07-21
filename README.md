@@ -290,6 +290,7 @@ uv sync --extra mcp
 | `recent_activity`  | Notes created or modified in the last N days                     |
 | `read_frontmatter` | Peek parsed frontmatter (type, tags, dates, authority) — no body  |
 | `list_folder_index`| Folder listing with titles + one-line descriptions — no body     |
+| `follow_links`     | Wikilink out-links + backlinks for a note — no body               |
 
 ### MCP Profiles
 

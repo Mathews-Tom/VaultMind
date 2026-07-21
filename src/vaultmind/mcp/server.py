@@ -177,6 +177,23 @@ def create_mcp_server(
                 },
             ),
             Tool(
+                name="follow_links",
+                description=(
+                    "Follow a note's wikilink neighborhood: outgoing [[links]] and"
+                    " incoming backlinks from other notes, without fetching note bodies."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Note path relative to vault root",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
+            Tool(
                 name="graph_query",
                 description=(
                     "Query the knowledge graph for an entity's"
@@ -415,7 +432,14 @@ def create_mcp_server(
                     enforcer.check_write()
                 # Check path scope for path-based operations
                 if (
-                    name in ("vault_read", "vault_write", "vault_list", "read_frontmatter")
+                    name
+                    in (
+                        "vault_read",
+                        "vault_write",
+                        "vault_list",
+                        "read_frontmatter",
+                        "follow_links",
+                    )
                     and "path" in arguments
                 ):
                     from pathlib import Path as PathCls
@@ -624,6 +648,36 @@ def _dispatch_tool(
                 }
             )
         return {"folder": args.get("folder", ""), "notes": entries, "count": len(entries)}
+
+    elif name == "follow_links":
+        try:
+            filepath = validate_vault_path(args["path"], vault_path)
+        except PathTraversalError as e:
+            return {"error": f"Path not allowed: {e.user_path}"}
+        if not filepath.exists():
+            return {"error": f"Note not found: {args['path']}"}
+        target_note = parser.parse_file(filepath)
+        all_notes = parser.iter_notes()
+        title_to_path = {n.title: str(n.path) for n in all_notes}
+
+        out_links = [
+            {"title": link_title, "path": title_to_path.get(link_title)}
+            for link_title in target_note.wikilinks
+        ]
+        backlinks = [
+            {"title": n.title, "path": str(n.path)}
+            for n in all_notes
+            if n.path != target_note.path and target_note.title in n.wikilinks
+        ]
+
+        return {
+            "path": args["path"],
+            "title": target_note.title,
+            "out_links": out_links,
+            "backlinks": backlinks,
+            "out_link_count": len(out_links),
+            "backlink_count": len(backlinks),
+        }
 
     elif name == "graph_query":
         result = graph.get_neighbors(args["entity"], depth=args.get("depth", 1))
