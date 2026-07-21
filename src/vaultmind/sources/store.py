@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS connector_state (
     instance_name TEXT PRIMARY KEY,
     last_seen_id TEXT NOT NULL DEFAULT '',
     etag TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT,
     last_run TEXT,
     run_count INTEGER NOT NULL DEFAULT 0
 );
@@ -50,6 +51,7 @@ def _row_to_state(row: sqlite3.Row) -> ConnectorState:
         instance_name=row["instance_name"],
         last_seen_id=row["last_seen_id"],
         etag=row["etag"],
+        last_seen_at=datetime.fromisoformat(row["last_seen_at"]) if row["last_seen_at"] else None,
         last_run=datetime.fromisoformat(row["last_run"]) if row["last_run"] else None,
         run_count=row["run_count"],
     )
@@ -80,11 +82,12 @@ class SourceStore:
         self._conn.execute(
             """
             INSERT INTO connector_state
-                (instance_name, last_seen_id, etag, last_run, run_count)
-            VALUES (?, ?, ?, ?, ?)
+                (instance_name, last_seen_id, etag, last_seen_at, last_run, run_count)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(instance_name) DO UPDATE SET
                 last_seen_id = excluded.last_seen_id,
                 etag = excluded.etag,
+                last_seen_at = excluded.last_seen_at,
                 last_run = excluded.last_run,
                 run_count = excluded.run_count
             """,
@@ -92,6 +95,7 @@ class SourceStore:
                 state.instance_name,
                 state.last_seen_id,
                 state.etag,
+                state.last_seen_at.isoformat() if state.last_seen_at else None,
                 state.last_run.isoformat() if state.last_run else None,
                 state.run_count,
             ),
@@ -146,18 +150,20 @@ def advance_cursor(
     instance_name: str,
     *,
     next_cursor_id: str | None,
+    next_cursor_at: datetime | None = None,
     next_etag: str | None,
 ) -> None:
     """Persist the post-run cursor for `instance_name`, bumping `run_count`
-    and `last_run`. `None` for either field leaves that part of the cursor
-    unchanged (e.g. a run that found zero new items keeps the prior
-    `last_seen_id`)."""
+    and `last_run`. `None` for `next_cursor_id`/`next_cursor_at`/`next_etag`
+    leaves that part of the cursor unchanged (e.g. a run that found zero new
+    items keeps the prior `last_seen_id`/`last_seen_at`)."""
     prior = store.get_state(instance_name)
     store.save_state(
         ConnectorState(
             instance_name=instance_name,
             last_seen_id=next_cursor_id if next_cursor_id is not None else prior.last_seen_id,
             etag=next_etag if next_etag is not None else prior.etag,
+            last_seen_at=next_cursor_at if next_cursor_at is not None else prior.last_seen_at,
             last_run=datetime.now(UTC),
             run_count=prior.run_count + 1,
         )

@@ -268,3 +268,29 @@ class TestSourceStore:
         assert state.etag == "e1"
         assert state.run_count == 2
         store.close()
+
+    def test_advance_cursor_sets_last_seen_at(self, tmp_path: Path) -> None:
+        store = SourceStore(tmp_path / "sources.db")
+        pub = datetime(2026, 6, 5, 9, 0, tzinfo=UTC)
+        advance_cursor(
+            store,
+            "rss-fixture",
+            next_cursor_id="fixture-post-3",
+            next_cursor_at=pub,
+            next_etag=None,
+        )
+        state = store.get_state("rss-fixture")
+        assert state.last_seen_at == pub
+        store.close()
+
+    def test_advance_cursor_at_none_leaves_prior_timestamp_unchanged(self, tmp_path: Path) -> None:
+        store = SourceStore(tmp_path / "sources.db")
+        pub = datetime(2026, 6, 5, 9, 0, tzinfo=UTC)
+        advance_cursor(store, "rss-fixture", next_cursor_id="a", next_cursor_at=pub, next_etag=None)
+        advance_cursor(
+            store, "rss-fixture", next_cursor_id="b", next_cursor_at=None, next_etag=None
+        )
+        state = store.get_state("rss-fixture")
+        assert state.last_seen_id == "b"
+        assert state.last_seen_at == pub
+        store.close()

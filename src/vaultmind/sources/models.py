@@ -39,14 +39,16 @@ class FetchResult:
     """Result of one connector fetch call.
 
     `items` are every item newer than the cursor passed in (the connector is
-    responsible for filtering against `ConnectorState.last_seen_id`/`etag` —
-    the pipeline never re-filters). `next_cursor_id`/`next_etag`, if set,
-    replace the stored cursor after a successful run; `None` leaves the
-    stored cursor unchanged (e.g. a fetch that found zero new items).
+    responsible for filtering against `ConnectorState.last_seen_id`/
+    `last_seen_at`/`etag` — the pipeline never re-filters). `next_cursor_id`/
+    `next_cursor_at`/`next_etag`, if set, replace the stored cursor after a
+    successful run; `None` for any of them leaves that part of the stored
+    cursor unchanged (e.g. a fetch that found zero new items).
     """
 
     items: list[SourceItem] = field(default_factory=list)
     next_cursor_id: str | None = None
+    next_cursor_at: datetime | None = None
     next_etag: str | None = None
 
 
@@ -90,11 +92,20 @@ class RunSummary:
 
 @dataclass(frozen=True, slots=True)
 class ConnectorState:
-    """Durable per-instance cursor state, persisted in `sources.db`."""
+    """Durable per-instance cursor state, persisted in `sources.db`.
+
+    `last_seen_id` is the connector-specific ID cursor (RSS guid, YouTube
+    video ID, GitHub commit SHA/PR number). `last_seen_at` is a
+    complementary timestamp cursor for chronologically-ordered sources
+    (RSS `pubDate`/Atom `updated`) where item order in a feed fetch is not
+    guaranteed — a connector may use either, or both, depending on what
+    the source reliably provides.
+    """
 
     instance_name: str
     last_seen_id: str = ""
     etag: str = ""
+    last_seen_at: datetime | None = None
     last_run: datetime | None = None
     run_count: int = 0
 
