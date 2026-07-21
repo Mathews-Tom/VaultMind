@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from vaultmind.memory.store import EpisodeStore
     from vaultmind.pipeline.maturation import MaturationPipeline
     from vaultmind.services.review_queue import ReviewQueue
+    from vaultmind.vault.events import VaultEventBus
     from vaultmind.vault.parser import VaultParser
 
 
@@ -85,6 +86,7 @@ class CommandHandlers:
         procedural_memory: ProceduralMemory | None = None,
         gap_store: GapStore | None = None,
         review_queue: ReviewQueue | None = None,
+        event_bus: VaultEventBus | None = None,
     ) -> None:
         self._ctx = HandlerContext(
             settings=settings,
@@ -107,6 +109,7 @@ class CommandHandlers:
         self._procedural_memory = procedural_memory
         self._gap_store = gap_store
         self._review_queue = review_queue
+        self._event_bus = event_bus
         self._pending_edits: dict[int, dict[str, str]] = {}
         self._search_sessions: dict[int, PaginatedSearch] = {}
         self._last_exchanges: dict[int, LastExchange] = {}
@@ -216,7 +219,7 @@ class CommandHandlers:
         await handle_delete_callback(self._ctx, callback)
 
     async def handle_autonomy_callback(self, callback: CallbackQuery) -> None:
-        await handle_autonomy_callback(self._ctx, callback)
+        await handle_autonomy_callback(self._ctx, callback, self._event_bus)
 
     async def handle_edit(self, message: Message, args: str) -> None:
         await handle_edit(self._ctx, message, args, self._pending_edits)

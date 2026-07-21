@@ -107,6 +107,7 @@ def distill_conversation(
     source_ref: str,
     occurred_at: str | None = None,
     max_tokens: int = 800,
+    authority: int = DISTILLED_AUTHORITY,
 ) -> DistillResult:
     """Distill a finished conversation into a `qa-artifact` note.
 
@@ -114,6 +115,11 @@ def distill_conversation(
     systems, participants), validates the response, and writes a `qa-artifact`
     note under `{vault_root}/{output_folder}/`. Never overwrites an existing
     file. The caller is responsible for parsing and indexing the written note.
+    `authority` (M2's provenance table) defaults to `DISTILLED_AUTHORITY`
+    (=4, "distilled") for the original conversation-distillation call sites
+    (`bot/thinking.py`, `bot/handlers/distill.py`); `sources/pipeline.py`
+    (M8) passes `authority=1` ("auto-ingested") explicitly, since connector
+    items are unattended background content, not a user's own session.
 
     Returns a `DistillResult`; `success=False` means no file was written.
     """
@@ -176,7 +182,7 @@ def distill_conversation(
         "participants": participants,
         "source_ref": source_ref,
         "occurred_at": occurred,
-        "authority": DISTILLED_AUTHORITY,
+        "authority": authority,
         "tags": ["qa-artifact"],
         "status": "active",
         "source": "distilled",
