@@ -702,9 +702,15 @@ def bot(ctx: click.Context) -> None:
         PreferenceStore(pref_db) if settings.tracking.enabled else None
     )
 
+    from vaultmind.graph.evolution import LineageStore
     from vaultmind.vault.events import VaultEventBus
 
     event_bus = VaultEventBus()
+
+    # Note-level supersede lineage (M9) — always on, decoupled from
+    # [evolution].enabled: recording that a bot-initiated delete/edit
+    # happened is a safety/audit invariant, not an optional feature.
+    lineage_store = LineageStore(VAULTMIND_HOME / "data" / "lineage.json")
 
     handlers = CommandHandlers(
         settings=settings,
@@ -722,7 +728,7 @@ def bot(ctx: click.Context) -> None:
         procedural_memory=procedural_memory,
         gap_store=gap_store,
         review_queue=review_queue,
-        event_bus=event_bus,
+        lineage_store=lineage_store,
     )
 
     tg_bot, dp = create_bot(settings.telegram.bot_token)

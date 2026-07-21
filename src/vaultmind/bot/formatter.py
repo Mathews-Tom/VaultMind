@@ -59,6 +59,7 @@ _CALLOUT_EMOJI: dict[str, str] = {
     "warning": "⚠️",
     "danger": "🔴",
     "info": "ℹ️",
+    "superseded": "🗂️",
 }
 _CALLOUT_DEFAULT_EMOJI = "📌"
 

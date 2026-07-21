@@ -1,12 +1,24 @@
-"""Edit handler — AI-assisted note editing with confirmation flow."""
+"""Edit handler — AI-assisted note editing with confirmation flow.
+
+M9: a bot-initiated edit never discards a note's prior text. The LLM is
+shown and asked to rewrite only the note *body* (frontmatter is never at
+the model's mercy); on confirmation, the new body is written above a dated
+`> [!superseded]` callout, with the full prior body preserved, unchanged,
+beneath it. One `LineageEdge` is recorded per confirmed edit, queryable via
+`ctx.lineage_store.get_lineage(note_path)`.
+"""
 
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
 
+import frontmatter
+
 from vaultmind.bot.handlers.utils import _is_authorized, _resolve_note_path
 from vaultmind.bot.sanitize import MAX_EDIT_INSTRUCTION_LENGTH, sanitize_path, sanitize_text
+from vaultmind.contradiction.marking import write_superseded_block
+from vaultmind.graph.evolution import LineageStore
 from vaultmind.llm.client import LLMError
 from vaultmind.llm.client import Message as LLMMessage
 from vaultmind.vault.security import PathTraversalError, validate_vault_path
@@ -19,9 +31,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 NOTE_EDIT_SYSTEM_PROMPT = """\
-You are a note editor. Apply the user's requested edit to the note content below.
-Return ONLY the updated note content (including frontmatter if present).
-Do not add explanations or commentary — just the edited note text.
+You are a note editor. Apply the user's requested edit to the note body below.
+Return ONLY the updated body text — no frontmatter, no explanations or commentary.
 """
 
 
@@ -69,12 +80,12 @@ async def handle_edit(
         return
 
     rel_path = filepath.relative_to(ctx.vault_root)
-    original = filepath.read_text(encoding="utf-8")
+    original_body = frontmatter.load(str(filepath)).content
 
     await message.answer("\u270f\ufe0f Generating edit...")
 
     model = ctx.settings.routing.chat_model or ctx.settings.llm.fast_model
-    user_msg = f"**Note content:**\n```\n{original}\n```\n\n**Edit instruction:** {instruction}"
+    user_msg = f"**Note body:**\n```\n{original_body}\n```\n\n**Edit instruction:** {instruction}"
 
     try:
         response = ctx.llm_client.complete(
@@ -96,8 +107,9 @@ async def handle_edit(
     user_id = message.from_user.id if message.from_user else 0
     pending_edits[user_id] = {
         "path": str(rel_path),
-        "original": original,
+        "original": original_body,
         "edited": edited,
+        "instruction": instruction,
     }
 
     # Show diff preview
@@ -123,7 +135,7 @@ async def handle_edit(
     )
 
     msg = (
-        f"\u270f\ufe0f **Proposed edit for** `{rel_path}`:"
+        f"\u270f\ufe0f **Proposed edit for** `{rel_path}` _(prior text is preserved)_:"
         f"\n\n```\n{preview}\n```\n\nApply this edit?"
     )
     await message.answer(
@@ -177,8 +189,23 @@ async def handle_edit_callback(
             await callback.answer()
             return
 
-        # Write edited content
-        filepath.write_text(pending["edited"], encoding="utf-8")
+        # Apply the new body above a dated superseded callout; the prior
+        # body stays fully intact beneath it — never overwritten.
+        from datetime import UTC, datetime
+
+        ts = datetime.now(UTC)
+        rationale = f"Instruction: {pending['instruction']}"
+        write_superseded_block(
+            filepath,
+            callout_type="superseded",
+            title="Edited via bot",
+            rationale=rationale,
+            frontmatter_key="superseded_at",
+            frontmatter_value=ts.isoformat(),
+            dated=True,
+            timestamp=ts,
+            new_content=pending["edited"],
+        )
 
         # Re-index
         try:
@@ -187,9 +214,13 @@ async def handle_edit_callback(
         except Exception:
             logger.exception("Failed to re-index edited note")
 
-        logger.info("Edited note: %s", pending["path"])
+        if isinstance(ctx.lineage_store, LineageStore):
+            ctx.lineage_store.record(pending["path"], "edited", rationale)
+
+        logger.info("Edited note (superseded prior body): %s", pending["path"])
         await callback.message.edit_text(  # type: ignore[union-attr]
-            f"\u2705 Edit applied to `{pending['path']}`",
+            f"\u2705 Edit applied to `{pending['path']}` \u2014 prior text preserved "
+            "under a dated superseded callout.",
             parse_mode="Markdown",
         )
         await callback.answer()
