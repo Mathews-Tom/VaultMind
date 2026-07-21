@@ -3397,6 +3397,15 @@ wheels = [
 ]
 
 [[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260518"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/83/4a1afc3fbfcf5b8d46fc390cd95ed6b0dc9010a265f4e9f46314efffa37a/types_pyyaml-6.0.12.20260518.tar.gz", hash = "sha256:d917f83fb38462550338c1297faedd860b3ec83912b96b1e3d73255f7473e466", size = 17850 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/a2/c01db32be2ae7d6a1689972f3c492b149ee4e164b12fdfd9f64b50888215/types_pyyaml-6.0.12.20260518-py3-none-any.whl", hash = "sha256:d2150f75a231c9fe9c7463bd29487d93e60bac90400287351384bc2284eba7cd", size = 20312 },
+]
+
+[[package]]
 name = "typing-extensions"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3498,6 +3507,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-frontmatter" },
+    { name = "pyyaml" },
     { name = "rich" },
     { name = "scikit-learn" },
     { name = "watchdog" },
@@ -3514,6 +3524,7 @@ all = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "types-pyyaml" },
 ]
 dev = [
     { name = "mypy" },
@@ -3522,6 +3533,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "types-pyyaml" },
 ]
 mcp = [
     { name = "mcp" },
@@ -3553,10 +3565,12 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23,<1" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0,<6" },
     { name = "python-frontmatter", specifier = ">=1.1,<2" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "rich", specifier = ">=13.7,<14" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5,<1" },
     { name = "scikit-learn", specifier = ">=1.3,<2" },
     { name = "sentence-transformers", marker = "extra == 'reranker'", specifier = ">=3.0,<4" },
+    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0,<7" },
     { name = "vaultmind", extras = ["mcp", "whisper", "dev"], marker = "extra == 'all'" },
     { name = "watchdog", specifier = ">=4.0,<5" },
     { name = "youtube-transcript-api", specifier = ">=0.6,<1" },

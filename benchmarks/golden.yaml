@@ -1,0 +1,39 @@
+# VaultMind retrieval self-benchmark — golden question set.
+#
+# This is a STARTER TEMPLATE, not real data about any vault. Replace the
+# example entries below with questions authored against your own vault
+# before relying on `vaultmind bench` for regression gating.
+#
+# Schema (per entry):
+#   id:             stable unique identifier (string)
+#   question:       natural-language query, exactly as you'd type it to /recall
+#   answerable:     true  -> the vault contains a note that answers this question;
+#                            `expected_notes` must list at least one vault-relative
+#                            note path.
+#                    false -> no note in the vault answers this question; the
+#                            system is expected to retrieve nothing confidently
+#                            relevant (deterministic score-floor check) and, under
+#                            `--llm`, to decline rather than hallucinate an answer.
+#                            `expected_notes` must be empty.
+#   expected_notes: list of vault-relative note paths that correctly answer the
+#                   question (used for recall@k / MRR scoring). Empty for
+#                   `answerable: false` entries.
+#
+# Paths are relative to the configured vault root (`[vault].path`).
+
+version: 1
+questions:
+  - id: example-answerable-1
+    question: "What did I decide about the project X architecture?"
+    answerable: true
+    expected_notes:
+      - "02-projects/project-x-architecture-decision.md"
+  - id: example-answerable-2
+    question: "What is my morning routine?"
+    answerable: true
+    expected_notes:
+      - "01-inbox/morning-routine.md"
+  - id: example-unanswerable-1
+    question: "What is the boiling point of unobtainium?"
+    answerable: false
+    expected_notes: []
