@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vaultmind.bot.handlers import capture as capture_module
+from vaultmind.bot.handlers.autonomy import handle_autonomy_callback
 from vaultmind.bot.handlers.bookmark import LastExchange, handle_bookmark
 from vaultmind.bot.handlers.capture import handle_capture
 from vaultmind.bot.handlers.context import HandlerContext
-from vaultmind.bot.handlers.contradiction import handle_contradiction_callback
 from vaultmind.bot.handlers.daily import handle_daily
 from vaultmind.bot.handlers.delete import handle_delete, handle_delete_callback
 from vaultmind.bot.handlers.distill import handle_distill
@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from vaultmind.memory.procedural import ProceduralMemory
     from vaultmind.memory.store import EpisodeStore
     from vaultmind.pipeline.maturation import MaturationPipeline
+    from vaultmind.services.review_queue import ReviewQueue
     from vaultmind.vault.parser import VaultParser
 
 
@@ -83,6 +84,7 @@ class CommandHandlers:
         episode_store: EpisodeStore | None = None,
         procedural_memory: ProceduralMemory | None = None,
         gap_store: GapStore | None = None,
+        review_queue: ReviewQueue | None = None,
     ) -> None:
         self._ctx = HandlerContext(
             settings=settings,
@@ -95,6 +97,7 @@ class CommandHandlers:
             transcriber=transcriber,
             episode_store=episode_store,
             gap_store=gap_store,
+            review_queue=review_queue,
         )
         self._duplicate_detector = duplicate_detector
         self._note_suggester = note_suggester
@@ -103,6 +106,7 @@ class CommandHandlers:
         self._episode_store = episode_store
         self._procedural_memory = procedural_memory
         self._gap_store = gap_store
+        self._review_queue = review_queue
         self._pending_edits: dict[int, dict[str, str]] = {}
         self._search_sessions: dict[int, PaginatedSearch] = {}
         self._last_exchanges: dict[int, LastExchange] = {}
@@ -211,8 +215,8 @@ class CommandHandlers:
     async def handle_delete_callback(self, callback: CallbackQuery) -> None:
         await handle_delete_callback(self._ctx, callback)
 
-    async def handle_contradiction_callback(self, callback: CallbackQuery) -> None:
-        await handle_contradiction_callback(callback)
+    async def handle_autonomy_callback(self, callback: CallbackQuery) -> None:
+        await handle_autonomy_callback(self._ctx, callback)
 
     async def handle_edit(self, message: Message, args: str) -> None:
         await handle_edit(self._ctx, message, args, self._pending_edits)

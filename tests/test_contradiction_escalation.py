@@ -7,10 +7,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
-from vaultmind.bot.handlers.contradiction import (
-    build_escalation_notifier,
-    handle_contradiction_callback,
-)
 from vaultmind.bot.notifier import Notifier
 from vaultmind.contradiction.detector import ContradictionDetector
 from vaultmind.indexer.duplicate_detector import DuplicateMatch, MatchType
@@ -375,50 +371,6 @@ class TestAutoResolveEnabled:
         gap_store.close()
 
 
-# ---------------------------------------------------------------------------
-# bot/handlers/contradiction.py
-# ---------------------------------------------------------------------------
-
-
-class TestBuildEscalationNotifier:
-    async def test_sends_keyboard_with_acknowledge_button(self) -> None:
-        bot = AsyncMock()
-        notifier = Notifier(bot=bot, chat_id=12345)
-        send = build_escalation_notifier(notifier)
-
-        await send("Note A", "Note B", "different facts", "gap123")
-
-        bot.send_message.assert_called_once()
-        _, kwargs = bot.send_message.call_args
-        assert "Note A" in kwargs["text"]
-        assert "Note B" in kwargs["text"]
-        assert "different facts" in kwargs["text"]
-        keyboard = kwargs["reply_markup"]
-        button = keyboard.inline_keyboard[0][0]
-        assert button.callback_data == "contradiction_ack:gap123"
-
-    async def test_disabled_notifier_sends_nothing(self) -> None:
-        bot = AsyncMock()
-        notifier = Notifier(bot=bot, chat_id=0)
-        send = build_escalation_notifier(notifier)
-
-        await send("Note A", "Note B", "reason", "gap123")
-
-        bot.send_message.assert_not_called()
-
-
-class TestHandleContradictionCallback:
-    async def test_acknowledge_edits_message_and_answers(self) -> None:
-        callback = AsyncMock()
-        callback.data = "contradiction_ack:gap123"
-        callback.message = AsyncMock()
-
-        await handle_contradiction_callback(callback)
-
-        callback.message.edit_text.assert_called_once()
-        callback.answer.assert_called_once()
-
-
 class TestNotifierSendWithKeyboard:
     async def test_disabled_when_chat_id_zero(self) -> None:
         bot = AsyncMock()
@@ -458,7 +410,7 @@ class TestMintGapErrorHandling:
         await detector.on_note_changed(NoteCreatedEvent(path=tmp_path / "new.md", note=note))
 
         on_escalate.assert_called_once()
-        _, _, _, gap_id = on_escalate.call_args[0]
+        _, _, _, gap_id, _ = on_escalate.call_args[0]
         assert gap_id == ""
 
 
@@ -523,6 +475,8 @@ class TestReviewQueueIntegration:
         # Escalation still fires the existing Telegram notify + gap mint —
         # queue routing is additive, not a replacement for the notify path.
         on_escalate.assert_called_once()
+        called_proposal_id = on_escalate.call_args[0][4]
+        assert called_proposal_id == pending[0].proposal_id
         assert len(gap_store.list_open()) == 1
         gap_store.close()
 

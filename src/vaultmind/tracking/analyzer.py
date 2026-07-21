@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from vaultmind.tracking.preferences import InteractionType, PreferenceStore
+
+if TYPE_CHECKING:
+    from vaultmind.services.review_queue import ReviewQueue
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,11 +24,14 @@ class PreferenceInsights:
     suggestions_acceptance_rate: float
     active_hours: list[int]
     recommendations: list[str] = field(default_factory=list)
+    approval_fatigue_rate: float = 0.0
+    approval_fatigue_counts: dict[str, int] = field(default_factory=dict)
 
 
 def analyze_preferences(
     store: PreferenceStore,
     days: int = 30,
+    review_queue: ReviewQueue | None = None,
 ) -> PreferenceInsights:
     """Analyze user interaction patterns and generate insights."""
     since = datetime.now() - timedelta(days=days)
@@ -42,6 +49,20 @@ def analyze_preferences(
     rejected = counts.get(InteractionType.SUGGESTION_REJECTED, 0)
     suggestion_total = accepted + rejected
     acceptance_rate = accepted / suggestion_total if suggestion_total > 0 else 0.0
+
+    # Approval-fatigue metric (M7) — % of automated mutation proposals that
+    # reached a human (SKIM + BLOCK) rather than applying AUTO, mirroring
+    # Kosha's own autonomy-confidence evaluation.
+    approval_fatigue_rate = 0.0
+    approval_fatigue_counts: dict[str, int] = {}
+    if review_queue is not None:
+        stats = review_queue.fatigue_stats()
+        approval_fatigue_rate = stats.fatigue_rate
+        approval_fatigue_counts = {
+            "auto": stats.auto_count,
+            "skim": stats.skim_count,
+            "block": stats.block_count,
+        }
 
     # Generate recommendations
     recommendations = _generate_recommendations(
@@ -64,6 +85,8 @@ def analyze_preferences(
         suggestions_acceptance_rate=acceptance_rate,
         active_hours=active_hours,
         recommendations=recommendations,
+        approval_fatigue_rate=approval_fatigue_rate,
+        approval_fatigue_counts=approval_fatigue_counts,
     )
 
 
@@ -201,6 +224,19 @@ def generate_preference_report(insights: PreferenceInsights) -> str:
     if insights.suggestions_acceptance_rate > 0:
         pct = int(insights.suggestions_acceptance_rate * 100)
         lines.append(f"## Suggestion Acceptance Rate: {pct}%")
+        lines.append("")
+
+    # Approval fatigue (M7) — % of automated mutation proposals that reached
+    # a human (SKIM + BLOCK) rather than applying AUTO.
+    if insights.approval_fatigue_counts:
+        pct = int(insights.approval_fatigue_rate * 100)
+        lines.append(f"## Approval Fatigue: {pct}%")
+        lines.append("")
+        counts = insights.approval_fatigue_counts
+        lines.append(
+            f"{counts.get('auto', 0)} AUTO, {counts.get('skim', 0)} SKIM, "
+            f"{counts.get('block', 0)} BLOCK — {pct}% of proposals reached a human."
+        )
         lines.append("")
 
     # Recommendations

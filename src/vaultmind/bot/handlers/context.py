@@ -29,3 +29,4 @@ class HandlerContext:
     transcriber: Transcriber | None = field(default=None)
     episode_store: object | None = field(default=None)
     gap_store: object | None = field(default=None)
+    review_queue: object | None = field(default=None)
