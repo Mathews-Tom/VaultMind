@@ -499,6 +499,9 @@ def bot(ctx: click.Context) -> None:
         llm_client,
         session_store=session_store,
         graph_context_builder=graph_ctx,
+        vault_root=settings.vault.path,
+        parser=parser,
+        distill_config=settings.distill,
     )
 
     # Duplicate detection

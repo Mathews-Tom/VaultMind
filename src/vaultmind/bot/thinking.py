@@ -9,17 +9,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from vaultmind.llm.client import LLMError, Message
+from vaultmind.pipeline.distill import distill_conversation, extract_and_store_episodes
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from vaultmind.bot.session_store import SessionStore
-    from vaultmind.config import LLMConfig, TelegramConfig
+    from vaultmind.config import DistillConfig, LLMConfig, TelegramConfig
     from vaultmind.graph.context import GraphContextBuilder
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
     from vaultmind.llm.client import LLMClient
+    from vaultmind.vault.parser import VaultParser
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +93,9 @@ class ThinkingPartner:
         llm_client: LLMClient,
         session_store: SessionStore | None = None,
         graph_context_builder: GraphContextBuilder | None = None,
+        vault_root: Path | None = None,
+        parser: VaultParser | None = None,
+        distill_config: DistillConfig | None = None,
     ) -> None:
         self.llm_config = llm_config
         self._telegram_config = telegram_config
@@ -95,8 +103,13 @@ class ThinkingPartner:
         self._client = llm_client
         self._store = session_store
         self._graph_ctx = graph_context_builder
+        self._vault_root = vault_root
+        self._parser = parser
+        self._distill_config = distill_config
         # In-memory hot cache over SQLite
         self._sessions: dict[int, _ThinkingSession] = {}
+        # Sessions reaped by idle-timeout, awaiting distillation dispatch
+        self._pending_distill: list[tuple[int, _ThinkingSession]] = []
 
     async def think(
         self,
@@ -118,6 +131,7 @@ class ThinkingPartner:
 
         # Get or create session
         session = self._get_session(user_id)
+        self._trigger_pending_distillation(store, episode_store)
 
         # Retrieve vault context (offload sync I/O to thread pool)
         vault_context = await asyncio.to_thread(
@@ -487,6 +501,7 @@ class ThinkingPartner:
             uid for uid, s in self._sessions.items() if now - s.last_active > self.session_ttl
         ]
         for uid in expired:
+            self._pending_distill.append((uid, self._sessions[uid]))
             del self._sessions[uid]
 
         # Clean expired sessions from SQLite
@@ -521,6 +536,91 @@ class ThinkingPartner:
             self._store.delete(user_id)
         if self._graph_ctx is not None:
             self._graph_ctx.clear_session(str(user_id))
+
+    def _trigger_pending_distillation(
+        self, store: VaultStore, episode_store: object | None
+    ) -> None:
+        """Fire-and-forget distillation for sessions reaped by idle-timeout.
+
+        Drains the pending queue unconditionally (even when distillation is
+        disabled) so it never grows unbounded.
+        """
+        if not self._pending_distill:
+            return
+        pending, self._pending_distill = self._pending_distill, []
+        if self._distill_config is None or not self._distill_config.enabled:
+            return
+        for uid, session in pending:
+            if len(session.history) < self._distill_config.min_turns:
+                continue
+            asyncio.ensure_future(self._distill_and_index(uid, session, store, episode_store))
+
+    async def _distill_and_index(
+        self,
+        user_id: int,
+        session: _ThinkingSession,
+        store: VaultStore,
+        episode_store: object | None,
+    ) -> None:
+        """Distill one expired session into a qa-artifact note, then index it."""
+        config = self._distill_config
+        if config is None or self._vault_root is None or self._parser is None:
+            logger.warning(
+                "Distillation enabled but vault_root/parser not configured; skipping user %s",
+                user_id,
+            )
+            return
+
+        source_ref = f"telegram-thinking:{user_id}:{int(session.last_active)}"
+        occurred_at = datetime.fromtimestamp(session.last_active, tz=UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        model = config.model or self.llm_config.thinking_model
+
+        try:
+            result = await asyncio.to_thread(
+                distill_conversation,
+                session.history,
+                self._client,
+                model,
+                self._vault_root,
+                config.output_folder,
+                source_ref,
+                occurred_at,
+                config.max_tokens,
+            )
+        except Exception:
+            logger.exception("Distillation failed for user %s", user_id)
+            return
+
+        if not result.success:
+            logger.warning(
+                "Distillation produced no qa-artifact for user %s: %s", user_id, result.error
+            )
+            return
+
+        await asyncio.to_thread(
+            self._index_distilled_note, result.output_path, model, store, episode_store
+        )
+
+    def _index_distilled_note(
+        self,
+        output_path: str,
+        model: str,
+        store: VaultStore,
+        episode_store: object | None,
+    ) -> None:
+        """Parse, index, and run episodic extraction over a distilled note (thread-offloaded)."""
+        assert self._vault_root is not None
+        assert self._parser is not None
+        note = self._parser.parse_file(self._vault_root / output_path)
+        store.index_single_note(note, self._parser)
+
+        if episode_store is not None:
+            try:
+                extract_and_store_episodes(note, self._client, model, episode_store)
+            except Exception:
+                logger.exception("Episodic extraction failed for distilled note %s", output_path)
 
     def has_active_session(self, user_id: int) -> bool:
         """Check if a user has an active (non-expired) thinking session."""
