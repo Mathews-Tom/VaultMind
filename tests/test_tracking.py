@@ -145,3 +145,67 @@ class TestAnalyzer:
         report = generate_preference_report(insights)
         assert "# VaultMind Usage Insights" in report
         assert "0" in report
+
+
+class TestApprovalFatigueMetric:
+    def test_no_review_queue_leaves_metric_zeroed(self, store: PreferenceStore) -> None:
+        insights = analyze_preferences(store, days=30)
+        assert insights.approval_fatigue_rate == 0.0
+        assert insights.approval_fatigue_counts == {}
+
+    def test_metric_reflects_review_queue_fatigue_stats(
+        self, store: PreferenceStore, tmp_path: Path
+    ) -> None:
+        from vaultmind.services.review_queue import Impact, ProposalKind, ReviewQueue
+
+        queue = ReviewQueue(tmp_path / "queue.db")
+
+        def _apply(payload: dict[str, object]) -> str:
+            return "ok"
+
+        queue.register_applier(ProposalKind.TAG_APPLICATION, _apply)
+        queue.propose(
+            ProposalKind.TAG_APPLICATION,
+            confidence=1.0,
+            impact=Impact.LOW,
+            summary="auto",
+            payload={"note_path": "a.md", "tags": ["x"]},
+        )
+        queue.propose(
+            ProposalKind.TAG_VOCABULARY,
+            confidence=0.6,
+            impact=Impact.LOW,
+            summary="skim",
+            payload={"tag": "y"},
+        )
+
+        insights = analyze_preferences(store, days=30, review_queue=queue)
+        assert insights.approval_fatigue_rate == pytest.approx(0.5)
+        assert insights.approval_fatigue_counts == {"auto": 1, "skim": 1, "block": 0}
+
+    def test_report_includes_approval_fatigue_section(
+        self, store: PreferenceStore, tmp_path: Path
+    ) -> None:
+        from vaultmind.services.review_queue import Impact, Lane, ProposalKind, ReviewQueue
+
+        queue = ReviewQueue(tmp_path / "queue.db")
+        queue.propose(
+            ProposalKind.CONTRADICTION_ESCALATION,
+            confidence=0.0,
+            impact=Impact.HIGH,
+            summary="escalated",
+            payload={},
+            lane_override=Lane.BLOCK,
+        )
+
+        insights = analyze_preferences(store, days=30, review_queue=queue)
+        report = generate_preference_report(insights)
+        assert "Approval Fatigue" in report
+        assert "100%" in report
+
+    def test_report_omits_fatigue_section_without_review_queue(
+        self, store: PreferenceStore
+    ) -> None:
+        insights = analyze_preferences(store, days=30)
+        report = generate_preference_report(insights)
+        assert "Approval Fatigue" not in report

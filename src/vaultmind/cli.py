@@ -1515,8 +1515,9 @@ def learn(ctx: click.Context, days: int, save_report: bool) -> None:
         )
         return
 
+    review_queue = _build_review_queue(settings) if settings.autonomy.enabled else None
     store = PreferenceStore(db_path)
-    insights = analyze_preferences(store, days=days)
+    insights = analyze_preferences(store, days=days, review_queue=review_queue)
     report = generate_preference_report(insights)
 
     console.print(report)
