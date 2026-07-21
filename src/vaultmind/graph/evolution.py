@@ -34,6 +34,97 @@ class BeliefEvolution:
     evolution_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class LineageEdge:
+    """A recorded supersede event in a note's edit history (M9).
+
+    Decoupled from `EvolutionDetector`/`KnowledgeGraph`: this is a
+    note-level audit trail for bot-initiated destructive edits (delete,
+    edit), not an entity-graph signal, and must be recordable regardless
+    of whether belief-evolution scanning (`[evolution].enabled`) is on.
+    """
+
+    note_path: str
+    event: Literal["deleted", "edited"]
+    detail: str
+    recorded_at: datetime
+    edge_id: str
+
+
+class LineageStore:
+    """Persists `LineageEdge` rows for bot-initiated destructive edits.
+
+    One edge per superseded event (delete or edit), queryable per note via
+    `get_lineage()`. Uses the same JSON-persistence idiom as
+    `EvolutionDetector`'s dismissed-signal store, but as an ordered list
+    (not a set) since a note's edit history is ordered, not a membership
+    check.
+    """
+
+    def __init__(self, store_path: Path | None = None) -> None:
+        default_path = Path.home() / ".vaultmind" / "data" / "lineage.json"
+        self._store_path = store_path or default_path
+        self._edges: list[LineageEdge] = self._load()
+
+    def _load(self) -> list[LineageEdge]:
+        if not self._store_path.exists():
+            return []
+        data = json.loads(self._store_path.read_text())
+        return [
+            LineageEdge(
+                note_path=e["note_path"],
+                event=e["event"],
+                detail=e["detail"],
+                recorded_at=datetime.fromisoformat(e["recorded_at"]),
+                edge_id=e["edge_id"],
+            )
+            for e in data.get("edges", [])
+        ]
+
+    def _save(self) -> None:
+        self._store_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "edges": [
+                {
+                    "note_path": e.note_path,
+                    "event": e.event,
+                    "detail": e.detail,
+                    "recorded_at": e.recorded_at.isoformat(),
+                    "edge_id": e.edge_id,
+                }
+                for e in self._edges
+            ]
+        }
+        self._store_path.write_text(json.dumps(payload, indent=2))
+
+    def record(
+        self,
+        note_path: str,
+        event: Literal["deleted", "edited"],
+        detail: str,
+    ) -> LineageEdge:
+        """Record one supersede event for `note_path` and persist it."""
+        now = datetime.now(UTC)
+        raw = f"{note_path}:{event}:{detail}:{now.isoformat()}"
+        edge = LineageEdge(
+            note_path=note_path,
+            event=event,
+            detail=detail,
+            recorded_at=now,
+            edge_id=hashlib.sha256(raw.encode()).hexdigest()[:16],
+        )
+        self._edges.append(edge)
+        self._save()
+        return edge
+
+    def get_lineage(self, note_path: str) -> list[LineageEdge]:
+        """Return `note_path`'s supersede history, oldest event first."""
+        return sorted(
+            (e for e in self._edges if e.note_path == note_path),
+            key=lambda e: e.recorded_at,
+        )
+
+
 class EvolutionDetector:
     """Detects belief evolution signals from knowledge graph edge data.
 

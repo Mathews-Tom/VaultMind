@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import networkx as nx
 import pytest
 
-from vaultmind.graph.evolution import EvolutionDetector
+from vaultmind.graph.evolution import EvolutionDetector, LineageEdge, LineageStore
 from vaultmind.graph.knowledge_graph import KnowledgeGraph
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _add_edge(
@@ -362,3 +359,69 @@ class TestSeveritySorting:
         drift_signals = [s for s in signals if s.signal_type == "confidence_drift"]
         assert len(drift_signals) == 2
         assert drift_signals[0].severity >= drift_signals[1].severity
+
+
+class TestLineageStoreRecord:
+    def test_record_returns_lineage_edge(self, tmp_path: Path) -> None:
+        store = LineageStore(store_path=tmp_path / "lineage.json")
+
+        edge = store.record("00-inbox/note.md", "deleted", "Requested via /delete")
+
+        assert isinstance(edge, LineageEdge)
+        assert edge.note_path == "00-inbox/note.md"
+        assert edge.event == "deleted"
+        assert edge.detail == "Requested via /delete"
+
+    def test_record_persists_across_instances(self, tmp_path: Path) -> None:
+        path = tmp_path / "lineage.json"
+        store = LineageStore(store_path=path)
+        store.record("note.md", "edited", "Instruction: add a summary")
+
+        reloaded = LineageStore(store_path=path)
+
+        assert len(reloaded.get_lineage("note.md")) == 1
+        assert reloaded.get_lineage("note.md")[0].detail == "Instruction: add a summary"
+
+    def test_default_store_path_under_vaultmind_home(self) -> None:
+        store = LineageStore()
+
+        assert store._store_path == Path.home() / ".vaultmind" / "data" / "lineage.json"
+
+
+class TestLineageStoreGetLineage:
+    def test_returns_only_matching_note(self, tmp_path: Path) -> None:
+        store = LineageStore(store_path=tmp_path / "lineage.json")
+        store.record("a.md", "deleted", "delete a")
+        store.record("b.md", "edited", "edit b")
+
+        lineage = store.get_lineage("a.md")
+
+        assert len(lineage) == 1
+        assert lineage[0].note_path == "a.md"
+
+    def test_returns_oldest_first(self, tmp_path: Path) -> None:
+        store = LineageStore(store_path=tmp_path / "lineage.json")
+        store.record("a.md", "edited", "first edit")
+        store.record("a.md", "edited", "second edit")
+        store.record("a.md", "deleted", "then deleted")
+
+        lineage = store.get_lineage("a.md")
+
+        assert [e.detail for e in lineage] == ["first edit", "second edit", "then deleted"]
+
+    def test_unknown_note_returns_empty(self, tmp_path: Path) -> None:
+        store = LineageStore(store_path=tmp_path / "lineage.json")
+
+        assert store.get_lineage("never-recorded.md") == []
+
+
+class TestLineageStoreDecoupledFromGraph:
+    def test_constructs_without_knowledge_graph_or_evolution_detector(self, tmp_path: Path) -> None:
+        """Lineage recording must work even when belief-evolution scanning is
+        disabled (`[evolution].enabled = false`) — it is a safety/audit
+        invariant, not a feature of `EvolutionDetector`."""
+        store = LineageStore(store_path=tmp_path / "lineage.json")
+
+        edge = store.record("note.md", "deleted", "no graph required")
+
+        assert edge.edge_id
