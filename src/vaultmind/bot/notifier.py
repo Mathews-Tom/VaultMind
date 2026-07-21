@@ -13,6 +13,7 @@ from vaultmind.bot.handlers.utils import _split_message
 
 if TYPE_CHECKING:
     from aiogram import Bot
+    from aiogram.types import InlineKeyboardMarkup
 
 logger = logging.getLogger(__name__)
 
@@ -47,3 +48,22 @@ class Notifier:
         """Send only if text exceeds min_length (drop trivial messages)."""
         if len(text.strip()) >= min_length:
             await self.send(text)
+
+    async def send_with_keyboard(
+        self,
+        text: str,
+        keyboard: InlineKeyboardMarkup,
+        parse_mode: str | None = "Markdown",
+    ) -> None:
+        """Send a notification with an inline keyboard attached (not split)."""
+        if not self.enabled:
+            return
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=keyboard,
+            )
+        except Exception:
+            logger.exception("Failed to send notification with keyboard")
