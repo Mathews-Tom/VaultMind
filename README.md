@@ -4,13 +4,14 @@
 
 # VaultMind
 
-AI-powered personal knowledge management built on Obsidian.
-
 Turns your Obsidian vault into an intelligent second brain — hybrid search
 (vector + BM25), knowledge graph, Telegram bot with photo capture, AI thinking
 partner, Zettelkasten maturation pipeline, belief evolution tracking, episodic
 and procedural memory, MCP integration for connecting Claude and other
-agents directly to your notes, and compound loop engine for proactive insights.
+agents directly to your notes, compound loop engine for proactive insights,
+conversation distillation into structured Q&A notes, a knowledge gap ledger,
+contradiction detection with deterministic resolution, graduated autonomy
+review lanes, background source connectors, and non-destructive edit lineage.
 
 ## Why VaultMind?
 
@@ -26,6 +27,15 @@ agents directly to your notes, and compound loop engine for proactive insights.
 - **Episodic memory** — decision-outcome tracking with lessons learned and entity linking
 - **Procedural memory** — mines recurring decision patterns into reusable workflows (experimental)
 - **Compound loops** — scheduler accumulates state across runs, detects usage shifts, belief drift trends, and new workflow patterns; pushes insights to Telegram proactively
+- **Provenance-aware ranking** — notes carry a stamped `authority` (1-5) at creation; `/recall` reweights results by source trust, backfilling a neutral default for older notes
+- **Retrieval self-benchmark** — `vaultmind bench` scores recall@k/MRR (and optionally cite-or-decline accuracy) against a golden question set, gating ranking/detector changes before they ship
+- **Conversation distillation** — finished thinking-partner sessions and `/distill` requests become `qa-artifact` notes (question, resolution, systems, participants), indexed immediately and mined for episodic memory
+- **Knowledge gap ledger** — unanswered questions, weak-retrieval misses, and contradiction escalations are deduplicated into trackable gaps (`/gaps`), auto-staled, and closed by running `research` on them
+- **Contradiction detection** — new notes landing in the duplicate-detector's merge band are checked by an eval-gated LLM surface; conflicts resolve by temporal-then-authority-then-escalate policy and never edit or delete the losing note
+- **Graduated autonomy** — every automated mutation proposal (tags, merges, contradiction resolutions, maturation synthesis) routes through one AUTO/SKIM/BLOCK review queue with an approval-fatigue metric in `vaultmind learn`
+- **Source connectors** — scheduled `rss`, `youtube-channel`, and `github-activity` connectors ingest with durable cursors, run every item through distillation and the review queue, never bypassing governance
+- **Non-destructive edits** — bot-initiated `/delete`/`/edit` write a dated `> [!superseded]` callout and a lineage edge instead of deleting text, preserving full edit history in the note
+- **OKF export** — `vaultmind export-okf` exports permanent/concept notes as a conformant [OKF](https://github.com/Mathews-Tom/Kosha) bundle for governed serving from Kosha
 - **Note modes** — learning vs. operational mode with activation-based decay scoring
 - **Secure by default** — path traversal protection, input sanitization, injection detection on all vault operations
 - **Smart caching** — SQLite-backed embedding cache eliminates redundant API calls during re-indexing
@@ -173,6 +183,12 @@ The bot starts with watch mode enabled — vault changes are indexed incremental
 | `vaultmind stats --metadata-audit`   | Audit frontmatter completeness                                          |
 | `vaultmind mcp-serve`                | Start MCP server (default profile: researcher)                          |
 | `vaultmind mcp-serve --profile full` | Start MCP with full access                                              |
+| `vaultmind bench`                    | Score `/recall` against `benchmarks/golden.yaml` (`--llm` for cite-or-decline) |
+| `vaultmind eval contradict`          | Score the contradiction detector vs. an always-escalate baseline        |
+| `vaultmind source list`              | List configured connector instances and cursor state                    |
+| `vaultmind source status [name]`     | Show cursor state + recent run history                                  |
+| `vaultmind source run <name>`        | Run one connector instance once, outside the scheduler                  |
+| `vaultmind export-okf`               | Export permanent/concept notes as an OKF bundle for Kosha                |
 
 ## LLM Providers
 
@@ -229,7 +245,7 @@ Set `capture_all = true` in `[routing]` config to restore old behavior (all text
 | `/bookmark <title>`             | Save thinking session or last Q&A to vault                      |
 | `/suggest <note>`               | Find notes worth linking (composite scoring)                    |
 | `/duplicates <note>`            | Find duplicate/similar notes                                    |
-| `/review`                       | Weekly review with graph insights                               |
+| `/review`                       | Weekly review with graph insights + pending SKIM-lane approvals |
 | `/evolve`                       | Belief evolution signals (confidence drift, stale claims)       |
 | `/mature`                       | Zettelkasten maturation — clusters ready for synthesis          |
 | `/decide <decision>`            | Record a decision (creates pending episode)                     |
@@ -239,6 +255,8 @@ Set `capture_all = true` in `[routing]` config to restore old behavior (all text
 | `/workflow <id>`                | Show workflow steps and details                                 |
 | `/health`                       | System health check                                             |
 | `/stats`                        | Vault and graph statistics                                      |
+| `/distill`                      | Distill the current thinking session into a `qa-artifact` note  |
+| `/gaps`                         | List open knowledge gaps by age                                 |
 | Send voice message              | Transcribe via Whisper and route as capture or question         |
 | Send photo                      | Describe via vision model and capture as note with image embed  |
 
@@ -341,7 +359,7 @@ Layered config system:
 | Secrets   | `.env`                | API keys, bot token                               |
 | Overrides | Environment variables | `VAULTMIND_*` prefix overrides any setting        |
 
-Config sections: `[vault]`, `[llm]`, `[telegram]`, `[routing]`, `[embedding]`, `[chroma]`, `[graph]`, `[watch]`, `[duplicate_detection]`, `[note_suggestions]`, `[search]`, `[ranking]`, `[activation]`, `[maturation]`, `[evolution]`, `[digest]`, `[auto_tag]`, `[voice]`, `[ingest]`, `[research]`, `[tracking]`, `[image]`, `[episodic]`, `[procedural]`, `[mcp]`.
+Config sections: `[vault]`, `[llm]`, `[telegram]`, `[routing]`, `[embedding]`, `[chroma]`, `[graph]`, `[watch]`, `[duplicate_detection]`, `[note_suggestions]`, `[search]`, `[ranking]`, `[bench]`, `[activation]`, `[maturation]`, `[evolution]`, `[digest]`, `[auto_tag]`, `[voice]`, `[ingest]`, `[research]`, `[distill]`, `[tracking]`, `[image]`, `[episodic]`, `[gaps]`, `[contradiction]`, `[autonomy]`, `[sources]`, `[procedural]`, `[mcp]`.
 
 See [Configuration Reference](docs/configuration.md) for details on every section.
 

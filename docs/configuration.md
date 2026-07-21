@@ -244,11 +244,39 @@ Search pagination, session management, and hybrid retrieval.
 
 ## `[ranking]`
 
-Post-retrieval ranking with note-type multipliers, mode multipliers, activation scoring, and temporal decay.
+Post-retrieval ranking with note-type multipliers, mode multipliers, activation scoring, temporal decay, and source-authority weighting.
 
-| Key       | Type | Default | Description                   |
-| --------- | ---- | ------- | ----------------------------- |
-| `enabled` | bool | `true`  | Enable post-retrieval ranking |
+| Key                 | Type            | Default                                     | Description                                                              |
+| -------------------- | --------------- | -------------------------------------------- | ------------------------------------------------------------------------- |
+| `enabled`            | bool            | `true`                                       | Enable post-retrieval ranking                                            |
+| `authority_default`  | int             | `3`                                          | Neutral authority level applied to notes with no stamped `authority`      |
+| `authority_weight`   | table (int→float) | `{1:0.85, 2:0.92, 3:1.0, 4:1.08, 5:1.15}`   | Multiplier applied to `/recall`/`vaultmind bench` results by note `authority` (1-5, stamped at creation: authored=5, distilled=4, research=3, web clip=2, auto-ingested=1) |
+
+```toml
+[ranking.authority_weight]
+1 = 0.85
+2 = 0.92
+3 = 1.0
+4 = 1.08
+5 = 1.15
+```
+
+## `[bench]`
+
+Retrieval self-benchmark (`vaultmind bench`) — deterministic recall@k/MRR scoring of the live `/recall` path against a golden question set. See [`benchmarks/golden.yaml`](../benchmarks/golden.yaml) for the schema.
+
+| Key                         | Type   | Default                  | Description                                                     |
+| ---------------------------- | ------ | ------------------------- | ----------------------------------------------------------------- |
+| `enabled`                    | bool   | `true`                    | Enable the bench subsystem                                       |
+| `golden_path`                | string | `benchmarks/golden.yaml`  | Path to the golden question set                                  |
+| `k`                          | int    | `5`                       | Top-k for retrieval scoring                                      |
+| `score_floor`                | float  | `0.5`                     | Distance threshold above which a hit counts as "not confidently relevant" (also used by M5's gap-minting for weak-retrieval misses) |
+| `recall_at_k_threshold`      | float  | `0.8`                     | Minimum recall@k to pass                                         |
+| `mrr_threshold`              | float  | `0.6`                     | Minimum MRR to pass                                               |
+| `retrieval_decline_threshold`| float  | `0.8`                     | Minimum honest-decline accuracy for `answerable: false` questions |
+| `llm_decline_threshold`      | float  | `0.8`                     | Minimum `--llm` cite-or-decline accuracy                          |
+| `llm_model`                  | string | `""`                      | Model for `--llm` scoring (empty = `llm.fast_model`)              |
+| `trend_path`                 | string | `""`                      | JSONL trend record path (empty = `~/.vaultmind/data/bench/trend.jsonl`) |
 
 ## `[activation]`
 
@@ -358,6 +386,18 @@ Research pipeline settings (`vaultmind research` command).
 | `output_folder`    | string | `research` | Vault subfolder for research notes |
 | `youtube_language` | string | `en`       | Preferred transcript language      |
 
+## `[distill]`
+
+Conversation distillation — finished thinking-partner sessions and the manual `/distill` command become `qa-artifact` notes. **Disabled by default.**
+
+| Key             | Type   | Default        | Description                                                    |
+| ---------------- | ------ | -------------- | ---------------------------------------------------------------- |
+| `enabled`        | bool   | `false`        | Enable automatic session-end distillation (`/distill` always works) |
+| `min_turns`      | int    | `3`            | Minimum session turns before auto-distillation triggers          |
+| `model`          | string | `""`           | Model for distillation (empty = `llm.thinking_model`)            |
+| `output_folder`  | string | `qa-artifacts` | Vault subfolder for `qa-artifact` notes                          |
+| `max_tokens`     | int    | `800`          | Max tokens for the distillation LLM call                         |
+
 ## `[tracking]`
 
 User preference and usage tracking.
@@ -388,6 +428,53 @@ Episodic memory — decision-outcome tracking.
 | `db_path`          | string | `""`    | SQLite path (empty = `~/.vaultmind/data/episodes.db`) |
 | `auto_extract`     | bool   | `false` | LLM extraction of episodes from notes (opt-in)        |
 | `extraction_model` | string | `""`    | Model for extraction (empty = `llm.fast_model`)       |
+
+## `[gaps]`
+
+Knowledge gap ledger — unanswered questions, weak-retrieval misses, and contradiction escalations recorded as deduplicated, lifecycle-tracked gaps instead of discarded.
+
+| Key               | Type   | Default | Description                                                          |
+| ------------------ | ------ | ------- | ------------------------------------------------------------------ |
+| `enabled`          | bool   | `true`  | Enable the knowledge gap ledger                                    |
+| `db_path`          | string | `""`    | SQLite path (empty = `~/.vaultmind/data/gaps.db`)                  |
+| `stale_after_days` | int    | `30`    | Days an open gap sits untouched before auto-transitioning to `stale` |
+| `max_shown`        | int    | `10`    | Max gaps shown by `/gaps` and the digest gap section                |
+
+## `[contradiction]`
+
+Contradiction detection + deterministic resolution for notes landing in the duplicate-detector's 80-92% merge band. **Escalate-only by default** — flip `auto_resolve` only after `vaultmind eval contradict` shows the detector beating a trivial always-escalate baseline on your own vault (Kosha's own real-model Gate-0 run recorded contradiction routing accuracy 0.17 vs. a 1.00 prompt-only baseline).
+
+| Key                | Type   | Default                              | Description                                                  |
+| -------------------- | ------ | -------------------------------------- | ---------------------------------------------------------- |
+| `enabled`            | bool   | `true`                                 | Enable contradiction detection                             |
+| `auto_resolve`       | bool   | `false`                                | Apply the deterministic policy automatically instead of always escalating |
+| `detection_model`    | string | `""`                                    | Model for LLM conflict detection (empty = `llm.fast_model`) |
+| `max_tokens`         | int    | `300`                                   | Max tokens for the detection LLM call                       |
+| `eval_path`          | string | `benchmarks/contradict_eval.yaml`       | Labeled eval set for `vaultmind eval contradict`             |
+
+## `[autonomy]`
+
+Graduated autonomy review queue — every automated mutation proposal (tag application, duplicate-merge suggestion, contradiction resolution, maturation synthesis) routes through one `AUTO`/`SKIM`/`BLOCK` lane by confidence × impact. Thresholds mirror Kosha's own `AutonomyThresholds` defaults.
+
+| Key           | Type   | Default | Description                                                      |
+| -------------- | ------ | ------- | ------------------------------------------------------------------ |
+| `enabled`      | bool   | `true`  | Enable the review queue                                          |
+| `db_path`      | string | `""`    | SQLite path (empty = `~/.vaultmind/data/review_queue.db`)        |
+| `block_below`  | float  | `0.4`   | Confidence below this always routes to `BLOCK`                    |
+| `skim_below`   | float  | `0.9`   | Confidence below this (and impact not `HIGH`) routes to `SKIM`; at or above auto-applies |
+| `force_block`  | bool   | `false` | Force every proposal to `BLOCK`, bypassing confidence routing     |
+
+## `[sources]`
+
+Explicit-registry source connector framework (`rss`, `youtube-channel`, `github-activity`) with durable per-instance cursors. Per-instance connector definitions (name, kind, target, schedule, `enabled`) live in `config/sources.toml`, a separate file — see `vaultmind source list|status|run`.
+
+| Key           | Type   | Default                | Description                                             |
+| -------------- | ------ | ----------------------- | --------------------------------------------------------- |
+| `enabled`      | bool   | `true`                  | Global toggle for the source connector framework          |
+| `db_path`      | string | `""`                    | SQLite path (empty = `~/.vaultmind/data/sources.db`)      |
+| `config_path`  | string | `""`                    | Path to the instance-definition file (empty = `config/sources.toml`) |
+
+Every ingested item is stamped `authority=1` (auto-ingested tier), passed through M4-style distillation, evaluated by the existing dedup/contradiction event-bus path, and any auto-applying proposal still routes through `[autonomy]`'s review queue. Each connector instance defaults `enabled: false` in `config/sources.toml`.
 
 ## `[procedural]`
 
