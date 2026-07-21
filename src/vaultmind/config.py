@@ -435,6 +435,21 @@ class AutonomyConfig(BaseSettings):
     force_block: bool = False
 
 
+class SourcesConfig(BaseSettings):
+    """Source connector framework configuration (M8).
+
+    Per-instance connector config (`SourceInstance`: name, kind, target,
+    schedule) lives in `config/sources.toml`, not here — this is only the
+    global toggle + cursor-store path, matching `db_path`-only settings
+    like `GapConfig`/`AutonomyConfig` (no matching `config/default.toml`
+    section, per M5's own established precedent for these opt-in stores).
+    """
+
+    enabled: bool = True
+    db_path: str = ""  # Empty = default ~/.vaultmind/data/sources.db
+    config_path: str = ""  # Empty = default config/sources.toml
+
+
 class ConsolidationConfig(BaseSettings):
     """Memory consolidation pipeline configuration."""
 
@@ -564,6 +579,7 @@ class Settings(BaseSettings):
     gaps: GapConfig = Field(default_factory=GapConfig)
     contradiction: ContradictionConfig = Field(default_factory=ContradictionConfig)
     autonomy: AutonomyConfig = Field(default_factory=AutonomyConfig)
+    sources: SourcesConfig = Field(default_factory=SourcesConfig)
     procedural: ProceduralConfig = Field(default_factory=ProceduralConfig)
     consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
