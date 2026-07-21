@@ -30,3 +30,4 @@ class HandlerContext:
     episode_store: object | None = field(default=None)
     gap_store: object | None = field(default=None)
     review_queue: object | None = field(default=None)
+    lineage_store: object | None = field(default=None)

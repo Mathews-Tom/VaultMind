@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from vaultmind.bot.thinking import ThinkingPartner
     from vaultmind.bot.transcribe import Transcriber
     from vaultmind.config import Settings
-    from vaultmind.graph.evolution import EvolutionDetector
+    from vaultmind.graph.evolution import EvolutionDetector, LineageStore
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.duplicate_detector import DuplicateDetector
     from vaultmind.indexer.note_suggester import NoteSuggester
@@ -87,6 +87,7 @@ class CommandHandlers:
         gap_store: GapStore | None = None,
         review_queue: ReviewQueue | None = None,
         event_bus: VaultEventBus | None = None,
+        lineage_store: LineageStore | None = None,
     ) -> None:
         self._ctx = HandlerContext(
             settings=settings,
@@ -100,6 +101,7 @@ class CommandHandlers:
             episode_store=episode_store,
             gap_store=gap_store,
             review_queue=review_queue,
+            lineage_store=lineage_store,
         )
         self._duplicate_detector = duplicate_detector
         self._note_suggester = note_suggester

@@ -1,4 +1,12 @@
-"""Delete handler — note deletion with confirmation flow."""
+"""Delete handler — note deletion with confirmation flow.
+
+M9: a bot-initiated delete never removes a note's text. Confirming deletion
+writes a dated `> [!superseded]` callout in place of removal (the note's
+full prior content stays on disk, unchanged, underneath the callout) and
+drops the note from the vector store so it no longer surfaces via
+`/recall`. One `LineageEdge` is recorded per confirmed deletion, queryable
+via `ctx.lineage_store.get_lineage(note_path)`.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +15,8 @@ from typing import TYPE_CHECKING
 
 from vaultmind.bot.handlers.utils import _is_authorized, _resolve_note_path
 from vaultmind.bot.sanitize import sanitize_path
+from vaultmind.contradiction.marking import write_superseded_block
+from vaultmind.graph.evolution import LineageStore
 from vaultmind.vault.security import PathTraversalError, validate_vault_path
 
 if TYPE_CHECKING:
@@ -15,6 +25,12 @@ if TYPE_CHECKING:
     from vaultmind.bot.handlers.context import HandlerContext
 
 logger = logging.getLogger(__name__)
+
+# Sentinel frontmatter value marking a note as bot-deleted — a fixed
+# (non-dated) value so re-confirming delete on an already-superseded note
+# is idempotent, matching write_superseded_block()'s dedup contract.
+DELETE_MARKER = "bot:delete"
+DELETE_RATIONALE = "Requested via Telegram `/delete` — content preserved below."
 
 
 async def handle_delete(ctx: HandlerContext, message: Message, query: str) -> None:
@@ -62,7 +78,8 @@ async def handle_delete(ctx: HandlerContext, message: Message, query: str) -> No
     )
 
     await message.answer(
-        f"\u26a0\ufe0f **Delete note?**\n\n`{rel_path}`\n\n_{preview}_",
+        f"\u26a0\ufe0f **Delete note?** _(marks superseded \u2014 content is preserved)_"
+        f"\n\n`{rel_path}`\n\n_{preview}_",
         parse_mode="Markdown",
         reply_markup=keyboard,
     )
@@ -90,21 +107,41 @@ async def handle_delete_callback(ctx: HandlerContext, callback: CallbackQuery) -
 
         if not filepath.exists():
             await callback.message.edit_text(  # type: ignore[union-attr]
-                f"Note already removed: `{rel_path}`",
+                f"Note not found: `{rel_path}`",
                 parse_mode="Markdown",
             )
             await callback.answer()
             return
 
-        # Remove from vector store
+        written = write_superseded_block(
+            filepath,
+            callout_type="superseded",
+            title="Deleted via bot",
+            rationale=DELETE_RATIONALE,
+            frontmatter_key="superseded_at",
+            frontmatter_value=DELETE_MARKER,
+            dated=True,
+        )
+        if not written:
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"Note already superseded: `{rel_path}`",
+                parse_mode="Markdown",
+            )
+            await callback.answer()
+            return
+
+        # Drop from the vector store — superseded notes no longer surface
+        # via /recall, but the file (and its full prior content) stays.
         ctx.store.delete_note(rel_path)
 
-        # Delete file
-        filepath.unlink()
-        logger.info("Deleted note: %s", rel_path)
+        if isinstance(ctx.lineage_store, LineageStore):
+            ctx.lineage_store.record(rel_path, "deleted", DELETE_RATIONALE)
+
+        logger.info("Superseded (soft-deleted) note: %s", rel_path)
 
         await callback.message.edit_text(  # type: ignore[union-attr]
-            f"\U0001f5d1 Deleted: `{rel_path}`",
+            f"\U0001f5d1 Superseded (not deleted): `{rel_path}`\n\n"
+            "A dated callout marks this note as deleted; original text is preserved.",
             parse_mode="Markdown",
         )
         await callback.answer()
