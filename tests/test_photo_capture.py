@@ -201,6 +201,19 @@ class TestPhotoCreatesNoteWithEmbed:
         content = notes[0].read_text()
         assert "A cat on a keyboard." in content
 
+    def test_note_stamped_with_authority_5(self, tmp_path: Path) -> None:
+        """Photo capture is a manual/authored path — authority=5."""
+        ctx = _make_ctx(tmp_path)
+        message = _fake_message(tmp_path)
+
+        from vaultmind.bot.handlers.capture import handle_photo_capture
+
+        asyncio.run(handle_photo_capture(ctx, message))
+
+        inbox = tmp_path / "00-inbox"
+        content = next(inbox.glob("*.md")).read_text()
+        assert "authority: 5" in content
+
 
 class TestPhotoSavesOriginal:
     def test_image_file_written_when_save_originals_true(self, tmp_path: Path) -> None:

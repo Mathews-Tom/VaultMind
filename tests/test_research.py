@@ -3,12 +3,30 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from vaultmind.research.analyzer import _parse_analysis
+from vaultmind.research.pipeline import _create_source_note
 from vaultmind.research.searcher import SearchResult, _run_yt_search
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+class TestCreateSourceNote:
+    def test_stamps_authority_1_auto_ingested(self, tmp_path: Path) -> None:
+        note_path = _create_source_note(
+            title="A Video",
+            content="Transcript text.",
+            url="https://youtube.com/watch?v=abc",
+            query="test query",
+            output_dir=tmp_path,
+            vault_root=tmp_path,
+        )
+        assert "authority: 1" in note_path.read_text()
 
 
 class TestParseAnalysis:

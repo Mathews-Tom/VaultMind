@@ -108,3 +108,13 @@ class TestCreateVaultNote:
         note_path = create_vault_note(result, tmp_path, inbox_folder="new-inbox")
         assert (tmp_path / "new-inbox").is_dir()
         assert note_path.parent == tmp_path / "new-inbox"
+
+    def test_stamps_authority_2_web_clip(self, tmp_path: Path) -> None:
+        result = IngestResult(
+            source_type=SourceType.ARTICLE,
+            title="Article",
+            content="Content.",
+            url="https://example.com",
+        )
+        note_path = create_vault_note(result, tmp_path, inbox_folder="inbox")
+        assert "authority: 2" in note_path.read_text()

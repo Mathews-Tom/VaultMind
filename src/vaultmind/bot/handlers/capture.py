@@ -30,6 +30,7 @@ tags: [{tags}]
 created: {created}
 source: telegram
 status: active
+authority: 5
 ---
 
 {content}
@@ -130,6 +131,7 @@ tags: [capture, photo]
 created: {created}
 source: telegram-photo
 status: active
+authority: 5
 ---
 
 {embed}
