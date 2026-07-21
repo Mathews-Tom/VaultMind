@@ -1,0 +1,15 @@
+questions:
+  - id: answerable-1
+    question: "Where do I keep my morning routine notes?"
+    answerable: true
+    expected_notes:
+      - "01-inbox/morning-routine.md"
+  - id: answerable-2
+    question: "What did I decide about the deploy pipeline?"
+    answerable: true
+    expected_notes:
+      - "02-projects/deploy-pipeline-decision.md"
+  - id: unanswerable-1
+    question: "What is the boiling point of unobtainium?"
+    answerable: false
+    expected_notes: []

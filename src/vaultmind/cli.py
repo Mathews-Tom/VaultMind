@@ -7,6 +7,7 @@ Commands:
     vaultmind graph-build — Build/rebuild the knowledge graph
     vaultmind graph-report — Generate graph analytics report
     vaultmind stats       — Show vault statistics
+    vaultmind bench        — Score /recall against a golden question set
     vaultmind init        — Initialize vault structure
 """
 
@@ -1511,6 +1512,161 @@ def stats(ctx: click.Context, metadata_audit: bool) -> None:
 
         if audit_cache is not None:
             audit_cache.close()
+
+
+@cli.command()
+@click.option(
+    "--golden",
+    "golden_path",
+    type=click.Path(),
+    default=None,
+    help="Path to the golden question set (default: [bench].golden_path)",
+)
+@click.option(
+    "--k",
+    "k_override",
+    type=int,
+    default=None,
+    help="Override top-k for retrieval (default: [bench].k)",
+)
+@click.option(
+    "--bundle",
+    "bundle_dir",
+    type=click.Path(exists=True, file_okay=False),
+    default=None,
+    help=(
+        "Run against a deterministic fixture bundle directory "
+        "(golden.yaml + retrieval.yaml) instead of the live vault"
+    ),
+)
+@click.option(
+    "--llm",
+    "use_llm",
+    is_flag=True,
+    help="Additionally score cite-or-decline correctness via one LLM call per question",
+)
+@click.option(
+    "--trend-path",
+    "trend_path_override",
+    type=click.Path(),
+    default=None,
+    help="Override the JSONL trend record path (default: [bench].trend_path)",
+)
+@click.pass_context
+def bench(
+    ctx: click.Context,
+    golden_path: str | None,
+    k_override: int | None,
+    bundle_dir: str | None,
+    use_llm: bool,
+    trend_path_override: str | None,
+) -> None:
+    """Score the live /recall retrieval path against a golden question set.
+
+    Exits non-zero if any configured threshold is not met. By default
+    computes recall@k/MRR with zero LLM calls; pass --llm to additionally
+    score cite-or-decline correctness. Appends one JSONL trend record per run.
+    """
+    from vaultmind.bench.fixture_store import BundleError, load_bundle
+    from vaultmind.bench.golden import GoldenSetError, load_golden_set
+    from vaultmind.bench.runner import RetrievalStore, passes_thresholds, run_bench
+    from vaultmind.bench.trend import append_trend_record, build_trend_record, default_trend_path
+    from vaultmind.config import load_settings
+
+    settings = load_settings(ctx.obj.get("config_path"))
+    bench_cfg = settings.bench
+    hybrid_enabled = settings.search.hybrid_enabled
+
+    llm_model = ""
+    decline_scorer = None
+    if use_llm:
+        _require_llm_key(settings)
+        llm_client = _create_llm_client(settings)
+        llm_model = bench_cfg.llm_model or settings.llm.fast_model
+        from vaultmind.bench.llm_score import make_decline_scorer
+
+        decline_scorer = make_decline_scorer(llm_client, llm_model)
+
+    cache = None
+    store: RetrievalStore
+    try:
+        if bundle_dir is not None:
+            try:
+                loaded_bundle = load_bundle(Path(bundle_dir))
+            except BundleError as exc:
+                console.print(f"[red]\u2717[/red] {exc}")
+                sys.exit(1)
+            store = loaded_bundle.store
+            golden_file = Path(golden_path) if golden_path else loaded_bundle.golden_path
+        else:
+            from vaultmind.indexer import Embedder, VaultStore
+
+            is_openai = settings.embedding.provider == "openai"
+            api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
+            if not api_key:
+                console.print(
+                    "[red]\u2717[/red] Embedding API key not set."
+                    " Set VAULTMIND_OPENAI_API_KEY or VAULTMIND_VOYAGE_API_KEY."
+                )
+                sys.exit(1)
+            cache = _create_embedding_cache(settings)
+            bm25 = _create_bm25_index(settings)
+            embedder = Embedder(settings.embedding, api_key, cache=cache)
+            store = VaultStore(settings.chroma, embedder, bm25=bm25)
+            golden_file = Path(golden_path) if golden_path else Path(bench_cfg.golden_path)
+
+        try:
+            golden = load_golden_set(golden_file)
+        except GoldenSetError as exc:
+            console.print(f"[red]\u2717[/red] {exc}")
+            sys.exit(1)
+
+        k = k_override if k_override is not None else bench_cfg.k
+
+        with console.status("Running bench..."):
+            report = run_bench(
+                golden,
+                store,
+                k=k,
+                hybrid_enabled=hybrid_enabled,
+                score_floor=bench_cfg.score_floor,
+                decline_scorer=decline_scorer,
+            )
+
+        passed = passes_thresholds(
+            report,
+            recall_at_k_threshold=bench_cfg.recall_at_k_threshold,
+            mrr_threshold=bench_cfg.mrr_threshold,
+            retrieval_decline_threshold=bench_cfg.retrieval_decline_threshold,
+            llm_decline_threshold=bench_cfg.llm_decline_threshold if use_llm else None,
+        )
+
+        console.print(f"\n[bold]Bench results[/bold] (k={report.k})")
+        console.print(
+            f"  Questions: {report.n_answerable} answerable, {report.n_unanswerable} unanswerable"
+        )
+        console.print(f"  recall@{report.k}: {report.recall_at_k:.2f}  MRR: {report.mrr:.2f}")
+        if report.retrieval_decline_accuracy is not None:
+            console.print(f"  Retrieval decline accuracy: {report.retrieval_decline_accuracy:.2f}")
+        if report.llm_cite_or_decline_accuracy is not None:
+            console.print(
+                f"  LLM cite-or-decline accuracy: {report.llm_cite_or_decline_accuracy:.2f}"
+            )
+
+        trend_path = (
+            Path(trend_path_override)
+            if trend_path_override
+            else (Path(bench_cfg.trend_path) if bench_cfg.trend_path else default_trend_path())
+        )
+        append_trend_record(build_trend_record(report, passed), trend_path)
+
+        if not passed:
+            console.print("[red]\u2717[/red] Bench thresholds not met.")
+            sys.exit(1)
+        console.print("[green]\u2713[/green] Bench thresholds met.")
+    finally:
+        if cache is not None:
+            cache.close()
 
 
 if __name__ == "__main__":

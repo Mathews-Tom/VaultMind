@@ -253,6 +253,21 @@ class RankingConfig(BaseSettings):
         return self
 
 
+class BenchConfig(BaseSettings):
+    """Retrieval self-benchmark configuration (`vaultmind bench`)."""
+
+    enabled: bool = True
+    golden_path: str = "benchmarks/golden.yaml"
+    k: int = 5
+    score_floor: float = 0.5
+    recall_at_k_threshold: float = 0.8
+    mrr_threshold: float = 0.6
+    retrieval_decline_threshold: float = 0.8
+    llm_decline_threshold: float = 0.8
+    llm_model: str = ""  # Empty = use llm.fast_model
+    trend_path: str = ""  # Empty = default ~/.vaultmind/data/bench/trend.jsonl
+
+
 class EvolutionConfig(BaseSettings):
     """Belief evolution tracking configuration."""
 
@@ -480,6 +495,7 @@ class Settings(BaseSettings):
     note_suggestions: NoteSuggestionsConfig = Field(default_factory=NoteSuggestionsConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     ranking: RankingConfig = Field(default_factory=RankingConfig)
+    bench: BenchConfig = Field(default_factory=BenchConfig)
     evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
     maturation: MaturationConfig = Field(default_factory=MaturationConfig)
     digest: DigestConfig = Field(default_factory=DigestConfig)
