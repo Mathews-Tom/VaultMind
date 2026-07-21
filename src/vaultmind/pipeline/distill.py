@@ -75,11 +75,24 @@ def _format_conversation(turns: list[dict[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
-def _render_note(fm: dict[str, object], question: str, summary: str, resolution: str) -> str:
+def _render_note(
+    fm: dict[str, object],
+    question: str,
+    summary: str,
+    resolution: str,
+    systems: list[str],
+    participants: list[str],
+) -> str:
     body_parts = [f"# {question}", ""]
     if summary:
         body_parts += ["## Summary", "", summary, ""]
     body_parts += ["## Resolution", "", resolution or "_Unresolved._"]
+    if systems:
+        links = ", ".join(f"[[{s}]]" for s in systems)
+        body_parts += ["", "## Systems", "", links]
+    if participants:
+        links = ", ".join(f"[[{p}]]" for p in participants)
+        body_parts += ["", "## Participants", "", links]
     body = "\n".join(body_parts)
     post = frontmatter.Post(body, **fm)
     return str(frontmatter.dumps(post))
@@ -183,7 +196,7 @@ def distill_conversation(
         output_path = output_dir / filename
         counter += 1
 
-    content = _render_note(fm, question, summary, resolution)
+    content = _render_note(fm, question, summary, resolution, systems, participants)
     output_path.write_text(content, encoding="utf-8")
     rel_path = str(output_path.relative_to(vault_root))
     logger.info("Wrote qa-artifact note to %s", rel_path)
