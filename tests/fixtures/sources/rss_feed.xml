@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>VaultMind Fixture Feed</title>
+    <link>https://example.com/fixture-feed</link>
+    <description>Deterministic RSS fixture for tests/sources/ and manual CLI verification.</description>
+    <item>
+      <title>First fixture post</title>
+      <link>https://example.com/posts/first-fixture-post</link>
+      <guid>fixture-post-1</guid>
+      <pubDate>Mon, 01 Jun 2026 09:00:00 GMT</pubDate>
+      <description>The oldest fixture post — used to confirm cursor advancement skips it on rerun.</description>
+    </item>
+    <item>
+      <title>Second fixture post</title>
+      <link>https://example.com/posts/second-fixture-post</link>
+      <guid>fixture-post-2</guid>
+      <pubDate>Wed, 03 Jun 2026 09:00:00 GMT</pubDate>
+      <description>A middle fixture post about incremental indexing and durable cursors.</description>
+    </item>
+    <item>
+      <title>Third fixture post</title>
+      <link>https://example.com/posts/third-fixture-post</link>
+      <guid>fixture-post-3</guid>
+      <pubDate>Fri, 05 Jun 2026 09:00:00 GMT</pubDate>
+      <description>The newest fixture post — should always be ingested on a first run.</description>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,19 @@
+# VaultMind Source Connectors
+#
+# Explicit, closed-registry connector instances (rss | youtube-channel |
+# github-activity — no dynamic/plugin loading). Each `[[instance]]` runs
+# scheduled through `services/scheduler.py` while `vaultmind bot` is running,
+# or once via `vaultmind source run <name>`. `enabled = false` is the
+# rollback unit for a single instance — see DEVELOPMENT_PLAN.md M8 Risks.
+#
+# A local (non-network) fixture instance, kept disabled by default so
+# `vaultmind bot`'s scheduler never runs it unattended; `vaultmind source
+# run rss-fixture` still works with it explicitly named.
+
+[[instance]]
+name = "rss-fixture"
+kind = "rss"
+target = "tests/fixtures/sources/rss_feed.xml"
+enabled = false
+interval_hours = 24
+output_folder = "00-inbox/sources"
