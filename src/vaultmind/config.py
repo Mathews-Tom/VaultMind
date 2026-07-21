@@ -420,6 +420,21 @@ class ContradictionConfig(BaseSettings):
     eval_path: str = "benchmarks/contradict_eval.yaml"
 
 
+class AutonomyConfig(BaseSettings):
+    """Graduated autonomy review-queue configuration (M7).
+
+    Confidence cutoffs mirror Kosha's own `AutonomyThresholds` defaults
+    (`kosha/approve/autonomy.py`) — a proposal's confidence must clear
+    `skim_below` (and its impact must be `low`) to auto-apply.
+    """
+
+    enabled: bool = True
+    db_path: str = ""  # Empty = default ~/.vaultmind/data/review_queue.db
+    block_below: float = 0.4
+    skim_below: float = 0.9
+    force_block: bool = False
+
+
 class ConsolidationConfig(BaseSettings):
     """Memory consolidation pipeline configuration."""
 
@@ -548,6 +563,7 @@ class Settings(BaseSettings):
     episodic: EpisodicConfig = Field(default_factory=EpisodicConfig)
     gaps: GapConfig = Field(default_factory=GapConfig)
     contradiction: ContradictionConfig = Field(default_factory=ContradictionConfig)
+    autonomy: AutonomyConfig = Field(default_factory=AutonomyConfig)
     procedural: ProceduralConfig = Field(default_factory=ProceduralConfig)
     consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
