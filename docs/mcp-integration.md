@@ -270,6 +270,16 @@ List a folder's structured index: note titles and one-line descriptions, without
 
 **Returns:** `{folder, notes: [{path, title, description, note_type, tags}], count}`. `description` is the frontmatter `description` field if present, else the note's first non-heading body line.
 
+### `follow_links`
+
+Follow a note's wikilink neighborhood: outgoing `[[links]]` and incoming backlinks from other notes, without fetching note bodies. Backlinks are resolved from an on-demand reverse index built over the vault's `Note.wikilinks` (title-exact-match) — not the knowledge graph, which only carries note-linkage edges when the opt-in, LLM-driven `graph-build` has already run.
+
+**Parameters:**
+
+- `path` (string, required) — note path relative to vault root
+
+**Returns:** `{path, title, out_links: [{title, path}], backlinks: [{title, path}], out_link_count, backlink_count}`. An out-link's `path` is `null` when no note in the vault has a matching title.
+
 ## Profiles
 
 Profiles restrict what an agent can do. They control tool access, folder scope, and write permissions.
@@ -278,7 +288,7 @@ Profiles restrict what an agent can do. They control tool access, folder scope, 
 
 Read-only access for research and Q&A tasks.
 
-- **Tools:** `vault_search`, `vault_read`, `vault_list`, `graph_query`, `graph_path`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`, `list_folder_index`
+- **Tools:** `vault_search`, `vault_read`, `vault_list`, `graph_query`, `graph_path`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`, `list_folder_index`, `follow_links`
 - **Folders:** All
 - **Write:** No
 
@@ -286,7 +296,7 @@ Read-only access for research and Q&A tasks.
 
 Read/write access scoped to project planning.
 
-- **Tools:** All researcher tools + `vault_write`, `capture`, `capture_note`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`, `list_folder_index`
+- **Tools:** All researcher tools + `vault_write`, `capture`, `capture_note`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`, `list_folder_index`, `follow_links`
 - **Folders:** `02-projects`, `00-inbox`
 - **Write:** Yes (max 50KB per note)
 
