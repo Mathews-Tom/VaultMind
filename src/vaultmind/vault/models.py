@@ -23,6 +23,7 @@ class NoteType(StrEnum):
     PERSON = "person"
     CONCEPT = "concept"
     TEMPLATE = "template"
+    QA_ARTIFACT = "qa-artifact"
 
 
 class NoteMode(StrEnum):
