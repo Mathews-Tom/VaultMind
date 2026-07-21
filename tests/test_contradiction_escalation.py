@@ -98,6 +98,7 @@ def _make_detector(
     auto_resolve: bool = False,
     gap_store: GapStore | None = None,
     on_escalate: object = None,
+    review_queue: object = None,
 ) -> ContradictionDetector:
     candidate_path = tmp_path / match.match_path
     candidate_path.write_text("---\ntitle: Candidate\n---\n\ncandidate body\n", encoding="utf-8")
@@ -111,6 +112,7 @@ def _make_detector(
         FakeParser(candidate),
         gap_store=gap_store,
         on_escalate=on_escalate,
+        review_queue=review_queue,
     )
 
 
@@ -458,3 +460,82 @@ class TestMintGapErrorHandling:
         on_escalate.assert_called_once()
         _, _, _, gap_id = on_escalate.call_args[0]
         assert gap_id == ""
+
+
+# ---------------------------------------------------------------------------
+# Review queue integration (M7 PR-2) — routes resolution/escalation through
+# services.review_queue.ReviewQueue instead of applying/notifying directly.
+# ---------------------------------------------------------------------------
+
+
+class TestReviewQueueIntegration:
+    async def test_temporal_resolution_routes_through_queue_as_auto(self, tmp_path: Path) -> None:
+        from vaultmind.services.review_queue import Lane, ProposalKind, ProposalStatus, ReviewQueue
+
+        note = _note(modified=datetime(2026, 2, 1))  # more recent -> new wins
+        candidate = _note("candidate.md", "Candidate Note", modified=datetime(2026, 1, 1))
+        match = _match()
+        llm = _make_llm(True)
+        queue = ReviewQueue(tmp_path / "queue.db")
+        detector = _make_detector(
+            tmp_path, llm, candidate, match, auto_resolve=True, review_queue=queue
+        )
+
+        await detector.on_note_changed(NoteCreatedEvent(path=tmp_path / "new.md", note=note))
+
+        # AUTO-lane proposals apply immediately and leave nothing pending —
+        # inspect via a fresh query keyed by kind instead.
+        all_rows = queue._conn.execute("SELECT * FROM review_proposals").fetchall()
+        assert len(all_rows) == 1
+        assert all_rows[0]["kind"] == ProposalKind.CONTRADICTION_RESOLUTION.value
+        assert all_rows[0]["lane"] == Lane.AUTO.name
+        assert all_rows[0]["status"] == ProposalStatus.APPLIED.value
+
+        content = (tmp_path / "candidate.md").read_text(encoding="utf-8")
+        assert "contradicted_by" in content
+
+    async def test_escalation_routes_through_queue_as_block(self, tmp_path: Path) -> None:
+        from vaultmind.services.review_queue import Lane, ProposalKind, ReviewQueue
+
+        note = _note()
+        candidate = _note("candidate.md", "Candidate Note")
+        match = _match()
+        llm = _make_llm(True, reasoning="different facts")
+        gap_store = GapStore(tmp_path / "gaps.db")
+        on_escalate = AsyncMock()
+        queue = ReviewQueue(tmp_path / "queue.db")
+        detector = _make_detector(
+            tmp_path,
+            llm,
+            candidate,
+            match,
+            auto_resolve=False,
+            gap_store=gap_store,
+            on_escalate=on_escalate,
+            review_queue=queue,
+        )
+
+        await detector.on_note_changed(NoteCreatedEvent(path=tmp_path / "new.md", note=note))
+
+        pending = queue.list_pending(lane=Lane.BLOCK)
+        assert len(pending) == 1
+        assert pending[0].kind is ProposalKind.CONTRADICTION_ESCALATION
+        # Escalation still fires the existing Telegram notify + gap mint —
+        # queue routing is additive, not a replacement for the notify path.
+        on_escalate.assert_called_once()
+        assert len(gap_store.list_open()) == 1
+        gap_store.close()
+
+    async def test_without_review_queue_behavior_is_unchanged(self, tmp_path: Path) -> None:
+        """No `review_queue` passed (the default) -> identical to pre-M7
+        behavior: direct `mark_contradicted` / direct escalate notify."""
+        note = _note(modified=datetime(2026, 2, 1))
+        candidate = _note("candidate.md", "Candidate Note", modified=datetime(2026, 1, 1))
+        match = _match()
+        llm = _make_llm(True)
+        detector = _make_detector(tmp_path, llm, candidate, match, auto_resolve=True)
+
+        await detector.on_note_changed(NoteCreatedEvent(path=tmp_path / "new.md", note=note))
+
+        content = (tmp_path / "candidate.md").read_text(encoding="utf-8")
+        assert "contradicted_by" in content

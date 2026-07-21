@@ -43,6 +43,9 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from vaultmind.indexer.duplicate_detector import DuplicateMatch
+    from vaultmind.vault.models import Note
+
 logger = logging.getLogger(__name__)
 
 
@@ -240,6 +243,16 @@ class ReviewQueue:
         self._conn.commit()
         self._thresholds = thresholds
         self._appliers: dict[ProposalKind, Applier] = dict(appliers or {})
+
+    def register_applier(self, kind: ProposalKind, applier: Applier) -> None:
+        """Register (or replace) the applier for `kind` on this queue instance.
+
+        Lets independently-constructed subsystems (e.g. `ContradictionDetector`)
+        contribute their own applier to a shared `ReviewQueue` built elsewhere
+        (e.g. `cli.py`'s `bot` command), without the constructing call site
+        needing to know every downstream payload shape.
+        """
+        self._appliers[kind] = applier
 
     # ------------------------------------------------------------------
     # Proposal creation + routing
@@ -453,6 +466,76 @@ class ReviewQueue:
         self._conn.close()
 
 
+def migrate_quarantine(queue: ReviewQueue, quarantine_path: Path) -> int:
+    """One-time import of the retired `auto_tagger.py` tag-quarantine JSON.
+
+    Reads the old `{"approved": [...], "quarantined": [...]}` file, mints a
+    `TAG_VOCABULARY` SKIM proposal per pending (quarantined) tag so nothing
+    in flight is lost, then empties the file's `quarantined` list — leaving
+    it on disk, confirmed-empty, as a read-only historical artifact (the
+    `queue` is the sole approval mechanism for new tags going forward).
+    Returns the number of tags migrated. A no-op (returns 0) if the file
+    does not exist or has already been emptied.
+    """
+    if not quarantine_path.exists():
+        return 0
+
+    data = json.loads(quarantine_path.read_text())
+    pending = data.get("quarantined", [])
+    if not pending:
+        return 0
+
+    for tag in pending:
+        queue.propose(
+            ProposalKind.TAG_VOCABULARY,
+            confidence=0.6,
+            impact=Impact.LOW,
+            summary=f"New tag vocabulary: '{tag}' (migrated from tag quarantine)",
+            payload={"tag": tag},
+        )
+
+    data["quarantined"] = []
+    quarantine_path.write_text(json.dumps(data, indent=2))
+    return len(pending)
+
+
+def mint_duplicate_proposals(
+    queue: ReviewQueue,
+    note: Note,
+    matches: list[DuplicateMatch],
+) -> list[ReviewProposal]:
+    """Route a note's merge-band duplicate candidates into the queue.
+
+    `DUPLICATE_MERGE` has no registered applier — no note-merge execution
+    exists anywhere in VaultMind (`/duplicates`, `scan-duplicates`, and the
+    MCP `find_duplicates` tool are all read-only). Every candidate is fixed
+    at `SKIM` (never `BLOCK`): routing merge-band hits to an interrupting
+    Telegram push on every ordinary note edit would page the user for a
+    purely informational signal — a regression against the prior silent-cache
+    UX and directly counter to this milestone's own approval-fatigue goal.
+    """
+    from vaultmind.indexer.duplicate_detector import MatchType
+
+    proposals = []
+    for match in matches:
+        if match.match_type is not MatchType.MERGE:
+            continue
+        proposals.append(
+            queue.propose(
+                ProposalKind.DUPLICATE_MERGE,
+                confidence=match.similarity,
+                impact=Impact.MEDIUM,
+                summary=(
+                    f"Merge candidate: '{note.title}' ~ '{match.match_title}' "
+                    f"({match.similarity:.0%} similar)"
+                ),
+                payload={"source_path": str(note.path), "match_path": match.match_path},
+                lane_override=Lane.SKIM,
+            )
+        )
+    return proposals
+
+
 __all__ = [
     "DEFAULT_THRESHOLDS",
     "Applier",
@@ -464,5 +547,7 @@ __all__ = [
     "ProposalStatus",
     "ReviewProposal",
     "ReviewQueue",
+    "migrate_quarantine",
+    "mint_duplicate_proposals",
     "route",
 ]

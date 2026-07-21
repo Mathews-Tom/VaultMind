@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from vaultmind.contradiction.policy import ResolutionOutcome
     from vaultmind.indexer.duplicate_detector import DuplicateDetector, DuplicateMatch
     from vaultmind.llm.client import LLMClient
+    from vaultmind.services.review_queue import ReviewQueue
     from vaultmind.vault.events import NoteCreatedEvent, NoteModifiedEvent
     from vaultmind.vault.models import Note
     from vaultmind.vault.parser import VaultParser
@@ -58,6 +59,7 @@ class ContradictionDetector:
         ranking_config: RankingConfigLike | None = None,
         gap_store: object = None,
         on_escalate: EscalationCallback | None = None,
+        review_queue: ReviewQueue | None = None,
     ) -> None:
         self._config = config
         self._duplicate_detector = duplicate_detector
@@ -68,6 +70,27 @@ class ContradictionDetector:
         self._ranking_config = ranking_config
         self._gap_store = gap_store
         self._on_escalate = on_escalate
+        self._review_queue = review_queue
+        if review_queue is not None:
+            from vaultmind.services.review_queue import ProposalKind
+
+            review_queue.register_applier(
+                ProposalKind.CONTRADICTION_RESOLUTION, self._resolution_applier
+            )
+
+    def _resolution_applier(self, payload: dict[str, Any]) -> str:
+        """Sync applier registered onto `review_queue` for
+        `CONTRADICTION_RESOLUTION` proposals — invoked by the queue's own
+        `_apply()`, on a worker thread via `asyncio.to_thread`."""
+        from pathlib import Path as _Path
+
+        mark_contradicted(
+            _Path(str(payload["loser_path"])),
+            str(payload["winner_path"]),
+            str(payload["winner_title"]),
+            str(payload["rationale"]),
+        )
+        return f"marked {payload['loser_path']} contradicted by {payload['winner_path']}"
 
     async def on_note_changed(self, event: NoteCreatedEvent | NoteModifiedEvent) -> None:
         """Event bus callback — checks the note's merge-band candidates for conflict."""
@@ -132,14 +155,54 @@ class ContradictionDetector:
             winner_title, winner_rel = match.match_title, match.match_path
             loser_path, loser_rel = self._vault_root / note.path, str(note.path)
 
+        if self._review_queue is None:
+            try:
+                await asyncio.to_thread(
+                    mark_contradicted, loser_path, winner_rel, winner_title, outcome.rationale
+                )
+            except Exception:
+                logger.exception("Failed to mark %s as contradicted by %s", loser_rel, winner_rel)
+            return
+
+        from vaultmind.services.review_queue import Impact, ProposalKind
+
+        payload = {
+            "loser_path": str(loser_path),
+            "winner_path": winner_rel,
+            "winner_title": winner_title,
+            "rationale": outcome.rationale,
+        }
         try:
             await asyncio.to_thread(
-                mark_contradicted, loser_path, winner_rel, winner_title, outcome.rationale
+                self._review_queue.propose,
+                ProposalKind.CONTRADICTION_RESOLUTION,
+                1.0,
+                Impact.LOW,
+                f"Mark '{loser_rel}' contradicted by '{winner_rel}'",
+                payload,
             )
         except Exception:
             logger.exception("Failed to mark %s as contradicted by %s", loser_rel, winner_rel)
 
     async def _escalate(self, note: Note, candidate: Note, rationale: str) -> None:
+        if self._review_queue is not None:
+            from vaultmind.services.review_queue import Impact, Lane, ProposalKind
+
+            try:
+                await asyncio.to_thread(
+                    self._review_queue.propose,
+                    ProposalKind.CONTRADICTION_ESCALATION,
+                    0.0,
+                    Impact.HIGH,
+                    f"Contradiction escalated: '{note.title}' vs '{candidate.title}'",
+                    {"note_path": str(note.path), "candidate_path": str(candidate.path)},
+                    lane_override=Lane.BLOCK,
+                )
+            except Exception:
+                logger.exception(
+                    "Escalation queue-proposal failed for %s vs %s", note.title, candidate.title
+                )
+
         gap_id = self._mint_gap(note, candidate)
         if self._on_escalate is not None:
             try:
