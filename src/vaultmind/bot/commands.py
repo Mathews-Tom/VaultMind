@@ -8,6 +8,7 @@ from vaultmind.bot.handlers import capture as capture_module
 from vaultmind.bot.handlers.bookmark import LastExchange, handle_bookmark
 from vaultmind.bot.handlers.capture import handle_capture
 from vaultmind.bot.handlers.context import HandlerContext
+from vaultmind.bot.handlers.contradiction import handle_contradiction_callback
 from vaultmind.bot.handlers.daily import handle_daily
 from vaultmind.bot.handlers.delete import handle_delete, handle_delete_callback
 from vaultmind.bot.handlers.distill import handle_distill
@@ -209,6 +210,9 @@ class CommandHandlers:
 
     async def handle_delete_callback(self, callback: CallbackQuery) -> None:
         await handle_delete_callback(self._ctx, callback)
+
+    async def handle_contradiction_callback(self, callback: CallbackQuery) -> None:
+        await handle_contradiction_callback(callback)
 
     async def handle_edit(self, message: Message, args: str) -> None:
         await handle_edit(self._ctx, message, args, self._pending_edits)

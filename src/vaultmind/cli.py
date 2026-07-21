@@ -642,6 +642,37 @@ def bot(ctx: click.Context) -> None:
     tg_bot, dp = create_bot(settings.telegram.bot_token)
     register_handlers(handlers)
 
+    # Proactive notifier — hoisted here (not gated on maturation) so
+    # contradiction escalation can notify regardless of maturation config.
+    from vaultmind.bot.notifier import Notifier
+
+    notifier: Notifier | None = None
+    if settings.telegram.notification_chat_id:
+        notifier = Notifier(bot=tg_bot, chat_id=settings.telegram.notification_chat_id)
+
+    # Contradiction detection
+    from vaultmind.contradiction.detector import ContradictionDetector
+
+    contradiction_detector: ContradictionDetector | None = None
+    if settings.contradiction.enabled and detector is not None:
+        on_escalate = None
+        if notifier is not None:
+            from vaultmind.bot.handlers.contradiction import build_escalation_notifier
+
+            on_escalate = build_escalation_notifier(notifier)
+        contradiction_model = settings.contradiction.detection_model or settings.llm.fast_model
+        contradiction_detector = ContradictionDetector(
+            settings.contradiction,
+            detector,
+            llm_client,
+            contradiction_model,
+            settings.vault.path,
+            parser,
+            ranking_config=settings.ranking,
+            gap_store=gap_store,
+            on_escalate=on_escalate,
+        )
+
     # Wire up incremental watch mode
     from vaultmind.graph.maintenance import GraphMaintainer
     from vaultmind.vault.events import (
@@ -663,6 +694,15 @@ def bot(ctx: click.Context) -> None:
     if suggester is not None:
         event_bus.subscribe(NoteCreatedEvent, suggester.on_note_changed)  # type: ignore[arg-type]
         event_bus.subscribe(NoteModifiedEvent, suggester.on_note_changed)  # type: ignore[arg-type]
+    if contradiction_detector is not None:
+        event_bus.subscribe(
+            NoteCreatedEvent,
+            contradiction_detector.on_note_changed,  # type: ignore[arg-type]
+        )
+        event_bus.subscribe(
+            NoteModifiedEvent,
+            contradiction_detector.on_note_changed,  # type: ignore[arg-type]
+        )
 
     # Subscribe graph maintenance to note deletion events
     maintainer = GraphMaintainer(graph)
@@ -709,17 +749,8 @@ def bot(ctx: click.Context) -> None:
             else Path.home() / ".vaultmind" / "data" / "scheduler_state.json"
         )
 
-        # Proactive notifier
-        from vaultmind.bot.notifier import Notifier
-
-        notifier: Notifier | None = None
-        if settings.telegram.notification_chat_id:
-            notifier = Notifier(
-                bot=tg_bot,
-                chat_id=settings.telegram.notification_chat_id,
-            )
-
-        # Compound loop jobs
+        # Compound loop jobs (notifier used below was constructed above,
+        # hoisted out of this block so contradiction escalation can use it too)
         jobs: list[ScheduledJob] = [maturation_job]
 
         if settings.loops.insight_enabled and preference_store is not None:
