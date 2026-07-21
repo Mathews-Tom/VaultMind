@@ -448,3 +448,140 @@ class TestMintDuplicateProposals:
         result = queue.approve(proposals[0].proposal_id)
         assert result is not None
         assert result.status is ProposalStatus.ACKNOWLEDGED
+
+
+# ---------------------------------------------------------------------------
+# DigestGenerator SKIM-lane section (PR-3)
+# ---------------------------------------------------------------------------
+
+
+class _FakeDigestStore:
+    def search(
+        self, query: str, n_results: int = 5, where: dict[str, str] | None = None
+    ) -> list[dict[str, str]]:
+        return []
+
+
+class _FakeDigestGraph:
+    def __init__(self) -> None:
+        import networkx as nx
+
+        self._graph = nx.DiGraph()
+
+    @property
+    def stats(self) -> dict[str, int]:
+        return {"nodes": 0, "edges": 0}
+
+
+class _FakeDigestParser:
+    def iter_notes(self) -> list[Note]:
+        return []
+
+
+class _FakeDigestConfig:
+    period_days = 7
+    max_trending = 10
+    max_suggestions = 5
+    connection_threshold_low = 0.70
+    connection_threshold_high = 0.85
+    inbox_folder = "00-inbox"
+    inbox_age_warning_days = 7
+    max_inbox_shown = 10
+
+
+class TestDigestReviewQueueLifecycle:
+    def test_report_carries_skim_pending_count_and_summaries(self, tmp_path: Path) -> None:
+        from vaultmind.indexer.digest import DigestGenerator
+
+        queue = ReviewQueue(tmp_path / "queue.db")
+        queue.propose(
+            ProposalKind.DUPLICATE_MERGE,
+            confidence=0.85,
+            impact=Impact.MEDIUM,
+            summary="Merge candidate: 'A' ~ 'B' (85% similar)",
+            payload={"source_path": "a.md", "match_path": "b.md"},
+        )
+        generator = DigestGenerator(
+            store=_FakeDigestStore(),
+            graph=_FakeDigestGraph(),
+            parser=_FakeDigestParser(),
+            config=_FakeDigestConfig(),
+            review_queue=queue,
+        )
+        report = generator.generate()
+        assert report.skim_pending_count == 1
+        assert "Merge candidate" in report.skim_pending[0]
+
+    def test_telegram_format_includes_pending_review_section(self, tmp_path: Path) -> None:
+        from vaultmind.indexer.digest import DigestGenerator
+
+        queue = ReviewQueue(tmp_path / "queue.db")
+        queue.propose(
+            ProposalKind.DUPLICATE_MERGE,
+            confidence=0.85,
+            impact=Impact.MEDIUM,
+            summary="Merge candidate: 'A' ~ 'B'",
+            payload={"source_path": "a.md", "match_path": "b.md"},
+        )
+        generator = DigestGenerator(
+            store=_FakeDigestStore(),
+            graph=_FakeDigestGraph(),
+            parser=_FakeDigestParser(),
+            config=_FakeDigestConfig(),
+            review_queue=queue,
+        )
+        report = generator.generate()
+        text = generator.format_telegram(report)
+        assert "Pending Review" in text
+        assert "1 SKIM item" in text
+
+    def test_markdown_format_includes_pending_review_section(self, tmp_path: Path) -> None:
+        from vaultmind.indexer.digest import DigestGenerator
+
+        queue = ReviewQueue(tmp_path / "queue.db")
+        queue.propose(
+            ProposalKind.DUPLICATE_MERGE,
+            confidence=0.85,
+            impact=Impact.MEDIUM,
+            summary="Merge candidate: 'A' ~ 'B'",
+            payload={"source_path": "a.md", "match_path": "b.md"},
+        )
+        generator = DigestGenerator(
+            store=_FakeDigestStore(),
+            graph=_FakeDigestGraph(),
+            parser=_FakeDigestParser(),
+            config=_FakeDigestConfig(),
+            review_queue=queue,
+        )
+        report = generator.generate()
+        text = generator._format_markdown(report)
+        assert "## Pending Review" in text
+        assert "Merge candidate" in text
+
+    def test_no_review_queue_leaves_report_zeroed(self) -> None:
+        from vaultmind.indexer.digest import DigestGenerator
+
+        generator = DigestGenerator(
+            store=_FakeDigestStore(),
+            graph=_FakeDigestGraph(),
+            parser=_FakeDigestParser(),
+            config=_FakeDigestConfig(),
+        )
+        report = generator.generate()
+        assert report.skim_pending_count == 0
+        assert report.skim_pending == []
+
+    def test_no_pending_skim_items_omits_section_from_telegram(self, tmp_path: Path) -> None:
+        from vaultmind.indexer.digest import DigestGenerator
+
+        queue = ReviewQueue(tmp_path / "queue.db")
+        generator = DigestGenerator(
+            store=_FakeDigestStore(),
+            graph=_FakeDigestGraph(),
+            parser=_FakeDigestParser(),
+            config=_FakeDigestConfig(),
+            review_queue=queue,
+        )
+        report = generator.generate()
+        text = generator.format_telegram(report)
+        assert "Pending Review" not in text

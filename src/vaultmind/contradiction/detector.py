@@ -35,8 +35,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# (note_a_title, note_b_title, rationale, gap_id) -> None
-type EscalationCallback = Callable[[str, str, str, str], Any]
+# (note_a_title, note_b_title, rationale, gap_id, proposal_id) -> None
+type EscalationCallback = Callable[[str, str, str, str, str], Any]
 
 
 class RankingConfigLike(Protocol):
@@ -185,11 +185,12 @@ class ContradictionDetector:
             logger.exception("Failed to mark %s as contradicted by %s", loser_rel, winner_rel)
 
     async def _escalate(self, note: Note, candidate: Note, rationale: str) -> None:
+        proposal_id = ""
         if self._review_queue is not None:
             from vaultmind.services.review_queue import Impact, Lane, ProposalKind
 
             try:
-                await asyncio.to_thread(
+                proposal = await asyncio.to_thread(
                     self._review_queue.propose,
                     ProposalKind.CONTRADICTION_ESCALATION,
                     0.0,
@@ -198,6 +199,7 @@ class ContradictionDetector:
                     {"note_path": str(note.path), "candidate_path": str(candidate.path)},
                     lane_override=Lane.BLOCK,
                 )
+                proposal_id = proposal.proposal_id
             except Exception:
                 logger.exception(
                     "Escalation queue-proposal failed for %s vs %s", note.title, candidate.title
@@ -206,7 +208,7 @@ class ContradictionDetector:
         gap_id = self._mint_gap(note, candidate)
         if self._on_escalate is not None:
             try:
-                await self._on_escalate(note.title, candidate.title, rationale, gap_id)
+                await self._on_escalate(note.title, candidate.title, rationale, gap_id, proposal_id)
             except Exception:
                 logger.exception(
                     "Escalation notification failed for %s vs %s", note.title, candidate.title

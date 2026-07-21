@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
     from vaultmind.memory.gaps import GapStore
+    from vaultmind.services.review_queue import ReviewQueue
     from vaultmind.vault.models import Note
     from vaultmind.vault.parser import VaultParser
 
@@ -70,6 +71,8 @@ class DigestReport:
     open_gap_count: int = 0
     oldest_gap_question: str = ""
     oldest_gap_age_days: int = 0
+    skim_pending: list[str] = field(default_factory=list)
+    skim_pending_count: int = 0
 
 
 class DigestGenerator:
@@ -85,12 +88,14 @@ class DigestGenerator:
         parser: VaultParser,
         config: DigestConfig,
         gap_store: GapStore | None = None,
+        review_queue: ReviewQueue | None = None,
     ) -> None:
         self._store = store
         self._graph = graph
         self._parser = parser
         self._config = config
         self._gap_store = gap_store
+        self._review_queue = review_queue
 
     # ------------------------------------------------------------------
     # Public API
@@ -142,6 +147,15 @@ class DigestGenerator:
                 oldest_gap_question = oldest_gap.question
                 oldest_gap_age_days = (datetime.now() - oldest_gap.created).days
 
+        # Pending SKIM-lane review-queue proposals — display-only, batched
+        # here for a human's next unhurried pass; interactive one-tap
+        # approve-all lives on the bot's /review command.
+        skim_pending: list[str] = []
+        if self._review_queue is not None:
+            from vaultmind.services.review_queue import Lane
+
+            skim_pending = [p.summary for p in self._review_queue.list_pending(lane=Lane.SKIM)]
+
         graph_stats = self._graph.stats
 
         return DigestReport(
@@ -161,6 +175,8 @@ class DigestGenerator:
             open_gap_count=open_gap_count,
             oldest_gap_question=oldest_gap_question,
             oldest_gap_age_days=oldest_gap_age_days,
+            skim_pending=skim_pending,
+            skim_pending_count=len(skim_pending),
         )
 
     def format_telegram(self, report: DigestReport) -> str:
@@ -175,6 +191,7 @@ class DigestGenerator:
             and not report.orphan_notes
             and not report.inbox_count
             and not report.open_gap_count
+            and not report.skim_pending_count
         ):
             return (
                 f"<b>📊 Daily Digest — {date_str}</b>\n\n"
@@ -238,6 +255,15 @@ class DigestGenerator:
             if report.oldest_gap_question:
                 question = html.escape(report.oldest_gap_question)
                 lines.append(f"• Oldest: {question} ({report.oldest_gap_age_days} days)")
+
+        # Pending review (SKIM lane) — batched autonomy proposals, one-tap
+        # approve-all via the bot's /review command.
+        if report.skim_pending_count:
+            lines.append("")
+            lines.append("<b>\U0001f4e5 Pending Review</b>")
+            lines.append(f"• {report.skim_pending_count} SKIM item(s) — see /review")
+            for summary in report.skim_pending[:5]:
+                lines.append(f"• {html.escape(summary)}")
 
         # Footer
         lines.append("")
@@ -541,6 +567,16 @@ class DigestGenerator:
                     f" ({report.oldest_gap_age_days} days)"
                 )
                 lines.append("")
+
+        # Pending review (SKIM lane)
+        if report.skim_pending_count:
+            lines.append("## Pending Review")
+            lines.append("")
+            lines.append(f"**{report.skim_pending_count} SKIM item(s)** — see `/review`")
+            lines.append("")
+            for summary in report.skim_pending:
+                lines.append(f"- {summary}")
+            lines.append("")
 
         # Stats footer
         lines.append("---")

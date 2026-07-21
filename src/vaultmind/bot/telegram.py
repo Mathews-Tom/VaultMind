@@ -309,6 +309,6 @@ def register_handlers(handlers: CommandHandlers) -> None:
     async def callback_recall_page(callback: CallbackQuery) -> None:
         await handlers.handle_recall_page_callback(callback)
 
-    @router.callback_query(F.data.startswith("contradiction_"))
-    async def callback_contradiction(callback: CallbackQuery) -> None:
-        await handlers.handle_contradiction_callback(callback)
+    @router.callback_query(F.data.startswith("autonomy_"))
+    async def callback_autonomy(callback: CallbackQuery) -> None:
+        await handlers.handle_autonomy_callback(callback)

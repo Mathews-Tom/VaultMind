@@ -1,4 +1,4 @@
-"""Review handler — weekly review prompts with graph insights."""
+"""Review handler — weekly review prompts + pending SKIM-lane autonomy items."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ if TYPE_CHECKING:
 
 
 async def handle_review(ctx: HandlerContext, message: Message) -> None:
-    """Generate weekly review prompts with context from vault."""
+    """Generate weekly review prompts with context from vault, plus any
+    pending SKIM-lane review-queue items awaiting a batched human pass."""
     if not _is_authorized(ctx, message):
         return
 
@@ -44,4 +45,30 @@ async def handle_review(ctx: HandlerContext, message: Message) -> None:
             review.append(f"  \u2022 {o.get('label', o.get('id', 'unknown'))}")
         review.append("")
 
-    await message.answer("\n".join(review), parse_mode="Markdown")
+    keyboard = None
+    from vaultmind.services.review_queue import Lane, ReviewQueue
+
+    if isinstance(ctx.review_queue, ReviewQueue):
+        pending = ctx.review_queue.list_pending(lane=Lane.SKIM)
+        if pending:
+            review.append(f"**\U0001f4e5 Pending Review** ({len(pending)} SKIM item(s)):")
+            for p in pending[:10]:
+                review.append(f"  \u2022 {p.summary}")
+            if len(pending) > 10:
+                review.append(f"  \u2026 and {len(pending) - 10} more")
+            review.append("")
+
+            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"Approve all {len(pending)} SKIM item(s)",
+                            callback_data="autonomy_approve_all_skim",
+                        )
+                    ]
+                ]
+            )
+
+    await message.answer("\n".join(review), parse_mode="Markdown", reply_markup=keyboard)

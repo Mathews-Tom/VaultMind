@@ -340,8 +340,15 @@ def digest(ctx: click.Context, days: int | None, save: bool | None) -> None:
         )
         gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
 
+    review_queue = _build_review_queue(settings) if settings.autonomy.enabled else None
+
     generator = DigestGenerator(
-        store=store, graph=graph, parser=parser, config=digest_config, gap_store=gap_store
+        store=store,
+        graph=graph,
+        parser=parser,
+        config=digest_config,
+        gap_store=gap_store,
+        review_queue=review_queue,
     )
 
     with console.status("Generating digest..."):
@@ -396,6 +403,12 @@ def digest(ctx: click.Context, days: int | None, save: bool | None) -> None:
             console.print(f"  [yellow]{title}[/yellow]")
         console.print()
 
+    if report.skim_pending_count:
+        console.print(f"[bold]Pending Review[/bold] ({report.skim_pending_count} SKIM item(s))")
+        for summary in report.skim_pending:
+            console.print(f"  [magenta]\u2022[/magenta] {summary}")
+        console.print()
+
     if not any(
         [
             report.new_notes,
@@ -403,6 +416,7 @@ def digest(ctx: click.Context, days: int | None, save: bool | None) -> None:
             report.trending_entities,
             report.suggested_connections,
             report.orphan_notes,
+            report.skim_pending_count,
         ]
     ):
         console.print(f"[dim]No activity in the last {report.period_days} days.[/dim]")
@@ -703,6 +717,7 @@ def bot(ctx: click.Context) -> None:
         episode_store=episode_store,
         procedural_memory=procedural_memory,
         gap_store=gap_store,
+        review_queue=review_queue,
     )
 
     tg_bot, dp = create_bot(settings.telegram.bot_token)
@@ -723,9 +738,9 @@ def bot(ctx: click.Context) -> None:
     if settings.contradiction.enabled and detector is not None:
         on_escalate = None
         if notifier is not None:
-            from vaultmind.bot.handlers.contradiction import build_escalation_notifier
+            from vaultmind.bot.handlers.autonomy import build_block_notifier
 
-            on_escalate = build_escalation_notifier(notifier)
+            on_escalate = build_block_notifier(notifier)
         contradiction_model = settings.contradiction.detection_model or settings.llm.fast_model
         contradiction_detector = ContradictionDetector(
             settings.contradiction,
@@ -800,6 +815,21 @@ def bot(ctx: click.Context) -> None:
 
     scheduler: SchedulerService | None = None
     if maturation_pipeline is not None:
+        if review_queue is not None:
+            from vaultmind.services.review_queue import ProposalKind
+
+            def _maturation_applier(payload: dict[str, Any]) -> str:
+                assert maturation_pipeline is not None
+                fingerprint = str(payload["fingerprint"])
+                match = next(
+                    (c for c in maturation_pipeline.discover() if c.fingerprint == fingerprint),
+                    None,
+                )
+                if match is None:
+                    return "cluster no longer available (dismissed or already synthesized)"
+                return maturation_pipeline.synthesize(match)
+
+            review_queue.register_applier(ProposalKind.MATURATION_SYNTHESIS, _maturation_applier)
 
         async def _maturation_digest() -> None:
             assert maturation_pipeline is not None
@@ -808,6 +838,19 @@ def bot(ctx: click.Context) -> None:
                 logging.getLogger(__name__).info(
                     "Maturation digest: %d clusters ready", len(clusters)
                 )
+                if review_queue is not None:
+                    from vaultmind.services.review_queue import Impact, Lane, ProposalKind
+
+                    for cluster in clusters:
+                        review_queue.propose(
+                            ProposalKind.MATURATION_SYNTHESIS,
+                            cluster.score,
+                            Impact.MEDIUM,
+                            f"Synthesize permanent note from {len(cluster.note_paths)} "
+                            f"notes ({cluster.top_entity})",
+                            {"fingerprint": cluster.fingerprint},
+                            lane_override=Lane.SKIM,
+                        )
             maturation_pipeline.mark_run()
 
         maturation_job = ScheduledJob.legacy(
