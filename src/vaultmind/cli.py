@@ -14,10 +14,11 @@ Commands:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import click
 from rich.console import Console
@@ -26,9 +27,12 @@ from rich.logging import RichHandler
 from vaultmind import __version__
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping
+
     from vaultmind.indexer.bm25 import BM25Index
     from vaultmind.indexer.embedding_cache import EmbeddingCache
     from vaultmind.llm.client import LLMClient
+    from vaultmind.services.review_queue import Applier, ProposalKind, ReviewQueue
 
 console = Console()
 
@@ -97,6 +101,62 @@ def _create_llm_client(settings: object) -> LLMClient:
         api_key=settings.llm_api_key,
         base_url=base_url,
     )
+
+
+def _build_review_queue(
+    settings: object,
+    appliers: Mapping[ProposalKind, Applier] | None = None,
+) -> ReviewQueue:
+    """Construct the M7 `ReviewQueue` from `[autonomy]` settings.
+
+    Shared by every call site that routes automated mutation proposals
+    through the queue (`watch`, `bot`, `auto-tag`).
+    """
+    from vaultmind.config import VAULTMIND_HOME, Settings
+    from vaultmind.services.review_queue import AutonomyThresholds, ReviewQueue
+
+    assert isinstance(settings, Settings)
+    queue_db = (
+        Path(settings.autonomy.db_path)
+        if settings.autonomy.db_path
+        else VAULTMIND_HOME / "data" / "review_queue.db"
+    )
+    return ReviewQueue(
+        queue_db,
+        AutonomyThresholds(
+            block_below=settings.autonomy.block_below,
+            skim_below=settings.autonomy.skim_below,
+            force_block=settings.autonomy.force_block,
+        ),
+        appliers=appliers,
+    )
+
+
+def _duplicate_review_subscriber(
+    detector: object,
+    queue: ReviewQueue,
+) -> Callable[[object], Awaitable[None]]:
+    """Wrap a `DuplicateDetector` event-bus callback so merge-band matches
+    are also routed into the review queue as `DUPLICATE_MERGE` proposals.
+
+    Replaces subscribing `detector.on_note_changed` directly — this wrapper
+    calls it first (unchanged detection/caching behavior), then mints queue
+    proposals from the freshly cached results.
+    """
+    from vaultmind.indexer.duplicate_detector import DuplicateDetector
+    from vaultmind.services.review_queue import ReviewQueue, mint_duplicate_proposals
+
+    assert isinstance(detector, DuplicateDetector)
+    assert isinstance(queue, ReviewQueue)
+
+    async def _handle(event: object) -> None:
+        await detector.on_note_changed(event)  # type: ignore[arg-type]
+        note = getattr(event, "note", None)
+        if note is not None:
+            matches = detector.get_results(str(note.path))
+            mint_duplicate_proposals(queue, note, matches)
+
+    return _handle
 
 
 @click.group()
@@ -538,6 +598,12 @@ def bot(ctx: click.Context) -> None:
     if settings.duplicate_detection.enabled:
         detector = DuplicateDetector(settings.duplicate_detection, store)
 
+    # Review queue (M7) — unifies tag/duplicate/contradiction/maturation
+    # mutation proposals behind one AUTO/SKIM/BLOCK lane model.
+    review_queue: ReviewQueue | None = None
+    if settings.autonomy.enabled:
+        review_queue = _build_review_queue(settings)
+
     # Note suggestions
     from vaultmind.indexer.note_suggester import NoteSuggester
 
@@ -689,8 +755,13 @@ def bot(ctx: click.Context) -> None:
 
     # Subscribe duplicate detection and note suggestions to watch events
     if detector is not None:
-        event_bus.subscribe(NoteCreatedEvent, detector.on_note_changed)  # type: ignore[arg-type]
-        event_bus.subscribe(NoteModifiedEvent, detector.on_note_changed)  # type: ignore[arg-type]
+        if review_queue is not None:
+            dup_subscriber = _duplicate_review_subscriber(detector, review_queue)
+            event_bus.subscribe(NoteCreatedEvent, dup_subscriber)  # type: ignore[arg-type]
+            event_bus.subscribe(NoteModifiedEvent, dup_subscriber)  # type: ignore[arg-type]
+        else:
+            event_bus.subscribe(NoteCreatedEvent, detector.on_note_changed)  # type: ignore[arg-type]
+            event_bus.subscribe(NoteModifiedEvent, detector.on_note_changed)  # type: ignore[arg-type]
     if suggester is not None:
         event_bus.subscribe(NoteCreatedEvent, suggester.on_note_changed)  # type: ignore[arg-type]
         event_bus.subscribe(NoteModifiedEvent, suggester.on_note_changed)  # type: ignore[arg-type]
@@ -886,8 +957,13 @@ def watch(ctx: click.Context, with_graph: bool) -> None:
 
     if settings.duplicate_detection.enabled:
         detector = DuplicateDetector(settings.duplicate_detection, store)
-        event_bus.subscribe(NoteCreatedEvent, detector.on_note_changed)  # type: ignore[arg-type]
-        event_bus.subscribe(NoteModifiedEvent, detector.on_note_changed)  # type: ignore[arg-type]
+        if settings.autonomy.enabled:
+            dup_subscriber = _duplicate_review_subscriber(detector, _build_review_queue(settings))
+            event_bus.subscribe(NoteCreatedEvent, dup_subscriber)  # type: ignore[arg-type]
+            event_bus.subscribe(NoteModifiedEvent, dup_subscriber)  # type: ignore[arg-type]
+        else:
+            event_bus.subscribe(NoteCreatedEvent, detector.on_note_changed)  # type: ignore[arg-type]
+            event_bus.subscribe(NoteModifiedEvent, detector.on_note_changed)  # type: ignore[arg-type]
 
     # Optional graph re-extraction
     graph = None
@@ -952,51 +1028,99 @@ def watch(ctx: click.Context, with_graph: bool) -> None:
         console.print("\n[yellow]Watcher stopped.[/yellow]")
 
 
+def _load_tag_vocabulary(path: Path) -> set[str]:
+    """Load the durable approved-tag vocabulary (M7 review-queue applier state)."""
+    if not path.exists():
+        return set()
+    return set(json.loads(path.read_text()).get("approved", []))
+
+
+def _save_tag_vocabulary(path: Path, tags: set[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"approved": sorted(tags)}, indent=2))
+
+
 @cli.command("auto-tag")
-@click.option("--apply", "do_apply", is_flag=True, help="Write tags to frontmatter")
-@click.option("--approve-all", is_flag=True, help="Approve all quarantined tags")
-@click.option("--show-quarantine", is_flag=True, help="Show quarantined tags and exit")
+@click.option("--apply", "do_apply", is_flag=True, help="Route suggestions through the queue")
+@click.option("--approve-skim", is_flag=True, help="Approve all pending SKIM-lane tag proposals")
+@click.option("--show-pending", is_flag=True, help="Show pending tag proposals and exit")
 @click.pass_context
 def auto_tag(
     ctx: click.Context,
     do_apply: bool,
-    approve_all: bool,
-    show_quarantine: bool,
+    approve_skim: bool,
+    show_pending: bool,
 ) -> None:
-    """Auto-tag vault notes using LLM classification.
+    """Auto-tag vault notes using LLM classification, via the review queue.
 
-    By default runs in dry-run mode — shows suggestions without writing.
-    Use --apply to write tags to frontmatter.
+    By default runs in dry-run mode — shows suggestions without proposing
+    them. Use --apply to route suggestions through the review queue:
+    already-known-vocabulary tags apply immediately (AUTO lane); novel tags
+    are queued for review (SKIM lane) — see --show-pending/--approve-skim,
+    the bot's /review command, or the next `vaultmind digest`.
     """
     from vaultmind.config import VAULTMIND_HOME, load_settings
     from vaultmind.indexer.auto_tagger import AutoTagger
+    from vaultmind.services.review_queue import (
+        Impact,
+        Lane,
+        ProposalKind,
+        migrate_quarantine,
+    )
     from vaultmind.vault import VaultParser
 
     settings = load_settings(ctx.obj.get("config_path"))
     _require_llm_key(settings)
 
-    quarantine_path = VAULTMIND_HOME / "data" / "tag_quarantine.json"
-
     model = settings.auto_tag.tagging_model or settings.llm.fast_model
     llm_client = _create_llm_client(settings)
-    tagger = AutoTagger(settings.auto_tag, llm_client, model, quarantine_path)
+    tagger = AutoTagger(settings.auto_tag, llm_client, model)
 
-    if approve_all:
-        tagger.quarantine.approve_all()
-        tagger.save_quarantine()
-        console.print("[green]✓[/green] All quarantined tags approved.")
+    vocab_path = VAULTMIND_HOME / "data" / "tag_vocabulary.json"
+
+    def _apply_tag_application(payload: dict[str, Any]) -> str:
+        note_path = settings.vault.path / str(payload["note_path"])
+        tags = list(payload["tags"])
+        if not note_path.exists():
+            raise FileNotFoundError(note_path)
+        tagger.apply_tags(note_path, tags)
+        return f"applied {len(tags)} tag(s) to {payload['note_path']}"
+
+    def _apply_tag_vocabulary(payload: dict[str, Any]) -> str:
+        tag = str(payload["tag"])
+        approved = _load_tag_vocabulary(vocab_path)
+        approved.add(tag)
+        _save_tag_vocabulary(vocab_path, approved)
+        return f"'{tag}' added to vocabulary"
+
+    queue = _build_review_queue(
+        settings,
+        appliers={
+            ProposalKind.TAG_APPLICATION: _apply_tag_application,
+            ProposalKind.TAG_VOCABULARY: _apply_tag_vocabulary,
+        },
+    )
+
+    quarantine_path = VAULTMIND_HOME / "data" / "tag_quarantine.json"
+    migrated = migrate_quarantine(queue, quarantine_path)
+    if migrated:
+        console.print(
+            f"[cyan]Migrated {migrated} pending tag(s) from quarantine to the review queue.[/cyan]"
+        )
+
+    if approve_skim:
+        approved = queue.approve_all(lane=Lane.SKIM)
+        console.print(f"[green]✓[/green] Approved {len(approved)} SKIM-lane tag proposal(s).")
         return
 
-    if show_quarantine:
-        q = tagger.quarantine
-        if q.quarantined_tags:
-            console.print("[bold]Quarantined tags (pending approval):[/bold]")
-            for tag in sorted(q.quarantined_tags):
-                console.print(f"  [yellow]{tag}[/yellow]")
-        else:
-            console.print("[green]No tags in quarantine.[/green]")
-        if q.approved_tags:
-            console.print(f"\n[bold]Approved tags:[/bold] {', '.join(sorted(q.approved_tags))}")
+    if show_pending:
+        pending = queue.list_pending()
+        if not pending:
+            console.print("[green]No pending tag proposals.[/green]")
+            return
+        console.print("[bold]Pending tag proposals:[/bold]")
+        for p in pending:
+            console.print(f"  [{p.lane.label}] {p.summary}")
         return
 
     parser = VaultParser(settings.vault)
@@ -1004,7 +1128,7 @@ def auto_tag(
     with console.status("Parsing vault..."):
         notes = parser.iter_notes()
 
-    vault_tags = tagger.collect_vault_tags(notes)
+    vault_tags = tagger.collect_vault_tags(notes) | _load_tag_vocabulary(vocab_path)
     console.print(f"  Vault tag vocabulary: {len(vault_tags)} unique tags")
 
     # Filter to notes without many tags (likely need tagging)
@@ -1020,7 +1144,6 @@ def auto_tag(
 
     if not suggestions:
         console.print("[green]✓[/green] No tag suggestions generated.")
-        tagger.save_quarantine()
         return
 
     for s in suggestions:
@@ -1030,24 +1153,41 @@ def auto_tag(
 
     console.print(f"\n[bold]Summary:[/bold] {len(suggestions)} notes with suggestions")
 
-    q = tagger.quarantine
-    if q.quarantined_tags:
-        console.print(
-            f"  [yellow]Quarantined tags:[/yellow] {', '.join(sorted(q.quarantined_tags))}"
-        )
-        console.print("  Run `auto-tag --approve-all` to approve, then `auto-tag --apply`")
+    if not do_apply:
+        console.print("  Run with --apply to route these through the review queue.")
+        return
 
-    if do_apply:
-        applied = 0
-        for s in suggestions:
-            if s.suggested_tags:
-                note_path = settings.vault.path / s.note_path
-                if note_path.exists():
-                    tagger.apply_tags(note_path, s.suggested_tags)
-                    applied += 1
-        console.print(f"[green]✓[/green] Applied tags to {applied} notes")
+    auto_count = 0
+    skim_count = 0
+    for s in suggestions:
+        if s.suggested_tags:
+            proposal = queue.propose(
+                ProposalKind.TAG_APPLICATION,
+                confidence=1.0,
+                impact=Impact.LOW,
+                summary=f"Apply {len(s.suggested_tags)} known tag(s) to '{s.note_title}'",
+                payload={"note_path": s.note_path, "tags": s.suggested_tags},
+            )
+            if proposal.lane is Lane.AUTO:
+                auto_count += 1
+            else:
+                skim_count += 1
+        for tag in s.new_tags:
+            vocab_proposal = queue.propose(
+                ProposalKind.TAG_VOCABULARY,
+                confidence=0.6,
+                impact=Impact.LOW,
+                summary=f"New tag vocabulary: '{tag}'",
+                payload={"tag": tag},
+            )
+            if vocab_proposal.lane is not Lane.AUTO:
+                skim_count += 1
 
-    tagger.save_quarantine()
+    console.print(
+        f"[green]✓[/green] {auto_count} tag-application(s) applied immediately (AUTO); "
+        f"{skim_count} queued for review (SKIM) — see `auto-tag --show-pending`, "
+        "the bot's /review command, or the next `vaultmind digest`."
+    )
 
 
 @cli.command("tag-synonyms")
