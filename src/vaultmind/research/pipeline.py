@@ -69,6 +69,7 @@ source: "{url}"
 source_type: youtube
 tags: [research, {query}]
 created: {now}
+authority: 1
 ---
 
 # {title}
@@ -174,6 +175,7 @@ title: "Research: {query}"
 tags: [research-summary]
 sources: [{", ".join(s["title"] for s in sources)}]
 created: {now}
+authority: 3
 ---
 
 # Research: {query}

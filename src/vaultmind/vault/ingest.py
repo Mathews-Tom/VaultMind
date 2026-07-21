@@ -169,6 +169,7 @@ source: "{result.url}"
 source_type: {result.source_type}
 tags: [ingested]
 created: {now}
+authority: 2
 {meta_lines}---
 
 # {result.title}

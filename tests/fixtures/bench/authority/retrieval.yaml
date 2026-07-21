@@ -1,0 +1,14 @@
+# Two candidates for the same query: a semantically closer but low-authority
+# draft, and a slightly less close but high-authority (authored) guide.
+# Demonstrates the M2 authority ranking signal moving the answer's rank —
+# see PR-2's "before/after" verification evidence.
+
+"Which onboarding guide is authoritative?":
+  - note_path: "03-fleeting/old-draft-onboarding-notes.md"
+    content: "An old draft, unreviewed."
+    distance: 0.20
+    authority: 1
+  - note_path: "02-projects/authoritative-onboarding-guide.md"
+    content: "The reviewed, authored onboarding guide."
+    distance: 0.30
+    authority: 5

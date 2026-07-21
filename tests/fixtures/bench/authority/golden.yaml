@@ -1,0 +1,6 @@
+questions:
+  - id: authority-reorder-1
+    question: "Which onboarding guide is authoritative?"
+    answerable: true
+    expected_notes:
+      - "02-projects/authoritative-onboarding-guide.md"
