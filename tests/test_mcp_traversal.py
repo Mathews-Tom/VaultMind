@@ -135,3 +135,63 @@ class TestReadFrontmatterProfileWiring:
         policy = load_profile("researcher")
         assert "read_frontmatter" in policy.allowed_tools
 
+
+# ---------------------------------------------------------------------------
+# list_folder_index
+# ---------------------------------------------------------------------------
+
+
+class TestListFolderIndex:
+    def test_folder_index_lists_titles_and_descriptions(
+        self, vault_root: Path, parser: VaultParser
+    ) -> None:
+        result = _dispatch("list_folder_index", {"folder": "02-projects"}, vault_root, parser)
+        by_path = {entry["path"]: entry for entry in result["notes"]}
+        alpha = by_path["02-projects/project-alpha.md"]
+        assert alpha["title"] == "Project Alpha"
+        assert alpha["description"] == "Explicit frontmatter description."
+        assert alpha["note_type"] == "project"
+        assert "content" not in alpha
+        assert "Body text that must never leak" not in str(alpha)
+
+    def test_folder_index_description_falls_back_to_first_body_line(
+        self, vault_root: Path, parser: VaultParser
+    ) -> None:
+        result = _dispatch("list_folder_index", {"folder": "00-inbox"}, vault_root, parser)
+        entry = result["notes"][0]
+        assert entry["description"] == "First body line as the description fallback."
+
+    def test_folder_index_recursive_listing_includes_subfolders(
+        self, vault_root: Path, parser: VaultParser
+    ) -> None:
+        result = _dispatch("list_folder_index", {"folder": "02-projects"}, vault_root, parser)
+        paths = {entry["path"] for entry in result["notes"]}
+        assert "02-projects/sub/nested-note.md" in paths
+        assert result["count"] == len(paths)
+
+    def test_folder_index_default_folder_lists_whole_vault(
+        self, vault_root: Path, parser: VaultParser
+    ) -> None:
+        result = _dispatch("list_folder_index", {}, vault_root, parser)
+        assert result["count"] >= 3
+
+    def test_folder_index_not_found_returns_error(
+        self, vault_root: Path, parser: VaultParser
+    ) -> None:
+        result = _dispatch("list_folder_index", {"folder": "99-missing"}, vault_root, parser)
+        assert "error" in result
+
+    def test_folder_index_path_traversal_blocked(
+        self, vault_root: Path, parser: VaultParser
+    ) -> None:
+        result = _dispatch("list_folder_index", {"folder": "../../etc"}, vault_root, parser)
+        assert "error" in result
+        assert "not allowed" in result["error"]
+
+
+class TestFolderIndexProfileWiring:
+    def test_folder_index_in_researcher_allowed_tools(self) -> None:
+        assert "list_folder_index" in DEFAULT_PROFILES["researcher"]["allowed_tools"]
+
+    def test_folder_index_in_planner_allowed_tools(self) -> None:
+        assert "list_folder_index" in DEFAULT_PROFILES["planner"]["allowed_tools"]

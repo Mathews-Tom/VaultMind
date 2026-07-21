@@ -289,6 +289,7 @@ uv sync --extra mcp
 | `graph_evolution`  | Belief evolution signals: confidence drift, relationship shifts  |
 | `recent_activity`  | Notes created or modified in the last N days                     |
 | `read_frontmatter` | Peek parsed frontmatter (type, tags, dates, authority) — no body  |
+| `list_folder_index`| Folder listing with titles + one-line descriptions — no body     |
 
 ### MCP Profiles
 

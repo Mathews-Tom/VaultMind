@@ -260,6 +260,16 @@ Peek a note's parsed frontmatter (type, tags, dates, authority) without fetching
 
 **Returns:** `{path, title, note_type, tags, authority, status, source, created, modified, frontmatter}` — `frontmatter` is the raw parsed YAML dict.
 
+### `list_folder_index`
+
+List a folder's structured index: note titles and one-line descriptions, without fetching full note bodies. Recurses into subfolders, like `vault_list`.
+
+**Parameters:**
+
+- `folder` (string, default `""`) — folder path relative to vault root (empty = root)
+
+**Returns:** `{folder, notes: [{path, title, description, note_type, tags}], count}`. `description` is the frontmatter `description` field if present, else the note's first non-heading body line.
+
 ## Profiles
 
 Profiles restrict what an agent can do. They control tool access, folder scope, and write permissions.
@@ -268,7 +278,7 @@ Profiles restrict what an agent can do. They control tool access, folder scope, 
 
 Read-only access for research and Q&A tasks.
 
-- **Tools:** `vault_search`, `vault_read`, `vault_list`, `graph_query`, `graph_path`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`
+- **Tools:** `vault_search`, `vault_read`, `vault_list`, `graph_query`, `graph_path`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`, `list_folder_index`
 - **Folders:** All
 - **Write:** No
 
@@ -276,7 +286,7 @@ Read-only access for research and Q&A tasks.
 
 Read/write access scoped to project planning.
 
-- **Tools:** All researcher tools + `vault_write`, `capture`, `capture_note`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`
+- **Tools:** All researcher tools + `vault_write`, `capture`, `capture_note`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`, `list_folder_index`
 - **Folders:** `02-projects`, `00-inbox`
 - **Write:** Yes (max 50KB per note)
 
