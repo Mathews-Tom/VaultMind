@@ -57,8 +57,8 @@ Set `capture_all = true` in `[routing]` config to bypass routing and capture all
 | `/daily`    | `/daily`                         | Get or create today's daily note                                                                         |
 | `/notes`    | `/notes yesterday`               | Find notes by date. Accepts natural language: `yesterday`, `last week`, `over the weekend`, `2026-02-20` |
 | `/read`     | `/read my-note.md`               | Read full note content. Accepts path, filename, or search term                                           |
-| `/edit`     | `/edit my-note.md add a summary` | AI-assisted edit. Shows a diff preview with confirm/cancel buttons                                       |
-| `/delete`   | `/delete my-note.md`             | Delete a note. Shows confirmation with inline keyboard                                                   |
+| `/edit`     | `/edit my-note.md add a summary` | AI-assisted edit. Shows a diff preview with confirm/cancel buttons. On confirm, the new text is prepended above a dated `> [!superseded]` callout — the prior body is preserved, never overwritten |
+| `/delete`   | `/delete my-note.md`             | Soft-delete a note. Shows confirmation with inline keyboard. On confirm, the note is marked with a `> [!superseded]` callout and dropped from `/recall` results — the file and its full original content remain on disk |
 | `/bookmark` | `/bookmark My Insights`          | Save the current thinking session or last Q&A exchange to vault as a permanent note                      |
 
 ### Search and Discovery
@@ -81,6 +81,8 @@ Set `capture_all = true` in `[routing]` config to bypass routing and capture all
 
 After starting a `/think` session, follow-up messages within the TTL (default: 1 hour) continue the same session automatically. No need to use `/think` again.
 
+A session that reaches `[distill].min_turns` (default 3) and then idles out is automatically distilled by an LLM into a `qa-artifact` note (question, resolution, systems, participants) — indexed immediately and run through episodic-memory extraction. Auto-distillation is opt-in (`[distill].enabled = false` by default). Run `/distill` any time to distill the current session manually, regardless of the config flag.
+
 The thinking partner draws context from both ChromaDB (semantic search) and the knowledge graph (entity relationships, ego subgraph).
 
 ### Knowledge Graph
@@ -101,14 +103,32 @@ The thinking partner draws context from both ChromaDB (semantic search) and the 
 | `/workflows` | `/workflows`                                       | List active workflow patterns with success rates (requires procedural memory enabled)    |
 | `/workflow`  | `/workflow w1x2y3`                                 | Show workflow steps and trigger pattern                                                  |
 
+### Knowledge Gaps
+
+| Command | Usage   | Description                          |
+| ------- | ------- | ------------------------------------- |
+| `/gaps` | `/gaps` | List open knowledge gaps by age — unanswered questions, weak-retrieval `/recall` misses, and contradiction escalations. Auto-stale after `[gaps].stale_after_days` (default 30). Run `vaultmind research "<question>"` on a gap to close it |
+
 ### System
 
-| Command   | Usage     | Description                                                                    |
-| --------- | --------- | ------------------------------------------------------------------------------ |
-| `/review` | `/review` | Weekly review with graph insights, trending topics, and connection suggestions |
-| `/health` | `/health` | System health check — reports status of ChromaDB, graph, watcher, and LLM      |
-| `/stats`  | `/stats`  | Vault and graph statistics (note counts, types, entities, relationships)       |
-| `/help`   | `/help`   | Quick reference for all commands                                               |
+| Command   | Usage     | Description                                                                                        |
+| --------- | --------- | --------------------------------------------------------------------------------------------------- |
+| `/review` | `/review` | Weekly review with graph insights, trending topics, connection suggestions, and a "Pending Review" section listing SKIM-lane autonomy proposals with a one-tap approve-all button |
+| `/health` | `/health` | System health check — reports status of ChromaDB, graph, watcher, and LLM                           |
+| `/stats`  | `/stats`  | Vault and graph statistics (note counts, types, entities, relationships)                             |
+| `/help`   | `/help`   | Quick reference for all commands                                                                     |
+
+## Contradiction Detection & Autonomy Review
+
+New notes landing in the duplicate-detector's 80-92% merge band are checked for material conflict by an LLM detection surface. `[contradiction].auto_resolve` is `false` by default, so every detected conflict escalates: VaultMind sends a Telegram message with an inline "Acknowledge" button and mints a knowledge gap (`/gaps`). Resolved conflicts only ever mark the losing note with a `contradicted_by` frontmatter field and a `> [!warning]` callout — the note's body is never edited or deleted.
+
+Every automated mutation proposal (tag suggestions, duplicate-merge candidates, contradiction resolutions, maturation synthesis) is routed through one of three autonomy lanes by confidence x impact:
+
+- **AUTO** — applies and logs without interaction (high confidence, low impact)
+- **SKIM** — batches into the weekly digest and `/review`'s "Pending Review" section for one-tap approve-all
+- **BLOCK** — sends an immediate Telegram inline-keyboard confirmation (approve/reject) and withholds application until answered
+
+Run `vaultmind learn` to see the approval-fatigue percentage — how often a proposal needed a human in the loop.
 
 ## Proactive Notifications
 
@@ -154,13 +174,13 @@ Requires `VAULTMIND_OPENAI_API_KEY` in `.env`.
 
 ## Confirmation Flows
 
-Destructive operations (`/edit`, `/delete`) use aiogram inline keyboards:
+Destructive operations (`/edit`, `/delete`) and BLOCK-lane autonomy proposals (including contradiction resolutions) use aiogram inline keyboards:
 
-1. You send the command
-2. VaultMind shows a preview with Confirm/Cancel buttons
-3. You tap Confirm to proceed or Cancel to abort
+1. You send the command, or an automated proposal routes to the BLOCK lane
+2. VaultMind shows a preview with Confirm/Cancel (or Approve/Reject) buttons
+3. You tap to proceed or abort
 
-This prevents accidental edits or deletions.
+`/edit`/`/delete` never overwrite existing note content on confirm — see [Capture and Notes](#capture-and-notes) above for the non-destructive supersede-callout behavior.
 
 ## Session Persistence
 

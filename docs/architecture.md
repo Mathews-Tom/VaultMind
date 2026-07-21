@@ -32,10 +32,10 @@ src/vaultmind/
 │   ├── activation.py      # SQLite-backed activation tracking (note access/edit scoring)
 │   ├── duplicate_detector.py  # Semantic duplicate detection (92%/80% bands)
 │   ├── note_suggester.py  # Composite link suggestions (similarity + entities + graph)
-│   ├── auto_tagger.py     # LLM tag classification with quarantine
+│   ├── auto_tagger.py     # LLM tag classification, routes suggestions through the review queue
 │   ├── tag_analyzer.py    # Tag synonym/merge detection (string similarity + co-occurrence)
 │   ├── digest.py          # Weekly digest with inbox triage (zero LLM cost)
-│   └── ranking.py         # Post-retrieval ranking (type + mode multipliers + activation + decay)
+│   └── ranking.py         # Post-retrieval ranking (type + mode + activation + decay + authority)
 │
 ├── graph/           # Knowledge graph layer
 │   ├── knowledge_graph.py # NetworkX graph with JSON persistence
@@ -86,17 +86,43 @@ src/vaultmind/
 │       ├── memory.py        # Episodic memory commands (/decide, /outcome, /episodes, /workflows)
 │       └── routing.py       # Message intent routing
 │
-├── pipeline/        # Zettelkasten maturation pipeline
+├── pipeline/        # Zettelkasten maturation + conversation distillation
 │   ├── clustering.py    # DBSCAN clustering of semantically related notes
 │   ├── synthesis.py     # LLM synthesis (cluster → permanent Zettelkasten note)
-│   └── maturation.py    # Pipeline orchestrator (clustering → digest → synthesis)
+│   ├── maturation.py    # Pipeline orchestrator (clustering → digest → synthesis)
+│   └── distill.py       # distill_conversation() — session/`/distill` → qa-artifact note
 │
-├── services/        # Background job scheduling + compound loops
+├── services/        # Background job scheduling + graduated autonomy review queue
 │   ├── scheduler.py     # State-aware compound loop scheduler with event triggering
+│   ├── review_queue.py  # AUTO/SKIM/BLOCK proposal routing (Lane, ProposalKind, ReviewQueue)
 │   └── loops/           # Compound loop jobs
 │       ├── insight_loop.py     # Usage pattern shift detection
 │       ├── evolution_loop.py   # Belief drift trend accumulation
 │       └── procedural_loop.py  # Workflow synthesis from episodes
+│
+├── contradiction/   # Duplicate-band conflict detection + deterministic resolution
+│   ├── detection.py     # LLM material-conflict detector, gated by `vaultmind eval contradict`
+│   ├── policy.py        # Temporal → authority → escalate resolver (Kosha `policy.py` port)
+│   ├── marking.py       # write_superseded_block() — non-destructive frontmatter/callout writer
+│   ├── detector.py      # Event-bus orchestrator (detection + policy + marking + escalation)
+│   └── eval.py          # Scores the detector vs. a trivial always-escalate baseline
+│
+├── bench/           # Retrieval self-benchmark (`vaultmind bench`)
+│   ├── runner.py        # recall@k/MRR scoring against the live hybrid+ranking path
+│   ├── golden.py        # benchmarks/golden.yaml schema loader
+│   ├── fixture_store.py # Deterministic FixtureStore for `--bundle` CI-safe self-tests
+│   ├── llm_score.py     # `--llm` opt-in cite-or-decline scoring
+│   └── trend.py         # Per-run JSONL trend record storage
+│
+├── sources/         # Explicit-registry connector framework with durable cursors
+│   ├── registry.py      # Closed rss/youtube-channel/github-activity connector registry
+│   ├── cursor.py        # ConnectorState cursor model
+│   ├── store.py         # sources.db cursor + bounded run-summary SQLite store
+│   ├── pipeline.py      # ingest_item() — distillation + review-queue hookup per fetched item
+│   └── connectors/      # rss.py, youtube_channel.py, github_activity.py
+│
+├── export/          # OKF bundle export for Kosha interop
+│   └── okf.py           # export_okf_bundle() — permanent/concept notes → conformant OKF bundle
 │
 ├── drafts/          # Planned draft lifecycle subsystem (active/sent/expired)
 ├── integrations/    # Planned permission-scoped external adapters
@@ -110,14 +136,15 @@ src/vaultmind/
 │   ├── preferences.py   # SQLite interaction store
 │   └── analyzer.py      # Usage pattern analysis + insights generation
 │
-├── memory/          # Episodic + procedural memory
+├── memory/          # Episodic + procedural memory + knowledge gap ledger
 │   ├── models.py        # Episode dataclass, OutcomeStatus enum
 │   ├── store.py         # SQLite-backed episode store (CRUD + entity search)
 │   ├── extractor.py     # LLM-based episode extraction from notes
-│   └── procedural.py    # Workflow synthesis from episodic patterns (experimental)
+│   ├── procedural.py    # Workflow synthesis from episodic patterns (experimental)
+│   └── gaps.py          # GapStore — deduplicated, lifecycle-tracked knowledge gaps
 │
-└── mcp/         # MCP server — 15 tools for vault CRUD, graph, memory introspection
-    ├── server.py        # MCP server with 15 vault tools
+└── mcp/         # MCP server — 18 tools for vault CRUD, graph, memory introspection, traversal
+    ├── server.py        # MCP server with 18 vault tools
     ├── auth.py          # Profile enforcement + audit logging
     └── profiles.py      # Profile loading (researcher/planner/full)
 ```
