@@ -65,6 +65,15 @@ class VaultParser:
         except ValueError:
             mode = NoteMode.LEARNING
 
+        # Extract authority (1-5 provenance level); invalid/missing -> 0 (unstamped,
+        # ranking treats this as the configured neutral default — never raises).
+        try:
+            authority = int(meta.get("authority", 0))
+        except (TypeError, ValueError):
+            authority = 0
+        if not 1 <= authority <= 5:
+            authority = 0
+
         # Extract inline tags from content (merge with frontmatter tags)
         inline_tags = TAG_PATTERN.findall(post.content)
         fm_tags = meta.get("tags", [])
@@ -83,6 +92,7 @@ class VaultParser:
             related=meta.get("related", []),
             status=meta.get("status", "active"),
             source=meta.get("source", "manual"),
+            authority=authority,
             created=self._parse_date(meta.get("created")),
             modified=self._parse_date(meta.get("modified", datetime.now())),
             frontmatter=meta,
@@ -138,6 +148,7 @@ class VaultParser:
                         modified=note.modified.isoformat(),
                         status=note.status,
                         mode=note.mode.value,
+                        authority=note.authority,
                         importance_score=note_importance,
                     )
                 )
@@ -163,6 +174,7 @@ class VaultParser:
                                 modified=note.modified.isoformat(),
                                 status=note.status,
                                 mode=note.mode.value,
+                                authority=note.authority,
                             )
                         )
                         current_chunk = para
@@ -185,6 +197,7 @@ class VaultParser:
                             modified=note.modified.isoformat(),
                             status=note.status,
                             mode=note.mode.value,
+                            authority=note.authority,
                         )
                     )
 

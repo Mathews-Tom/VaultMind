@@ -45,6 +45,7 @@ class Note(BaseModel):
     mode: NoteMode = NoteMode.LEARNING
     status: str = "active"
     source: str = "manual"
+    authority: int = 0  # 1-5 provenance level stamped at creation; 0 = unstamped (neutral default)
     created: datetime = Field(default_factory=datetime.now)
     modified: datetime = Field(default_factory=datetime.now)
     frontmatter: dict[str, Any] = Field(default_factory=dict)
@@ -92,6 +93,7 @@ class NoteChunk(BaseModel):
     modified: str = ""
     status: str = ""
     mode: str = ""
+    authority: int = 0  # 1-5 provenance level; 0 = unstamped (neutral default)
     importance_score: float = 0.0
 
     @computed_field  # type: ignore[prop-decorator]
@@ -113,6 +115,7 @@ class NoteChunk(BaseModel):
             "modified": self.modified,
             "status": self.status,
             "mode": self.mode,
+            "authority": self.authority,
             "importance_score": self.importance_score,
             "chunk_idx": self.chunk_idx,
         }

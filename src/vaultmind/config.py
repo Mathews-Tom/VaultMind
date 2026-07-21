@@ -237,6 +237,10 @@ class RankingConfig(BaseSettings):
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     reranker_top_k: int = 20
     importance_scoring_enabled: bool = True
+    authority_default: int = 3  # Neutral authority level applied when a note has none stamped
+    authority_weight: dict[int, float] = Field(
+        default_factory=lambda: {1: 0.85, 2: 0.92, 3: 1.0, 4: 1.08, 5: 1.15}
+    )
 
     @model_validator(mode="after")
     def _check_weights_sum(self) -> RankingConfig:

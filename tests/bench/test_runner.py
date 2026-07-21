@@ -17,6 +17,7 @@ from vaultmind.bench.runner import (
     run_query,
     score_question,
 )
+from vaultmind.config import RankingConfig
 
 
 class FakeStore:
@@ -41,11 +42,14 @@ class FakeStore:
         return self._results.get(query, [])[:n_results]
 
 
-def _hit(note_path: str, distance: float = 0.1) -> dict[str, Any]:
+def _hit(note_path: str, distance: float = 0.1, authority: int | None = None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"note_path": note_path}
+    if authority is not None:
+        metadata["authority"] = authority
     return {
         "chunk_id": f"{note_path}::0",
         "content": "x",
-        "metadata": {"note_path": note_path},
+        "metadata": metadata,
         "distance": distance,
     }
 
@@ -73,6 +77,23 @@ class TestRunQuery:
         run_query(store, "q", k=5, hybrid_enabled=False)
         assert store.search_calls == [("q", 5)]
         assert store.hybrid_calls == []
+
+    def test_authority_reranks_hits_when_ranking_config_given(self) -> None:
+        store = FakeStore(
+            {
+                "q": [
+                    _hit("low.md", distance=0.20, authority=1),
+                    _hit("high.md", distance=0.30, authority=5),
+                ]
+            }
+        )
+        hits = run_query(store, "q", k=5, hybrid_enabled=True, ranking_config=RankingConfig())
+        assert hits[0]["metadata"]["note_path"] == "high.md"
+
+    def test_no_ranking_config_still_authority_neutral_no_reorder(self) -> None:
+        store = FakeStore({"q": [_hit("a.md", distance=0.1), _hit("b.md", distance=0.2)]})
+        hits = run_query(store, "q", k=5, hybrid_enabled=True)
+        assert [h["metadata"]["note_path"] for h in hits] == ["a.md", "b.md"]
 
 
 class TestScoreQuestionAnswerable:
@@ -220,6 +241,25 @@ class TestRunBench:
         report = run_bench(golden, store, k=5, hybrid_enabled=True, decline_scorer=scorer)
         assert calls == ["q1"]
         assert report.llm_cite_or_decline_accuracy == pytest.approx(1.0)
+
+    def test_authority_moves_mrr_for_authority_differentiated_golden_case(self) -> None:
+        """The authority signal is observable through `run_bench`'s aggregate
+        MRR, not only through `run_query`'s raw hit order — this is the exact
+        acceptance the milestone names ("`vaultmind bench` run before/after
+        ... shows the authority signal moving ranked order")."""
+        golden = [_q("q1", "q1", True, ("authored.md",))]
+        hits = [
+            _hit("draft.md", distance=0.20, authority=1),
+            _hit("authored.md", distance=0.30, authority=5),
+        ]
+        store = FakeStore({"q1": hits})
+
+        no_op_config = RankingConfig(authority_weight={1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0})
+        before = run_bench(golden, store, k=5, hybrid_enabled=True, ranking_config=no_op_config)
+        assert before.mrr == pytest.approx(0.5)  # authored.md sits at rank 2
+
+        after = run_bench(golden, store, k=5, hybrid_enabled=True, ranking_config=RankingConfig())
+        assert after.mrr == pytest.approx(1.0)  # authority promotes it to rank 1
 
 
 class TestPassesThresholds:

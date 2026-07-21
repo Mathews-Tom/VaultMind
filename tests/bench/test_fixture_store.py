@@ -105,3 +105,16 @@ class TestLoadBundle:
         bundle = load_bundle(bundle_dir)
         hits = bundle.store.search("Where is A?", n_results=5)
         assert hits[0]["distance"] == pytest.approx(0.1)
+
+    def test_hit_authority_field_parsed_into_metadata(self, tmp_path: Path) -> None:
+        retrieval = '"Where is A?":\n  - note_path: "a.md"\n    authority: 5\n'
+        bundle_dir = _write_bundle(tmp_path, _VALID_GOLDEN, retrieval)
+        bundle = load_bundle(bundle_dir)
+        hits = bundle.store.search("Where is A?", n_results=5)
+        assert hits[0]["metadata"]["authority"] == 5
+
+    def test_hit_without_authority_field_omits_metadata_key(self, tmp_path: Path) -> None:
+        bundle_dir = _write_bundle(tmp_path, _VALID_GOLDEN, _VALID_RETRIEVAL)
+        bundle = load_bundle(bundle_dir)
+        hits = bundle.store.search("Where is A?", n_results=5)
+        assert "authority" not in hits[0]["metadata"]

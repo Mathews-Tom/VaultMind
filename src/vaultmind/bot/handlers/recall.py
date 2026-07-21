@@ -11,6 +11,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from vaultmind.bot.handlers.utils import _is_authorized
 from vaultmind.bot.sanitize import MAX_QUERY_LENGTH, sanitize_text
+from vaultmind.indexer.ranking import apply_authority
 
 if TYPE_CHECKING:
     from aiogram.types import CallbackQuery, Message
@@ -136,6 +137,8 @@ async def handle_recall(
         results = await asyncio.to_thread(ctx.store.hybrid_search, query, n_results=max_results)
     else:
         results = await asyncio.to_thread(ctx.store.search, query, n_results=max_results)
+
+    results = apply_authority(results, ctx.settings.ranking)
 
     if not results:
         await message.answer("No matching notes found.")

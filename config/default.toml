@@ -149,6 +149,14 @@ reranker_enabled = false
 reranker_model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 reranker_top_k = 20
 importance_scoring_enabled = true
+authority_default = 3                        # Neutral authority level for notes without the field
+
+[ranking.authority_weight]                    # 1=auto-ingested .. 5=authored (source doc §4 E2)
+1 = 0.85
+2 = 0.92
+3 = 1.0
+4 = 1.08
+5 = 1.15
 
 [maturation]
 enabled = true

@@ -31,6 +31,12 @@ MODE_MULTIPLIERS: dict[str, float] = {
     "learning": 1.0,
 }
 
+# Authority (source-provenance) multiplier — mirrors MODE_MULTIPLIERS' role as a
+# post-sum multiplicative factor. Fallback defaults when no RankingConfig is
+# supplied; RankingConfig.authority_weight/authority_default override these.
+DEFAULT_AUTHORITY_WEIGHT: dict[int, float] = {1: 0.85, 2: 0.92, 3: 1.0, 4: 1.08, 5: 1.15}
+DEFAULT_AUTHORITY_LEVEL = 3
+
 # Normalization range for note-type multipliers.
 _NOTE_TYPE_MIN = 0.8
 _NOTE_TYPE_MAX = 1.3
@@ -100,6 +106,31 @@ def compute_note_type_score(note_type: str) -> float:
     return max(0.0, min(1.0, normalized))
 
 
+def authority_multiplier(authority: Any, ranking_config: Any = None) -> float:
+    """Multiplier for a note's stamped `authority` level (1-5, source-provenance signal).
+
+    Missing, zero, or out-of-range authority values fall back to the configured
+    neutral default level — this never raises, satisfying the back-compat
+    requirement that pre-existing vault content (or content indexed before the
+    `authority` field existed) ranks as if it had the neutral default, not as
+    an error or an implicit zero-weight penalty.
+    """
+    if ranking_config is not None:
+        weights: dict[int, float] = ranking_config.authority_weight
+        default_level: int = ranking_config.authority_default
+    else:
+        weights = DEFAULT_AUTHORITY_WEIGHT
+        default_level = DEFAULT_AUTHORITY_LEVEL
+
+    try:
+        level = int(authority)
+    except (TypeError, ValueError):
+        level = default_level
+    if level not in weights:
+        level = default_level
+    return weights.get(level, 1.0)
+
+
 def composite_score(
     semantic: float,
     recency: float,
@@ -108,6 +139,7 @@ def composite_score(
     note_type_normalized: float,
     status: str,
     mode: str = "",
+    authority: Any = None,
     config: Any = None,
 ) -> float:
     """Compute weighted composite score from individual factors.
@@ -115,7 +147,7 @@ def composite_score(
     All input factors should be in [0.0, 1.0].
     Weights come from config (RankingConfig). If config is None, use defaults.
     Status suppression (archived/completed: 0.4x) applied last.
-    Mode multiplier applied last.
+    Mode and authority multipliers applied before status suppression.
     """
     if config is not None:
         w_s: float = config.semantic_weight
@@ -139,6 +171,7 @@ def composite_score(
     )
 
     s *= MODE_MULTIPLIERS.get(mode, 1.0)
+    s *= authority_multiplier(authority, config)
 
     if status in ("archived", "completed"):
         s *= ARCHIVED_MULTIPLIER
@@ -235,6 +268,7 @@ def rank_results(
         created_at = meta.get("created", "")
         status = meta.get("status", "")
         mode = meta.get("mode", "")
+        authority = meta.get("authority", 0)
         activation = float(hit.get("activation_score", 0.0))
         importance = float(meta.get("importance_score", 0.0))
 
@@ -264,6 +298,7 @@ def rank_results(
             note_type_normalized=nt,
             status=status,
             mode=mode,
+            authority=authority,
             config=ranking_config,
         )
 
@@ -291,3 +326,39 @@ def rank_results(
 
     ranked.sort(key=lambda r: r.final_score, reverse=True)
     return ranked
+
+
+def apply_authority(hits: list[dict[str, Any]], ranking_config: Any = None) -> list[dict[str, Any]]:
+    """Re-rank retrieval hits by their stamped `authority` level.
+
+    `/recall` (`bot/handlers/recall.py::handle_recall`) and `vaultmind bench`
+    (`bench/runner.py::run_query`, which mirrors it exactly) call
+    `VaultStore.hybrid_search()`/`search()` directly — the composite ranking
+    pipeline above (`rank_results()`) is not wired into that live path. This
+    applies the same `authority_multiplier()` directly to the score those
+    functions already produced, so the authority signal is observable
+    wherever `/recall` actually is, not only in the not-yet-live composite
+    pipeline.
+
+    Returns a new list of hit dicts (inputs are not mutated), each carrying
+    an added `authority_score` key, sorted by that score descending.
+    """
+    if ranking_config is not None and not ranking_config.enabled:
+        return hits
+
+    def _base_score(hit: dict[str, Any]) -> float:
+        rrf = hit.get("rrf_score")
+        if rrf is not None:
+            return float(rrf)
+        return 1.0 - float(hit.get("distance", 0.0))
+
+    scored: list[dict[str, Any]] = []
+    for hit in hits:
+        meta = hit.get("metadata", {})
+        mult = authority_multiplier(meta.get("authority"), ranking_config)
+        adjusted = dict(hit)
+        adjusted["authority_score"] = _base_score(hit) * mult
+        scored.append(adjusted)
+
+    scored.sort(key=lambda h: h["authority_score"], reverse=True)
+    return scored
