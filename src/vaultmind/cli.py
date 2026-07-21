@@ -1722,5 +1722,66 @@ def bench(
             cache.close()
 
 
+@cli.group("eval")
+def eval_group() -> None:
+    """Evaluation commands for LLM-gated detection surfaces."""
+
+
+@eval_group.command("contradict")
+@click.option(
+    "--eval-path",
+    "eval_path_override",
+    type=click.Path(),
+    default=None,
+    help="Path to the labeled contradiction eval set (default: [contradiction].eval_path)",
+)
+@click.pass_context
+def eval_contradict(ctx: click.Context, eval_path_override: str | None) -> None:
+    """Score the contradiction conflict-detector against a labeled eval set.
+
+    Reports precision/recall/F1 for the LLM detector alongside a trivial
+    always-escalate baseline. The detector must beat the baseline before
+    `[contradiction].auto_resolve` is safe to enable (Kosha's Gate-0 lesson:
+    ship escalate-only until a real eval proves the detector out).
+    """
+    from vaultmind.config import load_settings
+    from vaultmind.contradiction.eval import ContradictEvalError, load_eval_set, run_eval
+
+    settings = load_settings(ctx.obj.get("config_path"))
+    _require_llm_key(settings)
+    llm_client = _create_llm_client(settings)
+    model = settings.contradiction.detection_model or settings.llm.fast_model
+
+    eval_path = (
+        Path(eval_path_override) if eval_path_override else Path(settings.contradiction.eval_path)
+    )
+    try:
+        pairs = load_eval_set(eval_path)
+    except ContradictEvalError as exc:
+        console.print(f"[red]\u2717[/red] {exc}")
+        sys.exit(1)
+
+    with console.status(f"Evaluating {len(pairs)} pairs..."):
+        report = run_eval(pairs, llm_client, model, max_tokens=settings.contradiction.max_tokens)
+
+    console.print(f"\n[bold]Contradiction eval[/bold] ({report.n_pairs} pairs)")
+    console.print(
+        f"  Detector — precision: {report.detector.precision:.2f}"
+        f"  recall: {report.detector.recall:.2f}  F1: {report.detector.f1:.2f}"
+    )
+    console.print(
+        f"  Baseline (always-escalate) — precision: {report.baseline.precision:.2f}"
+        f"  recall: {report.baseline.recall:.2f}  F1: {report.baseline.f1:.2f}"
+    )
+    if report.beats_baseline:
+        console.print("[green]\u2713[/green] Detector beats the trivial always-escalate baseline.")
+    else:
+        console.print(
+            "[red]\u2717[/red] Detector does NOT beat baseline"
+            " — auto-resolution should stay disabled."
+        )
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()

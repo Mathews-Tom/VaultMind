@@ -405,6 +405,21 @@ class GapConfig(BaseSettings):
     max_shown: int = 10
 
 
+class ContradictionConfig(BaseSettings):
+    """Contradiction detection + deterministic resolution configuration."""
+
+    enabled: bool = True
+    # Escalate-only by default: Kosha's own real-model Gate-0 run recorded
+    # contradiction routing accuracy 0.17 vs a 1.00 prompt-only baseline
+    # (docs/gate0-status.md, M13 Gate-0). Flip only after `vaultmind eval
+    # contradict` shows this detector beating the trivial always-escalate
+    # baseline on your own vault.
+    auto_resolve: bool = False
+    detection_model: str = ""  # Empty = use llm.fast_model
+    max_tokens: int = 300
+    eval_path: str = "benchmarks/contradict_eval.yaml"
+
+
 class ConsolidationConfig(BaseSettings):
     """Memory consolidation pipeline configuration."""
 
@@ -532,6 +547,7 @@ class Settings(BaseSettings):
     activation: ActivationConfig = Field(default_factory=ActivationConfig)
     episodic: EpisodicConfig = Field(default_factory=EpisodicConfig)
     gaps: GapConfig = Field(default_factory=GapConfig)
+    contradiction: ContradictionConfig = Field(default_factory=ContradictionConfig)
     procedural: ProceduralConfig = Field(default_factory=ProceduralConfig)
     consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
