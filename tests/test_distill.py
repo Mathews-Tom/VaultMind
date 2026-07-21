@@ -87,6 +87,45 @@ class TestDistillConversationSuccess:
         assert note.note_type == NoteType.QA_ARTIFACT
         assert note.authority == DISTILLED_AUTHORITY
 
+    def test_body_wikilinks_systems_and_participants(self, tmp_path: Path) -> None:
+        llm = _make_llm(_GOOD_RESPONSE)
+        result = distill_conversation(
+            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", source_ref="ref-wikilinks"
+        )
+        assert result.success is True
+
+        post = frontmatter.loads((tmp_path / result.output_path).read_text())
+        assert "[[ChromaDB]]" in post.content
+        assert "[[pgvector]]" in post.content
+        assert "[[user]]" in post.content
+
+    def test_wikilinks_extracted_by_note_wikilinks_property(self, tmp_path: Path) -> None:
+        llm = _make_llm(_GOOD_RESPONSE)
+        result = distill_conversation(
+            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", source_ref="ref-wl2"
+        )
+        assert result.success is True
+
+        from vaultmind.config import VaultConfig
+
+        parser = VaultParser(VaultConfig(path=tmp_path))
+        note = parser.parse_file(tmp_path / result.output_path)
+        assert set(note.wikilinks) == {"ChromaDB", "pgvector", "user"}
+
+    def test_no_systems_or_participants_omits_wikilink_sections(self, tmp_path: Path) -> None:
+        response = dict(_GOOD_RESPONSE)
+        response["systems"] = []
+        response["participants"] = []
+        llm = _make_llm(response)
+        result = distill_conversation(
+            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", source_ref="ref-no-links"
+        )
+        assert result.success is True
+
+        post = frontmatter.loads((tmp_path / result.output_path).read_text())
+        assert "## Systems" not in post.content
+        assert "## Participants" not in post.content
+
     def test_unresolved_resolution_kept_empty(self, tmp_path: Path) -> None:
         response = dict(_GOOD_RESPONSE)
         response["resolution"] = ""
