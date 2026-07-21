@@ -396,6 +396,15 @@ class EpisodicConfig(BaseSettings):
     short_term_days: int = 30  # Episodes older than this auto-promote to long_term
 
 
+class GapConfig(BaseSettings):
+    """Knowledge gap ledger configuration."""
+
+    enabled: bool = True
+    db_path: str = ""  # Empty = default ~/.vaultmind/data/gaps.db
+    stale_after_days: int = 30
+    max_shown: int = 10
+
+
 class ConsolidationConfig(BaseSettings):
     """Memory consolidation pipeline configuration."""
 
@@ -522,6 +531,7 @@ class Settings(BaseSettings):
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)
     activation: ActivationConfig = Field(default_factory=ActivationConfig)
     episodic: EpisodicConfig = Field(default_factory=EpisodicConfig)
+    gaps: GapConfig = Field(default_factory=GapConfig)
     procedural: ProceduralConfig = Field(default_factory=ProceduralConfig)
     consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
