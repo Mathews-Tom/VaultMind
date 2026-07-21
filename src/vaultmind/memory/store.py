@@ -66,7 +66,7 @@ class EpisodeStore:
 
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         # Migrate existing DBs before running full schema (index on memory_horizon)
         import contextlib

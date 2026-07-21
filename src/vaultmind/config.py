@@ -361,6 +361,16 @@ class ResearchConfig(BaseSettings):
     youtube_language: str = "en"
 
 
+class DistillConfig(BaseSettings):
+    """Conversation distillation configuration."""
+
+    enabled: bool = False
+    min_turns: int = 3
+    model: str = ""  # Empty = use llm.thinking_model
+    output_folder: str = "qa-artifacts"
+    max_tokens: int = 800
+
+
 class TrackingConfig(BaseSettings):
     """User preference tracking configuration."""
 
@@ -508,6 +518,7 @@ class Settings(BaseSettings):
     image: ImageConfig = Field(default_factory=ImageConfig)
     ingest: IngestConfig = Field(default_factory=IngestConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
+    distill: DistillConfig = Field(default_factory=DistillConfig)
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)
     activation: ActivationConfig = Field(default_factory=ActivationConfig)
     episodic: EpisodicConfig = Field(default_factory=EpisodicConfig)

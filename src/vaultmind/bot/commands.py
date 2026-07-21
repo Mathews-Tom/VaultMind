@@ -88,6 +88,7 @@ class CommandHandlers:
             llm_client=llm_client,
             vault_root=settings.vault.path,
             transcriber=transcriber,
+            episode_store=episode_store,
         )
         self._duplicate_detector = duplicate_detector
         self._note_suggester = note_suggester
