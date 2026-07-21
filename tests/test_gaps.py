@@ -1,11 +1,19 @@
-"""Tests for the knowledge gap ledger — GapStore model + storage (M5)."""
+"""Tests for the knowledge gap ledger — GapStore model + storage, and the
+minting call sites in `pipeline/distill.py`, `bot/thinking.py`, and
+`bot/handlers/recall.py` (M5)."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
+import pytest
+
+from vaultmind.bot.thinking import ThinkingPartner
 from vaultmind.memory.gaps import GapKind, GapStatus, GapStore, normalize_question
+from vaultmind.pipeline.distill import DistillResult, mint_gap_for_unresolved
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -237,3 +245,158 @@ class TestStalenessModel:
         store.mint("What is Kosha?", GapKind.UNANSWERED_QUESTION)
         assert len(store.list_open()) == 1
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# pipeline/distill.py::mint_gap_for_unresolved — unresolved qa-artifact minting
+# ---------------------------------------------------------------------------
+
+
+class TestMintGapForUnresolvedMinting:
+    def test_minting_mints_when_resolution_is_empty(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        result = DistillResult(
+            success=True,
+            output_path="qa-artifacts/x.md",
+            frontmatter={"question": "What is Kosha?", "resolution": ""},
+        )
+        mint_gap_for_unresolved(result, gap_store, "telegram-thinking:1:123")
+        gaps = gap_store.list_open()
+        assert len(gaps) == 1
+        assert gaps[0].kind == GapKind.UNANSWERED_QUESTION
+        assert gaps[0].question == "What is Kosha?"
+        assert gaps[0].evidence_ref == "telegram-thinking:1:123"
+        gap_store.close()
+
+    def test_minting_noop_when_resolution_is_present(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        result = DistillResult(
+            success=True,
+            frontmatter={"question": "What is Kosha?", "resolution": "It's a PKM system."},
+        )
+        mint_gap_for_unresolved(result, gap_store, "ref")
+        assert gap_store.list_open() == []
+        gap_store.close()
+
+    def test_minting_noop_when_distillation_failed(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        result = DistillResult(success=False, error="bad")
+        mint_gap_for_unresolved(result, gap_store, "ref")
+        assert gap_store.list_open() == []
+        gap_store.close()
+
+    def test_minting_noop_when_gap_store_not_configured(self) -> None:
+        result = DistillResult(success=True, frontmatter={"question": "q", "resolution": ""})
+        mint_gap_for_unresolved(result, None, "ref")  # must not raise
+
+    def test_minting_dedups_reask_of_same_unresolved_question(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        result = DistillResult(
+            success=True, frontmatter={"question": "What is Kosha?", "resolution": ""}
+        )
+        mint_gap_for_unresolved(result, gap_store, "ref-1")
+        mint_gap_for_unresolved(result, gap_store, "ref-2")
+        assert len(gap_store.list_open()) == 1
+        gap_store.close()
+
+
+# ---------------------------------------------------------------------------
+# bot/thinking.py — weak-context minting for thinking-partner declines
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeLLMConfig:
+    thinking_model: str = "test-model"
+    fast_model: str = "test-model"
+    max_context_notes: int = 3
+    max_tokens: int = 100
+    single_pass_extraction_enabled: bool = False
+    extraction_confidence_threshold: float = 0.7
+
+
+@dataclass
+class _FakeTelegramConfig:
+    thinking_session_ttl: int = 3600
+    thinking_summarization_enabled: bool = False
+    thinking_message_count_threshold: int = 20
+    thinking_recent_turns_to_keep: int = 6
+    thinking_batch_size: int = 4
+    thinking_summary_max_tokens: int = 400
+
+
+def _make_graph() -> MagicMock:
+    graph = MagicMock()
+    graph.get_neighbors.return_value = {
+        "entity": None,
+        "outgoing": [],
+        "incoming": [],
+        "neighbors": [],
+    }
+    return graph
+
+
+def _make_thinking_llm_client(reply_text: str) -> MagicMock:
+    from vaultmind.llm.client import LLMResponse
+
+    client = MagicMock()
+    client.complete.return_value = LLMResponse(text=reply_text, model="test-model", usage={})
+    return client
+
+
+class TestThinkingWeakContextMinting:
+    @pytest.mark.asyncio
+    async def test_minting_mints_gap_when_no_vault_context_found(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        store = MagicMock()
+        store.search.return_value = []
+        partner = ThinkingPartner(
+            llm_config=_FakeLLMConfig(),  # type: ignore[arg-type]
+            telegram_config=_FakeTelegramConfig(),  # type: ignore[arg-type]
+            llm_client=_make_thinking_llm_client("I don't know"),
+            gap_store=gap_store,
+            score_floor=0.5,
+        )
+        await partner.think(1, "What is Kosha?", store, _make_graph())
+
+        gaps = gap_store.list_open()
+        assert len(gaps) == 1
+        assert gaps[0].kind == GapKind.UNANSWERED_QUESTION
+        assert gaps[0].question == "What is Kosha?"
+        assert gaps[0].evidence_ref == "telegram-thinking:1"
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_minting_no_gap_when_context_is_confident(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        store = MagicMock()
+        store.search.return_value = [
+            {
+                "metadata": {"note_title": "Kosha", "note_path": "kosha.md"},
+                "content": "Kosha is a governed knowledge base.",
+                "distance": 0.1,
+            }
+        ]
+        partner = ThinkingPartner(
+            llm_config=_FakeLLMConfig(),  # type: ignore[arg-type]
+            telegram_config=_FakeTelegramConfig(),  # type: ignore[arg-type]
+            llm_client=_make_thinking_llm_client("Kosha is..."),
+            gap_store=gap_store,
+            score_floor=0.5,
+        )
+        await partner.think(1, "What is Kosha?", store, _make_graph())
+
+        assert gap_store.list_open() == []
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_minting_no_gap_store_configured_is_a_noop(self) -> None:
+        store = MagicMock()
+        store.search.return_value = []
+        partner = ThinkingPartner(
+            llm_config=_FakeLLMConfig(),  # type: ignore[arg-type]
+            telegram_config=_FakeTelegramConfig(),  # type: ignore[arg-type]
+            llm_client=_make_thinking_llm_client("I don't know"),
+        )
+        reply = await partner.think(1, "What is Kosha?", store, _make_graph())
+        assert reply == "I don't know"

@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from vaultmind.indexer.ranking import apply_authority
+from vaultmind.indexer.ranking import apply_authority, best_distance
 
 if TYPE_CHECKING:
     from vaultmind.bench.golden import GoldenQuestion
@@ -98,12 +98,6 @@ def _note_path(hit: dict[str, Any]) -> str:
     return str(metadata.get("note_path", ""))
 
 
-def _best_distance(hits: list[dict[str, Any]]) -> float | None:
-    if not hits:
-        return None
-    return min(float(h.get("distance", 1.0)) for h in hits)
-
-
 def score_question(
     question: GoldenQuestion, hits: list[dict[str, Any]], score_floor: float
 ) -> QuestionResult:
@@ -111,7 +105,7 @@ def score_question(
     paths = tuple(_note_path(h) for h in hits)
 
     if not question.answerable:
-        best = _best_distance(hits)
+        best = best_distance(hits)
         declined = best is None or best >= score_floor
         return QuestionResult(
             question_id=question.id,

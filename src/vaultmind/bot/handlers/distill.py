@@ -8,7 +8,11 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from vaultmind.bot.handlers.utils import _is_authorized
-from vaultmind.pipeline.distill import distill_conversation, extract_and_store_episodes
+from vaultmind.pipeline.distill import (
+    distill_conversation,
+    extract_and_store_episodes,
+    mint_gap_for_unresolved,
+)
 
 if TYPE_CHECKING:
     from aiogram.types import Message
@@ -87,6 +91,8 @@ async def handle_distill(
             )
         except Exception:
             logger.exception("Episodic extraction failed for distilled note %s", result.output_path)
+
+    await asyncio.to_thread(mint_gap_for_unresolved, result, ctx.gap_store, source_ref)
 
     suffix = f"\nExtracted {extracted} episode(s)." if extracted else ""
     await message.answer(
