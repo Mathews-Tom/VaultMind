@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from pathlib import Path
 
 import pytest
 
+from vaultmind.indexer.duplicate_detector import DuplicateMatch, MatchType
 from vaultmind.services.review_queue import (
     DEFAULT_THRESHOLDS,
     AutonomyThresholds,
@@ -15,12 +17,11 @@ from vaultmind.services.review_queue import (
     ProposalKind,
     ProposalStatus,
     ReviewQueue,
+    migrate_quarantine,
+    mint_duplicate_proposals,
     route,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
+from vaultmind.vault.models import Note
 
 # ---------------------------------------------------------------------------
 # Lane routing (route())
@@ -323,3 +324,127 @@ class TestFatigueStats:
         stats = queue.fatigue_stats()
         assert stats.total == 0
         assert stats.fatigue_rate == 0.0
+
+
+# ---------------------------------------------------------------------------
+# migrate_quarantine() — one-time tag-quarantine import (PR-2)
+# ---------------------------------------------------------------------------
+
+
+class TestMigrateQuarantine:
+    def test_migration_moves_pending_tags_into_skim_proposals(self, tmp_path: Path) -> None:
+        quarantine_path = tmp_path / "tag_quarantine.json"
+        quarantine_path.write_text(
+            json.dumps({"approved": ["existing"], "quarantined": ["novel-a", "novel-b"]})
+        )
+        queue = ReviewQueue(tmp_path / "queue.db")
+
+        migrated = migrate_quarantine(queue, quarantine_path)
+
+        assert migrated == 2
+        pending = queue.list_pending(lane=Lane.SKIM)
+        assert len(pending) == 2
+        assert {p.kind for p in pending} == {ProposalKind.TAG_VOCABULARY}
+        assert {p.payload["tag"] for p in pending} == {"novel-a", "novel-b"}
+
+    def test_migration_empties_quarantined_list_leaves_approved_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        quarantine_path = tmp_path / "tag_quarantine.json"
+        quarantine_path.write_text(
+            json.dumps({"approved": ["existing"], "quarantined": ["novel-a"]})
+        )
+        queue = ReviewQueue(tmp_path / "queue.db")
+
+        migrate_quarantine(queue, quarantine_path)
+
+        data = json.loads(quarantine_path.read_text())
+        assert data["quarantined"] == []
+        assert data["approved"] == ["existing"]
+
+    def test_migration_of_missing_file_is_a_noop(self, tmp_path: Path) -> None:
+        queue = ReviewQueue(tmp_path / "queue.db")
+        migrated = migrate_quarantine(queue, tmp_path / "does-not-exist.json")
+        assert migrated == 0
+
+    def test_migration_of_already_emptied_file_is_a_noop(self, tmp_path: Path) -> None:
+        quarantine_path = tmp_path / "tag_quarantine.json"
+        quarantine_path.write_text(json.dumps({"approved": ["existing"], "quarantined": []}))
+        queue = ReviewQueue(tmp_path / "queue.db")
+
+        migrated = migrate_quarantine(queue, quarantine_path)
+        assert migrated == 0
+
+    def test_migration_is_idempotent_across_repeated_runs(self, tmp_path: Path) -> None:
+        quarantine_path = tmp_path / "tag_quarantine.json"
+        quarantine_path.write_text(json.dumps({"approved": [], "quarantined": ["novel-a"]}))
+        queue = ReviewQueue(tmp_path / "queue.db")
+
+        first = migrate_quarantine(queue, quarantine_path)
+        second = migrate_quarantine(queue, quarantine_path)
+
+        assert first == 1
+        assert second == 0
+        assert len(queue.list_pending()) == 1
+
+
+# ---------------------------------------------------------------------------
+# mint_duplicate_proposals() — duplicate-detector bridge (PR-2)
+# ---------------------------------------------------------------------------
+
+
+class TestMintDuplicateProposals:
+    def test_merge_band_matches_become_skim_proposals(self, tmp_path: Path) -> None:
+        note = Note(path=Path("a.md"), title="A", content="body")
+        match = DuplicateMatch(
+            source_path="a.md",
+            source_title="A",
+            match_path="b.md",
+            match_title="B",
+            similarity=0.85,
+            match_type=MatchType.MERGE,
+        )
+        queue = ReviewQueue(tmp_path / "queue.db")
+
+        proposals = mint_duplicate_proposals(queue, note, [match])
+
+        assert len(proposals) == 1
+        assert proposals[0].kind is ProposalKind.DUPLICATE_MERGE
+        assert proposals[0].lane is Lane.SKIM
+        assert proposals[0].status is ProposalStatus.PENDING
+
+    def test_duplicate_band_matches_are_ignored(self, tmp_path: Path) -> None:
+        note = Note(path=Path("a.md"), title="A", content="body")
+        match = DuplicateMatch(
+            source_path="a.md",
+            source_title="A",
+            match_path="b.md",
+            match_title="B",
+            similarity=0.98,
+            match_type=MatchType.DUPLICATE,
+        )
+        queue = ReviewQueue(tmp_path / "queue.db")
+
+        proposals = mint_duplicate_proposals(queue, note, [match])
+
+        assert proposals == []
+        assert queue.list_pending() == []
+
+    def test_approving_a_duplicate_proposal_acknowledges_never_applies(
+        self, tmp_path: Path
+    ) -> None:
+        note = Note(path=Path("a.md"), title="A", content="body")
+        match = DuplicateMatch(
+            source_path="a.md",
+            source_title="A",
+            match_path="b.md",
+            match_title="B",
+            similarity=0.85,
+            match_type=MatchType.MERGE,
+        )
+        queue = ReviewQueue(tmp_path / "queue.db")
+        proposals = mint_duplicate_proposals(queue, note, [match])
+
+        result = queue.approve(proposals[0].proposal_id)
+        assert result is not None
+        assert result.status is ProposalStatus.ACKNOWLEDGED
