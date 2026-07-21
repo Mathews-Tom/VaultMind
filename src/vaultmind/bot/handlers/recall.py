@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -11,13 +12,17 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from vaultmind.bot.handlers.utils import _is_authorized
 from vaultmind.bot.sanitize import MAX_QUERY_LENGTH, sanitize_text
-from vaultmind.indexer.ranking import apply_authority
+from vaultmind.indexer.ranking import apply_authority, is_weak_retrieval
+from vaultmind.memory.gaps import GapKind, GapStore
 
 if TYPE_CHECKING:
     from aiogram.types import CallbackQuery, Message
 
     from vaultmind.bot.handlers.bookmark import LastExchange
     from vaultmind.bot.handlers.context import HandlerContext
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -140,11 +145,24 @@ async def handle_recall(
 
     results = apply_authority(results, ctx.settings.ranking)
 
+    user_id = message.from_user.id if message.from_user else 0
+
+    if isinstance(ctx.gap_store, GapStore) and is_weak_retrieval(
+        results, ctx.settings.bench.score_floor
+    ):
+        try:
+            await asyncio.to_thread(
+                ctx.gap_store.mint,
+                query,
+                GapKind.WEAK_RETRIEVAL,
+                f"telegram-recall:{user_id}",
+            )
+        except Exception:
+            logger.exception("Gap minting failed for recall query %r", query)
+
     if not results:
         await message.answer("No matching notes found.")
         return
-
-    user_id = message.from_user.id if message.from_user else 0
 
     session = PaginatedSearch(
         query=query,

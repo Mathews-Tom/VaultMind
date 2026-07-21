@@ -362,3 +362,26 @@ def apply_authority(hits: list[dict[str, Any]], ranking_config: Any = None) -> l
 
     scored.sort(key=lambda h: h["authority_score"], reverse=True)
     return scored
+
+
+def best_distance(hits: list[dict[str, Any]]) -> float | None:
+    """Lowest (best) `distance` across retrieval hits, or `None` if there are none.
+
+    Shared by `bench/runner.py`'s deterministic honest-decline scoring and
+    the live weak-retrieval gap-minting checks in `bot/handlers/recall.py`
+    and `bot/thinking.py` — one implementation of "nothing confidently
+    relevant was retrieved" for every caller that needs it.
+    """
+    if not hits:
+        return None
+    return min(float(h.get("distance", 1.0)) for h in hits)
+
+
+def is_weak_retrieval(hits: list[dict[str, Any]], score_floor: float) -> bool:
+    """True when nothing confidently relevant was retrieved for a query.
+
+    Mirrors `bench/runner.py::score_question`'s honest-decline check: no
+    hits, or the best hit's distance is at or above `score_floor`.
+    """
+    best = best_distance(hits)
+    return best is None or best >= score_floor

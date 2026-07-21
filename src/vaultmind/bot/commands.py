@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from vaultmind.indexer.note_suggester import NoteSuggester
     from vaultmind.indexer.store import VaultStore
     from vaultmind.llm.client import LLMClient
+    from vaultmind.memory.gaps import GapStore
     from vaultmind.memory.procedural import ProceduralMemory
     from vaultmind.memory.store import EpisodeStore
     from vaultmind.pipeline.maturation import MaturationPipeline
@@ -79,6 +80,7 @@ class CommandHandlers:
         maturation_pipeline: MaturationPipeline | None = None,
         episode_store: EpisodeStore | None = None,
         procedural_memory: ProceduralMemory | None = None,
+        gap_store: GapStore | None = None,
     ) -> None:
         self._ctx = HandlerContext(
             settings=settings,
@@ -90,6 +92,7 @@ class CommandHandlers:
             vault_root=settings.vault.path,
             transcriber=transcriber,
             episode_store=episode_store,
+            gap_store=gap_store,
         )
         self._duplicate_detector = duplicate_detector
         self._note_suggester = note_suggester
@@ -97,6 +100,7 @@ class CommandHandlers:
         self._maturation_pipeline = maturation_pipeline
         self._episode_store = episode_store
         self._procedural_memory = procedural_memory
+        self._gap_store = gap_store
         self._pending_edits: dict[int, dict[str, str]] = {}
         self._search_sessions: dict[int, PaginatedSearch] = {}
         self._last_exchanges: dict[int, LastExchange] = {}

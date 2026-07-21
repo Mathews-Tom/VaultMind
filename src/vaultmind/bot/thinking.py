@@ -10,10 +10,16 @@ import asyncio
 import logging
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from vaultmind.indexer.ranking import is_weak_retrieval
 from vaultmind.llm.client import LLMError, Message
-from vaultmind.pipeline.distill import distill_conversation, extract_and_store_episodes
+from vaultmind.memory.gaps import GapKind
+from vaultmind.pipeline.distill import (
+    distill_conversation,
+    extract_and_store_episodes,
+    mint_gap_for_unresolved,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,6 +30,8 @@ if TYPE_CHECKING:
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
     from vaultmind.llm.client import LLMClient
+    from vaultmind.memory.gaps import GapStore
+    from vaultmind.pipeline.distill import DistillResult
     from vaultmind.vault.parser import VaultParser
 
 logger = logging.getLogger(__name__)
@@ -96,6 +104,8 @@ class ThinkingPartner:
         vault_root: Path | None = None,
         parser: VaultParser | None = None,
         distill_config: DistillConfig | None = None,
+        gap_store: GapStore | None = None,
+        score_floor: float = 0.5,
     ) -> None:
         self.llm_config = llm_config
         self._telegram_config = telegram_config
@@ -106,6 +116,8 @@ class ThinkingPartner:
         self._vault_root = vault_root
         self._parser = parser
         self._distill_config = distill_config
+        self._gap_store = gap_store
+        self._score_floor = score_floor
         # In-memory hot cache over SQLite
         self._sessions: dict[int, _ThinkingSession] = {}
         # Sessions reaped by idle-timeout, awaiting distillation dispatch
@@ -135,7 +147,7 @@ class ThinkingPartner:
 
         # Retrieve vault context (offload sync I/O to thread pool)
         vault_context = await asyncio.to_thread(
-            self._build_vault_context, topic, store, graph, episode_store
+            self._build_vault_context, topic, store, graph, episode_store, user_id
         )
 
         # Build graph context via entity extraction (if available)
@@ -200,6 +212,7 @@ class ThinkingPartner:
         store: VaultStore,
         graph: KnowledgeGraph,
         episode_store: object | None = None,
+        user_id: int | None = None,
     ) -> str:
         """Retrieve relevant context from vault, knowledge graph, and episodic memory."""
         parts: list[str] = []
@@ -214,6 +227,7 @@ class ThinkingPartner:
                 path = meta.get("note_path", "")
                 content = hit["content"][:500]  # Cap per-chunk context
                 parts.append(f"### [[{title}]] (`{path}`)\n{content}\n")
+        self._maybe_mint_weak_context_gap(topic, results, user_id)
 
         # Knowledge graph context — try to find entities mentioned in the topic
         words = topic.split()
@@ -249,6 +263,31 @@ class ThinkingPartner:
             self._add_episodic_context(parts, topic, episode_store)
 
         return "\n".join(parts) if parts else "No specific vault context found for this topic."
+
+    def _maybe_mint_weak_context_gap(
+        self,
+        topic: str,
+        results: list[dict[str, Any]],
+        user_id: int | None,
+    ) -> None:
+        """Mint an `unanswered_question` gap when nothing confidently relevant was found.
+
+        Zero-additional-LLM-cost signal: no vault evidence exists to answer
+        `topic` from or cite, so any reply is necessarily a decline or
+        uncited — reuses the same score-floor check `/recall` and `bench`
+        already apply to `store.search()`/`hybrid_search()` hits.
+        """
+        if self._gap_store is None:
+            return
+        if not is_weak_retrieval(results, self._score_floor):
+            return
+        evidence_ref = (
+            f"telegram-thinking:{user_id}" if user_id is not None else "telegram-thinking"
+        )
+        try:
+            self._gap_store.mint(topic, GapKind.UNANSWERED_QUESTION, evidence_ref=evidence_ref)
+        except Exception:
+            logger.exception("Gap minting failed for topic %r", topic)
 
     def _add_episodic_context(
         self,
@@ -600,27 +639,32 @@ class ThinkingPartner:
             return
 
         await asyncio.to_thread(
-            self._index_distilled_note, result.output_path, model, store, episode_store
+            self._index_distilled_note, result, model, store, episode_store, source_ref
         )
 
     def _index_distilled_note(
         self,
-        output_path: str,
+        result: DistillResult,
         model: str,
         store: VaultStore,
         episode_store: object | None,
+        source_ref: str,
     ) -> None:
         """Parse, index, and run episodic extraction over a distilled note (thread-offloaded)."""
         assert self._vault_root is not None
         assert self._parser is not None
-        note = self._parser.parse_file(self._vault_root / output_path)
+        note = self._parser.parse_file(self._vault_root / result.output_path)
         store.index_single_note(note, self._parser)
 
         if episode_store is not None:
             try:
                 extract_and_store_episodes(note, self._client, model, episode_store)
             except Exception:
-                logger.exception("Episodic extraction failed for distilled note %s", output_path)
+                logger.exception(
+                    "Episodic extraction failed for distilled note %s", result.output_path
+                )
+
+        mint_gap_for_unresolved(result, self._gap_store, source_ref)
 
     def has_active_session(self, user_id: int) -> bool:
         """Check if a user has an active (non-expired) thinking session."""

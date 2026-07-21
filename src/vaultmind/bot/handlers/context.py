@@ -28,3 +28,4 @@ class HandlerContext:
     vault_root: Path
     transcriber: Transcriber | None = field(default=None)
     episode_store: object | None = field(default=None)
+    gap_store: object | None = field(default=None)
