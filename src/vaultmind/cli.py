@@ -702,6 +702,10 @@ def bot(ctx: click.Context) -> None:
         PreferenceStore(pref_db) if settings.tracking.enabled else None
     )
 
+    from vaultmind.vault.events import VaultEventBus
+
+    event_bus = VaultEventBus()
+
     handlers = CommandHandlers(
         settings=settings,
         store=store,
@@ -718,6 +722,7 @@ def bot(ctx: click.Context) -> None:
         procedural_memory=procedural_memory,
         gap_store=gap_store,
         review_queue=review_queue,
+        event_bus=event_bus,
     )
 
     tg_bot, dp = create_bot(settings.telegram.bot_token)
@@ -762,12 +767,9 @@ def bot(ctx: click.Context) -> None:
         NoteCreatedEvent,
         NoteDeletedEvent,
         NoteModifiedEvent,
-        VaultEventBus,
     )
     from vaultmind.vault.watch_handler import IncrementalWatchHandler
     from vaultmind.vault.watcher import VaultWatcher
-
-    event_bus = VaultEventBus()
 
     # Subscribe duplicate detection and note suggestions to watch events
     if detector is not None:
@@ -808,12 +810,21 @@ def bot(ctx: click.Context) -> None:
     console.print(f"[green]✓[/green] Starting Telegram bot (LLM: {provider}/{model})...")
     console.print(f"  Watch mode: debounce={settings.watch.debounce_ms}ms")
 
-    # Maturation scheduler
+    # Scheduler — hoisted out of any single feature's gate (matches the
+    # `Notifier` hoist above) so insight/evolution/procedural loops and M8's
+    # source-connector jobs all run regardless of whether maturation itself
+    # is enabled.
     from datetime import timedelta
 
     from vaultmind.services.scheduler import ScheduledJob, SchedulerService
 
-    scheduler: SchedulerService | None = None
+    sched_state = (
+        Path(settings.scheduler.state_path)
+        if settings.scheduler.state_path
+        else Path.home() / ".vaultmind" / "data" / "scheduler_state.json"
+    )
+    jobs: list[ScheduledJob] = []
+
     if maturation_pipeline is not None:
         if review_queue is not None:
             from vaultmind.services.review_queue import ProposalKind
@@ -853,85 +864,159 @@ def bot(ctx: click.Context) -> None:
                         )
             maturation_pipeline.mark_run()
 
-        maturation_job = ScheduledJob.legacy(
-            name="maturation_digest",
-            interval=timedelta(days=7),
-            execute=_maturation_digest,
-        )
-        sched_state = (
-            Path(settings.scheduler.state_path)
-            if settings.scheduler.state_path
-            else Path.home() / ".vaultmind" / "data" / "scheduler_state.json"
+        jobs.append(
+            ScheduledJob.legacy(
+                name="maturation_digest",
+                interval=timedelta(days=7),
+                execute=_maturation_digest,
+            )
         )
 
-        # Compound loop jobs (notifier used below was constructed above,
-        # hoisted out of this block so contradiction escalation can use it too)
-        jobs: list[ScheduledJob] = [maturation_job]
+    if settings.loops.insight_enabled and preference_store is not None:
+        from vaultmind.services.loops.insight_loop import create_insight_executor
+        from vaultmind.services.scheduler import resolve_cron_expr
 
-        if settings.loops.insight_enabled and preference_store is not None:
-            from vaultmind.services.loops.insight_loop import create_insight_executor
-            from vaultmind.services.scheduler import resolve_cron_expr
-
-            insight_exec = create_insight_executor(preference_store)
-            insight_cron = resolve_cron_expr(
-                settings.loops.insight_schedule,
-                settings.loops.insight_interval_days,
+        insight_exec = create_insight_executor(preference_store)
+        insight_cron = resolve_cron_expr(
+            settings.loops.insight_schedule,
+            settings.loops.insight_interval_days,
+        )
+        jobs.append(
+            ScheduledJob(
+                name="insight_loop",
+                interval=timedelta(days=settings.loops.insight_interval_days),
+                cron_expr=insight_cron,
+                execute=insight_exec,
             )
-            jobs.append(
-                ScheduledJob(
-                    name="insight_loop",
-                    interval=timedelta(days=settings.loops.insight_interval_days),
-                    cron_expr=insight_cron,
-                    execute=insight_exec,
-                )
+        )
+
+    if settings.loops.evolution_enabled and evolution_detector is not None:
+        from vaultmind.services.loops.evolution_loop import create_evolution_executor
+        from vaultmind.services.scheduler import resolve_cron_expr
+
+        evolution_exec = create_evolution_executor(evolution_detector)
+        evolution_cron = resolve_cron_expr(
+            settings.loops.evolution_schedule,
+            settings.loops.evolution_interval_days,
+        )
+        jobs.append(
+            ScheduledJob(
+                name="evolution_loop",
+                interval=timedelta(days=settings.loops.evolution_interval_days),
+                cron_expr=evolution_cron,
+                execute=evolution_exec,
             )
+        )
 
-        if settings.loops.evolution_enabled and evolution_detector is not None:
-            from vaultmind.services.loops.evolution_loop import create_evolution_executor
-            from vaultmind.services.scheduler import resolve_cron_expr
+    if (
+        settings.loops.procedural_enabled
+        and settings.procedural.enabled
+        and procedural_memory is not None
+        and episode_store is not None
+    ):
+        from vaultmind.services.loops.procedural_loop import create_procedural_executor
+        from vaultmind.services.scheduler import resolve_cron_expr
 
-            evolution_exec = create_evolution_executor(evolution_detector)
-            evolution_cron = resolve_cron_expr(
-                settings.loops.evolution_schedule,
-                settings.loops.evolution_interval_days,
+        proc_model = settings.procedural.synthesis_model or settings.llm.fast_model
+        procedural_exec = create_procedural_executor(
+            procedural_memory=procedural_memory,
+            episode_store=episode_store,
+            llm_client=llm_client,
+            model=proc_model,
+        )
+        procedural_cron = resolve_cron_expr(
+            settings.loops.procedural_schedule,
+            settings.loops.procedural_interval_days,
+        )
+        jobs.append(
+            ScheduledJob(
+                name="procedural_loop",
+                interval=timedelta(days=settings.loops.procedural_interval_days),
+                cron_expr=procedural_cron,
+                execute=procedural_exec,
             )
-            jobs.append(
-                ScheduledJob(
-                    name="evolution_loop",
-                    interval=timedelta(days=settings.loops.evolution_interval_days),
-                    cron_expr=evolution_cron,
-                    execute=evolution_exec,
-                )
-            )
+        )
 
-        if (
-            settings.loops.procedural_enabled
-            and settings.procedural.enabled
-            and procedural_memory is not None
-            and episode_store is not None
-        ):
-            from vaultmind.services.loops.procedural_loop import create_procedural_executor
-            from vaultmind.services.scheduler import resolve_cron_expr
+    # Source connector jobs (M8) — one per enabled `config/sources.toml`
+    # instance. Gated on `review_queue is not None`: every connector-fetched
+    # item must route through M7's queue (never bypass it, per the
+    # milestone's own Risk row), so without a queue there is nowhere safe
+    # to route a connector proposal at all.
+    if settings.sources.enabled and review_queue is not None:
+        from vaultmind.services.review_queue import ProposalKind
+        from vaultmind.sources.pipeline import make_applier, run_connector_once
+        from vaultmind.sources.registry import load_source_instances
+        from vaultmind.sources.store import SourceStore
 
-            proc_model = settings.procedural.synthesis_model or settings.llm.fast_model
-            procedural_exec = create_procedural_executor(
-                procedural_memory=procedural_memory,
-                episode_store=episode_store,
+        sources_db = (
+            Path(settings.sources.db_path)
+            if settings.sources.db_path
+            else VAULTMIND_HOME / "data" / "sources.db"
+        )
+        sources_config = (
+            Path(settings.sources.config_path)
+            if settings.sources.config_path
+            else Path("config/sources.toml")
+        )
+        source_store = SourceStore(sources_db)
+        distill_model = settings.distill.model or settings.llm.thinking_model
+        review_queue.register_applier(
+            ProposalKind.SOURCE_INGESTION,
+            make_applier(
+                vault_root=settings.vault.path,
                 llm_client=llm_client,
-                model=proc_model,
-            )
-            procedural_cron = resolve_cron_expr(
-                settings.loops.procedural_schedule,
-                settings.loops.procedural_interval_days,
-            )
+                model=distill_model,
+                gap_store=gap_store,
+            ),
+        )
+
+        for source_instance in load_source_instances(sources_config):
+            if not source_instance.enabled:
+                continue
+
+            def _make_source_executor(
+                instance: object = source_instance,
+            ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+                async def _run(state: dict[str, Any]) -> dict[str, Any]:
+                    from vaultmind.sources.models import SourceInstance as _SourceInstance
+
+                    assert isinstance(instance, _SourceInstance)
+                    result = await run_connector_once(
+                        instance,
+                        source_store=source_store,
+                        review_queue=review_queue,
+                        parser=parser,
+                        store=store,
+                        vault_root=settings.vault.path,
+                        event_bus=event_bus,
+                    )
+                    if result.error:
+                        logging.getLogger(__name__).warning(
+                            "Source connector '%s' run failed: %s",
+                            result.instance_name,
+                            result.error,
+                        )
+                    else:
+                        logging.getLogger(__name__).info(
+                            "Source connector '%s': %d fetched, %d ingested",
+                            result.instance_name,
+                            result.items_fetched,
+                            result.items_ingested,
+                        )
+                    return state
+
+                return _run
+
             jobs.append(
                 ScheduledJob(
-                    name="procedural_loop",
-                    interval=timedelta(days=settings.loops.procedural_interval_days),
-                    cron_expr=procedural_cron,
-                    execute=procedural_exec,
+                    name=f"source_{source_instance.name}",
+                    interval=timedelta(hours=source_instance.interval_hours),
+                    execute=_make_source_executor(),
                 )
             )
+
+    scheduler: SchedulerService | None = None
+    if jobs:
         scheduler = SchedulerService(
             jobs=jobs,
             state_path=sched_state,

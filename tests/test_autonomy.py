@@ -196,3 +196,145 @@ class TestHandleAutonomyCallback:
 
         callback.message.edit_text.assert_not_called()
         callback.answer.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# handle_autonomy_callback — SOURCE_INGESTION event-bus follow-up (M8)
+# ---------------------------------------------------------------------------
+
+
+class _FakeParser:
+    def __init__(self, vault_root: Path) -> None:
+        self.vault_root = vault_root
+
+    def parse_file(self, path: Path) -> object:
+        from vaultmind.vault.models import Note
+
+        return Note(path=path.relative_to(self.vault_root), title=path.stem, content="body")
+
+
+class _FakeStore:
+    def __init__(self) -> None:
+        self.indexed: list[str] = []
+
+    def index_single_note(self, note: object, parser: object) -> int:
+        self.indexed.append(str(note.path))  # type: ignore[attr-defined]
+        return 1
+
+
+class _FakeEventBus:
+    def __init__(self) -> None:
+        self.published: list[object] = []
+
+    async def publish(self, event: object) -> None:
+        self.published.append(event)
+
+
+def _make_ingestion_ctx(review_queue: ReviewQueue, vault_root: Path) -> HandlerContext:
+    return HandlerContext(
+        settings=object(),
+        store=_FakeStore(),
+        graph=object(),
+        parser=_FakeParser(vault_root),
+        thinking=object(),
+        llm_client=object(),
+        vault_root=vault_root,
+        review_queue=review_queue,
+    )
+
+
+class TestHandleAutonomyCallbackSourceIngestionFollowUp:
+    async def test_approve_publishes_note_created_event(self, tmp_path: Path) -> None:
+        (tmp_path / "note.md").write_text("---\ntitle: X\n---\n\nbody\n")
+
+        def _apply(payload: dict[str, object]) -> str:
+            return "note.md"
+
+        queue = ReviewQueue(
+            tmp_path / "queue.db", appliers={ProposalKind.SOURCE_INGESTION: _apply}
+        )
+        proposal = queue.propose(
+            ProposalKind.SOURCE_INGESTION,
+            confidence=1.0,
+            impact=Impact.LOW,
+            summary="test",
+            payload={},
+            lane_override=Lane.BLOCK,
+        )
+        ctx = _make_ingestion_ctx(queue, tmp_path)
+        event_bus = _FakeEventBus()
+        callback = AsyncMock()
+        callback.data = f"autonomy_approve:{proposal.proposal_id}"
+        callback.message = AsyncMock()
+
+        await handle_autonomy_callback(ctx, callback, event_bus)  # type: ignore[arg-type]
+
+        assert len(event_bus.published) == 1
+        assert ctx.store.indexed == ["note.md"]  # type: ignore[attr-defined]
+
+    async def test_approve_all_skim_publishes_event_per_applied_ingestion(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "a.md").write_text("---\ntitle: A\n---\n\nbody\n")
+        (tmp_path / "b.md").write_text("---\ntitle: B\n---\n\nbody\n")
+
+        paths = iter(["a.md", "b.md"])
+
+        def _apply(payload: dict[str, object]) -> str:
+            return next(paths)
+
+        queue = ReviewQueue(
+            tmp_path / "queue.db", appliers={ProposalKind.SOURCE_INGESTION: _apply}
+        )
+        queue.propose(
+            ProposalKind.SOURCE_INGESTION,
+            confidence=1.0,
+            impact=Impact.LOW,
+            summary="a",
+            payload={"id": "a"},
+            lane_override=Lane.SKIM,
+        )
+        queue.propose(
+            ProposalKind.SOURCE_INGESTION,
+            confidence=1.0,
+            impact=Impact.LOW,
+            summary="b",
+            payload={"id": "b"},
+            lane_override=Lane.SKIM,
+        )
+        ctx = _make_ingestion_ctx(queue, tmp_path)
+        event_bus = _FakeEventBus()
+        callback = AsyncMock()
+        callback.data = "autonomy_approve_all_skim"
+        callback.message = AsyncMock()
+
+        await handle_autonomy_callback(ctx, callback, event_bus)  # type: ignore[arg-type]
+
+        assert len(event_bus.published) == 2
+
+    async def test_no_event_bus_skips_follow_up_without_error(self, tmp_path: Path) -> None:
+        (tmp_path / "note.md").write_text("---\ntitle: X\n---\n\nbody\n")
+
+        def _apply(payload: dict[str, object]) -> str:
+            return "note.md"
+
+        queue = ReviewQueue(
+            tmp_path / "queue.db", appliers={ProposalKind.SOURCE_INGESTION: _apply}
+        )
+        proposal = queue.propose(
+            ProposalKind.SOURCE_INGESTION,
+            confidence=1.0,
+            impact=Impact.LOW,
+            summary="test",
+            payload={},
+            lane_override=Lane.BLOCK,
+        )
+        ctx = _make_ingestion_ctx(queue, tmp_path)
+        callback = AsyncMock()
+        callback.data = f"autonomy_approve:{proposal.proposal_id}"
+        callback.message = AsyncMock()
+
+        await handle_autonomy_callback(ctx, callback)  # no event_bus arg — defaults to None
+
+        callback.message.edit_text.assert_called_once()
+        assert "Approved" in callback.message.edit_text.call_args[0][0]
