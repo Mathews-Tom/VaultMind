@@ -288,6 +288,7 @@ uv sync --extra mcp
 | `workflow_suggest` | Find matching procedural workflow for a given context            |
 | `graph_evolution`  | Belief evolution signals: confidence drift, relationship shifts  |
 | `recent_activity`  | Notes created or modified in the last N days                     |
+| `read_frontmatter` | Peek parsed frontmatter (type, tags, dates, authority) — no body  |
 
 ### MCP Profiles
 

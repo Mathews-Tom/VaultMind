@@ -288,13 +288,13 @@ retention_days = 90
 
 [mcp.profiles.researcher]
 description = "Read-only access for research and Q&A tasks"
-allowed_tools = ["vault_search", "vault_read", "vault_list", "graph_query", "graph_path"]
+allowed_tools = ["vault_search", "vault_read", "vault_list", "graph_query", "graph_path", "read_frontmatter"]
 folder_scope = ["*"]
 write_enabled = false
 
 [mcp.profiles.planner]
 description = "Read/write access for project planning"
-allowed_tools = ["vault_search", "vault_read", "vault_write", "vault_list", "graph_query", "graph_path", "capture", "capture_note"]
+allowed_tools = ["vault_search", "vault_read", "vault_write", "vault_list", "graph_query", "graph_path", "capture", "capture_note", "read_frontmatter"]
 folder_scope = ["02-projects", "00-inbox"]
 write_enabled = true
 max_note_size_bytes = 50000

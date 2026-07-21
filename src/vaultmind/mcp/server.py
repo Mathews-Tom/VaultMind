@@ -141,6 +141,24 @@ def create_mcp_server(
                 },
             ),
             Tool(
+                name="read_frontmatter",
+                description=(
+                    "Peek a note's parsed frontmatter (type, tags, dates, authority)"
+                    " without fetching the note body. Cheaper than vault_read for"
+                    " metadata-only lookups."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Note path relative to vault root",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
+            Tool(
                 name="graph_query",
                 description=(
                     "Query the knowledge graph for an entity's"
@@ -378,7 +396,10 @@ def create_mcp_server(
                 if name in ("vault_write", "capture", "capture_note"):
                     enforcer.check_write()
                 # Check path scope for path-based operations
-                if name in ("vault_read", "vault_write", "vault_list") and "path" in arguments:
+                if (
+                    name in ("vault_read", "vault_write", "vault_list", "read_frontmatter")
+                    and "path" in arguments
+                ):
                     from pathlib import Path as PathCls
 
                     enforcer.check_path(PathCls(arguments["path"]))
@@ -522,6 +543,27 @@ def _dispatch_tool(
             rel = md.relative_to(vault_path)
             notes.append(str(rel))
         return {"notes": sorted(notes), "count": len(notes)}
+
+    elif name == "read_frontmatter":
+        try:
+            filepath = validate_vault_path(args["path"], vault_path)
+        except PathTraversalError as e:
+            return {"error": f"Path not allowed: {e.user_path}"}
+        if not filepath.exists():
+            return {"error": f"Note not found: {args['path']}"}
+        note = parser.parse_file(filepath)
+        return {
+            "path": args["path"],
+            "title": note.title,
+            "note_type": note.note_type.value,
+            "tags": note.tags,
+            "authority": note.authority,
+            "status": note.status,
+            "source": note.source,
+            "created": note.created.isoformat(),
+            "modified": note.modified.isoformat(),
+            "frontmatter": note.frontmatter,
+        }
 
     elif name == "graph_query":
         result = graph.get_neighbors(args["entity"], depth=args.get("depth", 1))

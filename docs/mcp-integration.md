@@ -250,6 +250,16 @@ Recent vault activity: notes created or modified in the last N days.
 
 **Returns:** `{days, created: [...], modified: [...], created_count, modified_count}` — file paths relative to vault root.
 
+### `read_frontmatter`
+
+Peek a note's parsed frontmatter (type, tags, dates, authority) without fetching the note body. Cheaper than `vault_read` for metadata-only lookups. Never returns body text.
+
+**Parameters:**
+
+- `path` (string, required) — note path relative to vault root
+
+**Returns:** `{path, title, note_type, tags, authority, status, source, created, modified, frontmatter}` — `frontmatter` is the raw parsed YAML dict.
+
 ## Profiles
 
 Profiles restrict what an agent can do. They control tool access, folder scope, and write permissions.
@@ -258,7 +268,7 @@ Profiles restrict what an agent can do. They control tool access, folder scope, 
 
 Read-only access for research and Q&A tasks.
 
-- **Tools:** `vault_search`, `vault_read`, `vault_list`, `graph_query`, `graph_path`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`
+- **Tools:** `vault_search`, `vault_read`, `vault_list`, `graph_query`, `graph_path`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`
 - **Folders:** All
 - **Write:** No
 
@@ -266,7 +276,7 @@ Read-only access for research and Q&A tasks.
 
 Read/write access scoped to project planning.
 
-- **Tools:** All researcher tools + `vault_write`, `capture`, `capture_note`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`
+- **Tools:** All researcher tools + `vault_write`, `capture`, `capture_note`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`
 - **Folders:** `02-projects`, `00-inbox`
 - **Write:** Yes (max 50KB per note)
 
