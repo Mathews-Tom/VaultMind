@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
+    from vaultmind.vault.models import Note
     from vaultmind.vault.parser import VaultParser
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,41 @@ def create_mcp_server(
                         "tag": {
                             "type": "string",
                             "description": "Filter by tag (optional)",
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="read_frontmatter",
+                description=(
+                    "Peek a note's parsed frontmatter (type, tags, dates, authority)"
+                    " without fetching the note body. Cheaper than vault_read for"
+                    " metadata-only lookups."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Note path relative to vault root",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
+            Tool(
+                name="list_folder_index",
+                description=(
+                    "List a folder's structured index: note titles and one-line"
+                    " descriptions, without fetching full note bodies."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "folder": {
+                            "type": "string",
+                            "description": ("Folder path relative to vault root (default: root)"),
+                            "default": "",
                         },
                     },
                 },
@@ -378,10 +414,17 @@ def create_mcp_server(
                 if name in ("vault_write", "capture", "capture_note"):
                     enforcer.check_write()
                 # Check path scope for path-based operations
-                if name in ("vault_read", "vault_write", "vault_list") and "path" in arguments:
+                if (
+                    name in ("vault_read", "vault_write", "vault_list", "read_frontmatter")
+                    and "path" in arguments
+                ):
                     from pathlib import Path as PathCls
 
                     enforcer.check_path(PathCls(arguments["path"]))
+                if name == "list_folder_index" and "folder" in arguments:
+                    from pathlib import Path as PathCls
+
+                    enforcer.check_path(PathCls(arguments["folder"]))
                 if name == "vault_write" and "content" in arguments:
                     enforcer.check_size(arguments["content"])
 
@@ -457,6 +500,19 @@ def create_mcp_server(
     return server
 
 
+def _one_line_description(note: Note, max_len: int = 160) -> str:
+    """Derive a one-line description from frontmatter, else the note's first body line."""
+    fm_description = note.frontmatter.get("description")
+    if isinstance(fm_description, str) and fm_description.strip():
+        return fm_description.strip()[:max_len]
+    for line in note.body_without_frontmatter().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        return stripped[:max_len]
+    return ""
+
+
 def _dispatch_tool(
     name: str,
     args: dict[str, Any],
@@ -522,6 +578,52 @@ def _dispatch_tool(
             rel = md.relative_to(vault_path)
             notes.append(str(rel))
         return {"notes": sorted(notes), "count": len(notes)}
+
+    elif name == "read_frontmatter":
+        try:
+            filepath = validate_vault_path(args["path"], vault_path)
+        except PathTraversalError as e:
+            return {"error": f"Path not allowed: {e.user_path}"}
+        if not filepath.exists():
+            return {"error": f"Note not found: {args['path']}"}
+        note = parser.parse_file(filepath)
+        return {
+            "path": args["path"],
+            "title": note.title,
+            "note_type": note.note_type.value,
+            "tags": note.tags,
+            "authority": note.authority,
+            "status": note.status,
+            "source": note.source,
+            "created": note.created.isoformat(),
+            "modified": note.modified.isoformat(),
+            "frontmatter": note.frontmatter,
+        }
+
+    elif name == "list_folder_index":
+        try:
+            folder = validate_vault_path(args.get("folder", ""), vault_path)
+        except PathTraversalError as e:
+            return {"error": f"Path not allowed: {e.user_path}"}
+        if not folder.exists():
+            return {"error": f"Folder not found: {args.get('folder', '')}"}
+        entries = []
+        for md in sorted(folder.rglob("*.md")):
+            try:
+                note = parser.parse_file(md)
+            except Exception as e:
+                logger.warning("Failed to parse %s for folder index: %s", md, e)
+                continue
+            entries.append(
+                {
+                    "path": str(md.relative_to(vault_path)),
+                    "title": note.title,
+                    "description": _one_line_description(note),
+                    "note_type": note.note_type.value,
+                    "tags": note.tags,
+                }
+            )
+        return {"folder": args.get("folder", ""), "notes": entries, "count": len(entries)}
 
     elif name == "graph_query":
         result = graph.get_neighbors(args["entity"], depth=args.get("depth", 1))
