@@ -49,6 +49,7 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "• `/edit <note> <instruction>` → edit a note\n"
             "• `/delete <note>` → delete a note\n"
             "• `/bookmark <title>` → bookmark session/last Q&A to vault\n"
+            "• `/distill` → distill session/last Q&A into a qa-artifact note\n"
             "• `/suggest <note>` → find notes to link\n"
             "• `/duplicates <note>` → find duplicate/similar notes\n"
             "• `/review` → weekly review prompts\n"
@@ -71,6 +72,10 @@ def register_handlers(handlers: CommandHandlers) -> None:
             await message.answer("Usage: `/bookmark <title>`", parse_mode="Markdown")
             return
         await handlers.handle_bookmark(message, title)
+
+    @router.message(Command("distill"))
+    async def cmd_distill(message: Message) -> None:
+        await handlers.handle_distill(message)
 
     @router.message(Command("recall"))
     async def cmd_recall(message: Message) -> None:
@@ -204,7 +209,8 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "• `/think <topic>` — start a thinking partner session\n"
             "  _Modes: `explore:`, `critique:`, `synthesize:`, `plan:`_\n"
             "  Follow-up messages continue the session automatically.\n"
-            "• `/bookmark <title>` — save session or last Q&A to vault\n\n"
+            "• `/bookmark <title>` — save session or last Q&A to vault\n"
+            "• `/distill` — distill session/last Q&A into a qa-artifact note\n\n"
             "*System*\n"
             "• `/health` — check system status\n"
             "• `/stats` — vault & graph statistics\n"

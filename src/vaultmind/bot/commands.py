@@ -10,6 +10,7 @@ from vaultmind.bot.handlers.capture import handle_capture
 from vaultmind.bot.handlers.context import HandlerContext
 from vaultmind.bot.handlers.daily import handle_daily
 from vaultmind.bot.handlers.delete import handle_delete, handle_delete_callback
+from vaultmind.bot.handlers.distill import handle_distill
 from vaultmind.bot.handlers.duplicates import handle_duplicates
 from vaultmind.bot.handlers.edit import handle_edit, handle_edit_callback
 from vaultmind.bot.handlers.evolve import handle_evolve
@@ -185,6 +186,9 @@ class CommandHandlers:
 
     async def handle_bookmark(self, message: Message, title: str) -> None:
         await handle_bookmark(self._ctx, message, title, self._last_exchanges)
+
+    async def handle_distill(self, message: Message) -> None:
+        await handle_distill(self._ctx, message, self._ctx.settings.distill, self._last_exchanges)
 
     async def handle_health(self, message: Message) -> None:
         await handle_health(self._ctx, message)
