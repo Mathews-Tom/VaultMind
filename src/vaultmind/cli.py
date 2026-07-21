@@ -227,7 +227,7 @@ def digest(ctx: click.Context, days: int | None, save: bool | None) -> None:
     """Generate a vault digest report."""
     from rich.table import Table
 
-    from vaultmind.config import load_settings
+    from vaultmind.config import VAULTMIND_HOME, load_settings
     from vaultmind.graph import KnowledgeGraph
     from vaultmind.indexer import Embedder, VaultStore
     from vaultmind.indexer.digest import DigestGenerator
@@ -269,7 +269,20 @@ def digest(ctx: click.Context, days: int | None, save: bool | None) -> None:
     store = VaultStore(settings.chroma, embedder)
     graph = KnowledgeGraph(settings.graph)
 
-    generator = DigestGenerator(store=store, graph=graph, parser=parser, config=digest_config)
+    from vaultmind.memory.gaps import GapStore
+
+    gap_store: GapStore | None = None
+    if settings.gaps.enabled:
+        gap_db = (
+            Path(settings.gaps.db_path)
+            if settings.gaps.db_path
+            else VAULTMIND_HOME / "data" / "gaps.db"
+        )
+        gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
+
+    generator = DigestGenerator(
+        store=store, graph=graph, parser=parser, config=digest_config, gap_store=gap_store
+    )
 
     with console.status("Generating digest..."):
         report = generator.generate()

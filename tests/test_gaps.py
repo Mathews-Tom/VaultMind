@@ -569,3 +569,92 @@ class TestGapsCommandLifecycle:
         assert staled is not None
         assert staled.status == GapStatus.STALE
         gap_store.close()
+
+
+# ---------------------------------------------------------------------------
+# indexer/digest.py — Knowledge Gaps digest section
+# ---------------------------------------------------------------------------
+
+
+class _FakeDigestStore:
+    def search(self, query: str, n_results: int = 5, where: dict | None = None) -> list[dict]:
+        return []
+
+
+class _FakeDigestGraph:
+    def __init__(self) -> None:
+        import networkx as nx
+
+        self._graph = nx.DiGraph()
+
+    @property
+    def stats(self) -> dict:
+        return {"nodes": 0, "edges": 0}
+
+
+class _FakeDigestParser:
+    def iter_notes(self) -> list:
+        return []
+
+
+@dataclass
+class _FakeDigestConfig:
+    period_days: int = 7
+    max_trending: int = 10
+    max_suggestions: int = 5
+    connection_threshold_low: float = 0.70
+    connection_threshold_high: float = 0.85
+    inbox_folder: str = "00-inbox"
+    inbox_age_warning_days: int = 7
+    max_inbox_shown: int = 10
+
+
+class TestDigestKnowledgeGapsLifecycle:
+    def test_lifecycle_report_carries_open_gap_count_and_oldest(self, tmp_path: Path) -> None:
+        from vaultmind.indexer.digest import DigestGenerator
+
+        gap_store = _make_store(tmp_path)
+        gap_store.mint("First question?", GapKind.UNANSWERED_QUESTION)
+        gap_store.mint("Second question?", GapKind.WEAK_RETRIEVAL)
+        generator = DigestGenerator(
+            store=_FakeDigestStore(),  # type: ignore[arg-type]
+            graph=_FakeDigestGraph(),  # type: ignore[arg-type]
+            parser=_FakeDigestParser(),  # type: ignore[arg-type]
+            config=_FakeDigestConfig(),  # type: ignore[arg-type]
+            gap_store=gap_store,
+        )
+        report = generator.generate()
+        assert report.open_gap_count == 2
+        assert report.oldest_gap_question == "First question?"
+        gap_store.close()
+
+    def test_lifecycle_telegram_format_includes_gap_section(self, tmp_path: Path) -> None:
+        from vaultmind.indexer.digest import DigestGenerator
+
+        gap_store = _make_store(tmp_path)
+        gap_store.mint("What is Kosha?", GapKind.UNANSWERED_QUESTION)
+        generator = DigestGenerator(
+            store=_FakeDigestStore(),  # type: ignore[arg-type]
+            graph=_FakeDigestGraph(),  # type: ignore[arg-type]
+            parser=_FakeDigestParser(),  # type: ignore[arg-type]
+            config=_FakeDigestConfig(),  # type: ignore[arg-type]
+            gap_store=gap_store,
+        )
+        report = generator.generate()
+        text = generator.format_telegram(report)
+        assert "Knowledge Gaps" in text
+        assert "1 open gap" in text
+        gap_store.close()
+
+    def test_lifecycle_no_gap_store_leaves_report_zeroed(self, tmp_path: Path) -> None:
+        from vaultmind.indexer.digest import DigestGenerator
+
+        generator = DigestGenerator(
+            store=_FakeDigestStore(),  # type: ignore[arg-type]
+            graph=_FakeDigestGraph(),  # type: ignore[arg-type]
+            parser=_FakeDigestParser(),  # type: ignore[arg-type]
+            config=_FakeDigestConfig(),  # type: ignore[arg-type]
+        )
+        report = generator.generate()
+        assert report.open_gap_count == 0
+        assert report.oldest_gap_question == ""
