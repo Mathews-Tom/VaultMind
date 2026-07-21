@@ -1,0 +1,23 @@
+# Canned retrieval results keyed by exact golden-question text.
+# Crafted so every threshold in BenchConfig's defaults is met (exit 0).
+
+"Where do I keep my morning routine notes?":
+  - note_path: "01-inbox/morning-routine.md"
+    content: "Wake at 6am, stretch, journal."
+    distance: 0.10
+  - note_path: "01-inbox/unrelated-note.md"
+    content: "Unrelated content."
+    distance: 0.60
+
+"What did I decide about the deploy pipeline?":
+  - note_path: "02-projects/deploy-pipeline-decision.md"
+    content: "Decided to use blue-green deploys."
+    distance: 0.12
+  - note_path: "02-projects/unrelated-note.md"
+    content: "Unrelated content."
+    distance: 0.55
+
+"What is the boiling point of unobtainium?":
+  - note_path: "04-resources/random-note.md"
+    content: "Nothing about unobtainium here."
+    distance: 0.92
