@@ -60,10 +60,13 @@ def _parse_hit(query: str, raw_hit: Any) -> dict[str, Any]:
         msg = f"{RETRIEVAL_FILENAME}['{query}']: each hit must be a mapping with 'note_path'"
         raise BundleError(msg)
     note_path = str(raw_hit["note_path"])
+    metadata: dict[str, Any] = {"note_path": note_path}
+    if "authority" in raw_hit:
+        metadata["authority"] = int(raw_hit["authority"])
     return {
         "chunk_id": f"{note_path}::0",
         "content": str(raw_hit.get("content", "")),
-        "metadata": {"note_path": note_path},
+        "metadata": metadata,
         "distance": float(raw_hit.get("distance", 0.1)),
     }
 

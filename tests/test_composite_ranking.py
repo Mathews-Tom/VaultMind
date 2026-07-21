@@ -14,8 +14,12 @@ from vaultmind.indexer.connection_density import (
 )
 from vaultmind.indexer.ranking import (
     ARCHIVED_MULTIPLIER,
+    DEFAULT_AUTHORITY_LEVEL,
+    DEFAULT_AUTHORITY_WEIGHT,
     MODE_MULTIPLIERS,
     RankedResult,
+    apply_authority,
+    authority_multiplier,
     composite_score,
     compute_note_type_score,
     compute_recency_score,
@@ -54,19 +58,23 @@ def _make_hit(
     entities: str = "",
     mode: str = "",
     activation_score: float = 0.0,
+    authority: int | None = None,
 ) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "note_type": note_type,
+        "created": created,
+        "status": status,
+        "entities": entities,
+        "mode": mode,
+        "note_path": "test/note.md",
+    }
+    if authority is not None:
+        metadata["authority"] = authority
     return {
         "chunk_id": chunk_id,
         "distance": distance,
         "content": content,
-        "metadata": {
-            "note_type": note_type,
-            "created": created,
-            "status": status,
-            "entities": entities,
-            "mode": mode,
-            "note_path": "test/note.md",
-        },
+        "metadata": metadata,
         "activation_score": activation_score,
     }
 
@@ -304,6 +312,48 @@ class TestCompositeScore:
         )
         assert result == pytest.approx(ARCHIVED_MULTIPLIER)
 
+    def test_composite_score_authority_multiplier(self) -> None:
+        base = composite_score(
+            semantic=1.0,
+            recency=1.0,
+            connection_density=1.0,
+            activation=1.0,
+            note_type_normalized=1.0,
+            status="active",
+            authority=DEFAULT_AUTHORITY_LEVEL,
+        )
+        high_authority = composite_score(
+            semantic=1.0,
+            recency=1.0,
+            connection_density=1.0,
+            activation=1.0,
+            note_type_normalized=1.0,
+            status="active",
+            authority=5,
+        )
+        assert high_authority == pytest.approx(base * DEFAULT_AUTHORITY_WEIGHT[5])
+
+    def test_composite_score_missing_authority_uses_neutral_default(self) -> None:
+        with_none = composite_score(
+            semantic=1.0,
+            recency=1.0,
+            connection_density=1.0,
+            activation=1.0,
+            note_type_normalized=1.0,
+            status="active",
+            authority=None,
+        )
+        with_neutral = composite_score(
+            semantic=1.0,
+            recency=1.0,
+            connection_density=1.0,
+            activation=1.0,
+            note_type_normalized=1.0,
+            status="active",
+            authority=DEFAULT_AUTHORITY_LEVEL,
+        )
+        assert with_none == pytest.approx(with_neutral)
+
 
 # --- C. Component score function tests ---
 
@@ -358,6 +408,46 @@ class TestComponentScores:
     def test_compute_note_type_score_unknown_uses_default(self) -> None:
         # Default multiplier is 1.0 → (1.0 - 0.8) / (1.3 - 0.8) = 0.4
         assert compute_note_type_score("unknown_type") == pytest.approx(0.4)
+
+
+# --- C2. authority_multiplier tests ---
+
+
+class TestAuthorityMultiplier:
+    def test_known_levels_use_configured_weights(self) -> None:
+        for level, weight in DEFAULT_AUTHORITY_WEIGHT.items():
+            assert authority_multiplier(level) == pytest.approx(weight)
+
+    def test_missing_authority_uses_neutral_default(self) -> None:
+        assert authority_multiplier(None) == pytest.approx(
+            DEFAULT_AUTHORITY_WEIGHT[DEFAULT_AUTHORITY_LEVEL]
+        )
+
+    def test_zero_authority_uses_neutral_default(self) -> None:
+        assert authority_multiplier(0) == pytest.approx(
+            DEFAULT_AUTHORITY_WEIGHT[DEFAULT_AUTHORITY_LEVEL]
+        )
+
+    def test_out_of_range_authority_uses_neutral_default_never_raises(self) -> None:
+        assert authority_multiplier(99) == pytest.approx(
+            DEFAULT_AUTHORITY_WEIGHT[DEFAULT_AUTHORITY_LEVEL]
+        )
+
+    def test_non_numeric_authority_uses_neutral_default_never_raises(self) -> None:
+        assert authority_multiplier("not-a-number") == pytest.approx(
+            DEFAULT_AUTHORITY_WEIGHT[DEFAULT_AUTHORITY_LEVEL]
+        )
+
+    def test_string_digit_authority_coerced(self) -> None:
+        assert authority_multiplier("5") == pytest.approx(DEFAULT_AUTHORITY_WEIGHT[5])
+
+    def test_respects_ranking_config_override(self) -> None:
+        config = RankingConfig(
+            authority_default=1,
+            authority_weight={1: 0.5, 2: 1.0, 3: 1.0, 4: 1.0, 5: 2.0},
+        )
+        assert authority_multiplier(5, config) == pytest.approx(2.0)
+        assert authority_multiplier(None, config) == pytest.approx(0.5)
 
 
 # --- D. rank_results integration tests ---
@@ -420,6 +510,72 @@ class TestRankResultsComposite:
         assert len(results) == 1
         assert results[0].final_score > 0.0
 
+    def test_rank_results_higher_authority_ranks_higher_at_equal_relevance(self) -> None:
+        hits = [
+            _make_hit(chunk_id="low-authority::0", distance=0.3, authority=1),
+            _make_hit(chunk_id="high-authority::0", distance=0.3, authority=5),
+        ]
+        results = rank_results(hits, enabled=True)
+        assert results[0].chunk_id == "high-authority::0"
+        assert results[0].final_score > results[1].final_score
+
+
+# --- D2. apply_authority (live /recall + bench path) tests ---
+
+
+class TestApplyAuthority:
+    def test_no_authority_metadata_preserves_order(self) -> None:
+        hits = [_make_hit(chunk_id="a::0", distance=0.2), _make_hit(chunk_id="b::0", distance=0.4)]
+        result = apply_authority(hits)
+        assert [h["chunk_id"] for h in result] == ["a::0", "b::0"]
+
+    def test_higher_authority_promoted_above_closer_low_authority_hit(self) -> None:
+        hits = [
+            _make_hit(chunk_id="close-low-authority::0", distance=0.20, authority=1),
+            _make_hit(chunk_id="far-high-authority::0", distance=0.30, authority=5),
+        ]
+        result = apply_authority(hits)
+        assert result[0]["chunk_id"] == "far-high-authority::0"
+
+    def test_adds_authority_score_key(self) -> None:
+        hits = [_make_hit(authority=3)]
+        result = apply_authority(hits)
+        assert "authority_score" in result[0]
+
+    def test_does_not_mutate_input_hits(self) -> None:
+        hits = [_make_hit(chunk_id="a::0", distance=0.2, authority=1)]
+        apply_authority(hits)
+        assert "authority_score" not in hits[0]
+
+    def test_ranking_disabled_returns_hits_unchanged(self) -> None:
+        config = RankingConfig(enabled=False)
+        hits = [
+            _make_hit(chunk_id="close-low-authority::0", distance=0.20, authority=1),
+            _make_hit(chunk_id="far-high-authority::0", distance=0.30, authority=5),
+        ]
+        result = apply_authority(hits, config)
+        assert result is hits
+
+    def test_uses_rrf_score_when_present(self) -> None:
+        """Same authority on both hits isolates the base-score source: if the
+        implementation fell back to `distance` (absent here, so 0.0) instead
+        of reading `rrf_score`, both hits would tie and the input order
+        (`low_rrf` first) would be preserved by the stable sort."""
+        hits = [
+            {
+                "chunk_id": "low_rrf::0",
+                "metadata": {"authority": 3, "note_path": "a.md"},
+                "rrf_score": 0.01,
+            },
+            {
+                "chunk_id": "high_rrf::0",
+                "metadata": {"authority": 3, "note_path": "b.md"},
+                "rrf_score": 0.05,
+            },
+        ]
+        result = apply_authority(hits)
+        assert result[0]["chunk_id"] == "high_rrf::0"
+
 
 # --- E. RankingConfig validation tests ---
 
@@ -478,3 +634,18 @@ class TestRankingConfig:
     def test_default_recency_half_life_days(self) -> None:
         config = RankingConfig()
         assert config.recency_half_life_days == pytest.approx(30.0)
+
+    def test_default_authority_default_level(self) -> None:
+        config = RankingConfig()
+        assert config.authority_default == DEFAULT_AUTHORITY_LEVEL
+
+    def test_default_authority_weight_matches_module_defaults(self) -> None:
+        config = RankingConfig()
+        assert config.authority_weight == DEFAULT_AUTHORITY_WEIGHT
+
+    def test_authority_weight_does_not_affect_weight_sum_validation(self) -> None:
+        # Authority is a post-sum multiplicative factor (like mode/status), not
+        # a member of the weighted-sum-to-1.0 group — an unusual authority
+        # mapping must not trip the semantic/recency/density/activation/type validator.
+        config = RankingConfig(authority_weight={1: 0.1, 2: 0.2, 3: 0.3, 4: 0.4, 5: 0.5})
+        assert config.authority_weight[5] == pytest.approx(0.5)

@@ -20,6 +20,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
+from vaultmind.indexer.ranking import apply_authority
+
 if TYPE_CHECKING:
     from vaultmind.bench.golden import GoldenQuestion
 
@@ -72,17 +74,23 @@ class BenchReport:
 
 
 def run_query(
-    store: RetrievalStore, query: str, k: int, hybrid_enabled: bool
+    store: RetrievalStore,
+    query: str,
+    k: int,
+    hybrid_enabled: bool,
+    ranking_config: Any = None,
 ) -> list[dict[str, Any]]:
     """Run the exact retrieval call `handle_recall` makes for `/recall`.
 
     Mirrors `bot/handlers/recall.py::handle_recall`'s branch on
-    `settings.search.hybrid_enabled` — the bench exercises the identical
-    live path, not a parallel one.
+    `settings.search.hybrid_enabled` and its `apply_authority()` re-ranking
+    step — the bench exercises the identical live path, not a parallel one.
     """
     if hybrid_enabled:
-        return store.hybrid_search(query, n_results=k)
-    return store.search(query, n_results=k)
+        hits = store.hybrid_search(query, n_results=k)
+    else:
+        hits = store.search(query, n_results=k)
+    return apply_authority(hits, ranking_config)
 
 
 def _note_path(hit: dict[str, Any]) -> str:
@@ -182,11 +190,12 @@ def run_bench(
     hybrid_enabled: bool,
     score_floor: float = DEFAULT_SCORE_FLOOR,
     decline_scorer: DeclineScorer | None = None,
+    ranking_config: Any = None,
 ) -> BenchReport:
     """Run the full golden set through the live retrieval path and score it."""
     results: list[QuestionResult] = []
     for question in golden:
-        hits = run_query(store, question.question, k, hybrid_enabled)
+        hits = run_query(store, question.question, k, hybrid_enabled, ranking_config)
         result = score_question(question, hits, score_floor)
         if decline_scorer is not None:
             result = replace(result, llm_decline_correct=decline_scorer(question, hits))

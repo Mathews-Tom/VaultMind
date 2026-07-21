@@ -121,3 +121,43 @@ def test_empty_note_produces_no_chunks(parser: VaultParser, tmp_vault: Path) -> 
     note = parser.parse_file(empty)
     chunks = parser.chunk_note(note)
     assert len(chunks) == 0
+
+
+def test_authority_frontmatter_parsed(parser: VaultParser, tmp_vault: Path) -> None:
+    note_path = tmp_vault / "00-inbox" / "authored.md"
+    note_path.write_text("---\ntype: fleeting\nauthority: 5\n---\n\nBody text.\n")
+    note = parser.parse_file(note_path)
+    assert note.authority == 5
+
+
+def test_authority_missing_defaults_to_zero(parser: VaultParser, tmp_vault: Path) -> None:
+    note = parser.parse_file(tmp_vault / "00-inbox" / "quick-thought.md")
+    assert note.authority == 0
+
+
+def test_authority_out_of_range_falls_back_to_zero_never_raises(
+    parser: VaultParser, tmp_vault: Path
+) -> None:
+    note_path = tmp_vault / "00-inbox" / "bad-authority.md"
+    note_path.write_text("---\ntype: fleeting\nauthority: 99\n---\n\nBody text.\n")
+    note = parser.parse_file(note_path)
+    assert note.authority == 0
+
+
+def test_authority_non_numeric_falls_back_to_zero_never_raises(
+    parser: VaultParser, tmp_vault: Path
+) -> None:
+    note_path = tmp_vault / "00-inbox" / "text-authority.md"
+    note_path.write_text("---\ntype: fleeting\nauthority: not-a-number\n---\n\nBody text.\n")
+    note = parser.parse_file(note_path)
+    assert note.authority == 0
+
+
+def test_chunk_note_propagates_authority_to_chunks(parser: VaultParser, tmp_vault: Path) -> None:
+    note_path = tmp_vault / "00-inbox" / "authored-chunked.md"
+    note_path.write_text("---\ntype: fleeting\nauthority: 4\n---\n\n## Section\n\nBody text.\n")
+    note = parser.parse_file(note_path)
+    chunks = parser.chunk_note(note)
+    assert len(chunks) >= 1
+    assert all(c.authority == 4 for c in chunks)
+    assert chunks[0].to_chroma_metadata()["authority"] == 4

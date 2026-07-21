@@ -1631,6 +1631,7 @@ def bench(
                 hybrid_enabled=hybrid_enabled,
                 score_floor=bench_cfg.score_floor,
                 decline_scorer=decline_scorer,
+                ranking_config=settings.ranking,
             )
 
         passed = passes_thresholds(
