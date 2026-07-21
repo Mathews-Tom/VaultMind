@@ -737,6 +737,7 @@ def bot(ctx: click.Context) -> None:
             ranking_config=settings.ranking,
             gap_store=gap_store,
             on_escalate=on_escalate,
+            review_queue=review_queue,
         )
 
     # Wire up incremental watch mode
