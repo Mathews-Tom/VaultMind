@@ -14,6 +14,7 @@ from vaultmind.bot.handlers.distill import handle_distill
 from vaultmind.bot.handlers.duplicates import handle_duplicates
 from vaultmind.bot.handlers.edit import handle_edit, handle_edit_callback
 from vaultmind.bot.handlers.evolve import handle_evolve
+from vaultmind.bot.handlers.gaps import handle_gaps
 from vaultmind.bot.handlers.graph import handle_graph
 from vaultmind.bot.handlers.health import handle_health
 from vaultmind.bot.handlers.maturation import handle_mature
@@ -271,6 +272,12 @@ class CommandHandlers:
             await message.answer("Procedural memory not enabled.")
             return
         await handle_workflow_detail(self._ctx, message, workflow_id, self._procedural_memory)
+
+    async def handle_gaps(self, message: Message) -> None:
+        if self._gap_store is None:
+            await message.answer("Knowledge gap ledger is not enabled.")
+            return
+        await handle_gaps(self._ctx, message, self._gap_store)
 
     # --- Backward-compat methods (used by tests) ---
 

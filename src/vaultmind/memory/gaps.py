@@ -241,6 +241,19 @@ class GapStore:
         ).fetchone()
         return _row_to_gap(row) if row else None
 
+    def close_from_research(self, question: str, resolution_ref: str) -> Gap | None:
+        """Close the open/stale gap matching `question`, if any.
+
+        Combines `find_open_by_question()` + `answer()` for the
+        `research`-closes-gap flow: `vaultmind research "<gap question>"`
+        closes the gap it answers, linking to the resulting note.
+        Returns the closed `Gap`, or `None` if no matching gap exists.
+        """
+        gap = self.find_open_by_question(question)
+        if gap is None or not self.answer(gap.gap_id, resolution_ref):
+            return None
+        return self.get(gap.gap_id)
+
     def _apply_staleness(self) -> int:
         """Transition open gaps untouched past the staleness window to stale."""
         cutoff = (datetime.now() - timedelta(days=self._stale_after_days)).isoformat()

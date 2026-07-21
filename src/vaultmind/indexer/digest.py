@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from vaultmind.config import DigestConfig
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
+    from vaultmind.memory.gaps import GapStore
     from vaultmind.vault.models import Note
     from vaultmind.vault.parser import VaultParser
 
@@ -66,6 +67,9 @@ class DigestReport:
     oldest_inbox_note: str = ""
     oldest_inbox_age_days: int = 0
     inbox_notes: list[str] = field(default_factory=list)
+    open_gap_count: int = 0
+    oldest_gap_question: str = ""
+    oldest_gap_age_days: int = 0
 
 
 class DigestGenerator:
@@ -80,11 +84,13 @@ class DigestGenerator:
         graph: KnowledgeGraph,
         parser: VaultParser,
         config: DigestConfig,
+        gap_store: GapStore | None = None,
     ) -> None:
         self._store = store
         self._graph = graph
         self._parser = parser
         self._config = config
+        self._gap_store = gap_store
 
     # ------------------------------------------------------------------
     # Public API
@@ -124,6 +130,18 @@ class DigestGenerator:
         # Inbox triage: notes still sitting in inbox
         inbox_notes, oldest_inbox_note, oldest_inbox_age_days = self._compute_inbox_triage(notes)
 
+        # Knowledge gaps: open gaps from the gap ledger, oldest first
+        open_gap_count = 0
+        oldest_gap_question = ""
+        oldest_gap_age_days = 0
+        if self._gap_store is not None:
+            gaps = self._gap_store.list_open()
+            open_gap_count = len(gaps)
+            if gaps:
+                oldest_gap = gaps[0]
+                oldest_gap_question = oldest_gap.question
+                oldest_gap_age_days = (datetime.now() - oldest_gap.created).days
+
         graph_stats = self._graph.stats
 
         return DigestReport(
@@ -140,6 +158,9 @@ class DigestGenerator:
             oldest_inbox_note=oldest_inbox_note,
             oldest_inbox_age_days=oldest_inbox_age_days,
             inbox_notes=inbox_notes,
+            open_gap_count=open_gap_count,
+            oldest_gap_question=oldest_gap_question,
+            oldest_gap_age_days=oldest_gap_age_days,
         )
 
     def format_telegram(self, report: DigestReport) -> str:
@@ -153,6 +174,7 @@ class DigestGenerator:
             and not report.suggested_connections
             and not report.orphan_notes
             and not report.inbox_count
+            and not report.open_gap_count
         ):
             return (
                 f"<b>📊 Daily Digest — {date_str}</b>\n\n"
@@ -207,6 +229,15 @@ class DigestGenerator:
                 lines.append(f"• ⚠️ Oldest: {oldest} ({report.oldest_inbox_age_days} days)")
             for title in report.inbox_notes[: self._config.max_inbox_shown]:
                 lines.append(f"• {html.escape(title)}")
+
+        # Knowledge gaps
+        if report.open_gap_count:
+            lines.append("")
+            lines.append("<b>❓ Knowledge Gaps</b>")
+            lines.append(f"• {report.open_gap_count} open gap(s)")
+            if report.oldest_gap_question:
+                question = html.escape(report.oldest_gap_question)
+                lines.append(f"• Oldest: {question} ({report.oldest_gap_age_days} days)")
 
         # Footer
         lines.append("")
@@ -497,6 +528,19 @@ class DigestGenerator:
             for title in report.inbox_notes[: self._config.max_inbox_shown]:
                 lines.append(f"- [[{title}]]")
             lines.append("")
+
+        # Knowledge gaps
+        if report.open_gap_count:
+            lines.append("## Knowledge Gaps")
+            lines.append("")
+            lines.append(f"**{report.open_gap_count} open gap(s)**")
+            lines.append("")
+            if report.oldest_gap_question:
+                lines.append(
+                    f"> Oldest: **{report.oldest_gap_question}**"
+                    f" ({report.oldest_gap_age_days} days)"
+                )
+                lines.append("")
 
         # Stats footer
         lines.append("---")

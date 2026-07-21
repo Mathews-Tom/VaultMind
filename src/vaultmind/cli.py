@@ -227,7 +227,7 @@ def digest(ctx: click.Context, days: int | None, save: bool | None) -> None:
     """Generate a vault digest report."""
     from rich.table import Table
 
-    from vaultmind.config import load_settings
+    from vaultmind.config import VAULTMIND_HOME, load_settings
     from vaultmind.graph import KnowledgeGraph
     from vaultmind.indexer import Embedder, VaultStore
     from vaultmind.indexer.digest import DigestGenerator
@@ -269,7 +269,20 @@ def digest(ctx: click.Context, days: int | None, save: bool | None) -> None:
     store = VaultStore(settings.chroma, embedder)
     graph = KnowledgeGraph(settings.graph)
 
-    generator = DigestGenerator(store=store, graph=graph, parser=parser, config=digest_config)
+    from vaultmind.memory.gaps import GapStore
+
+    gap_store: GapStore | None = None
+    if settings.gaps.enabled:
+        gap_db = (
+            Path(settings.gaps.db_path)
+            if settings.gaps.db_path
+            else VAULTMIND_HOME / "data" / "gaps.db"
+        )
+        gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
+
+    generator = DigestGenerator(
+        store=store, graph=graph, parser=parser, config=digest_config, gap_store=gap_store
+    )
 
     with console.status("Generating digest..."):
         report = generator.generate()
@@ -1181,7 +1194,7 @@ def graph_report(ctx: click.Context) -> None:
 @click.pass_context
 def research(ctx: click.Context, query: str, max_results: int | None) -> None:
     """Run a research pipeline: search YouTube, fetch transcripts, analyze, create vault notes."""
-    from vaultmind.config import load_settings
+    from vaultmind.config import VAULTMIND_HOME, load_settings
     from vaultmind.indexer import Embedder, VaultStore
     from vaultmind.research.pipeline import ResearchConfig as PipelineConfig
     from vaultmind.research.pipeline import run_research_pipeline
@@ -1213,6 +1226,17 @@ def research(ctx: click.Context, query: str, max_results: int | None) -> None:
 
     model = settings.llm.thinking_model
 
+    from vaultmind.memory.gaps import GapStore
+
+    gap_store: GapStore | None = None
+    if settings.gaps.enabled:
+        gap_db = (
+            Path(settings.gaps.db_path)
+            if settings.gaps.db_path
+            else VAULTMIND_HOME / "data" / "gaps.db"
+        )
+        gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
+
     async def _run() -> None:
         with console.status(f"Researching: {query}..."):
             result = await run_research_pipeline(
@@ -1233,10 +1257,20 @@ def research(ctx: click.Context, query: str, max_results: int | None) -> None:
             console.print(f"  Summary: {result.summary_path.relative_to(settings.vault.path)}")
         console.print(f"\n[bold]Summary:[/bold] {result.analysis_summary}")
 
+        if gap_store is not None and result.summary_path.exists():
+            resolution_ref = str(result.summary_path.relative_to(settings.vault.path))
+            closed = gap_store.close_from_research(query, resolution_ref)
+            if closed is not None:
+                console.print(
+                    f"[green]✓[/green] Closed gap {closed.gap_id[:8]} -> {resolution_ref}"
+                )
+
     asyncio.run(_run())
 
     if cache is not None:
         cache.close()
+    if gap_store is not None:
+        gap_store.close()
 
 
 @cli.command()

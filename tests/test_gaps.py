@@ -1,6 +1,8 @@
-"""Tests for the knowledge gap ledger — GapStore model + storage, and the
-minting call sites in `pipeline/distill.py`, `bot/thinking.py`, and
-`bot/handlers/recall.py` (M5)."""
+"""Tests for the knowledge gap ledger — GapStore model + storage; the minting
+call sites in `pipeline/distill.py`, `bot/thinking.py`, and
+`bot/handlers/recall.py`; and the surfacing/closing loop in
+`bot/handlers/gaps.py`, `indexer/digest.py`, and `GapStore.close_from_research`
+(M5)."""
 
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from vaultmind.bot.handlers.gaps import handle_gaps
 from vaultmind.bot.handlers.recall import handle_recall
 from vaultmind.bot.thinking import ThinkingPartner
 from vaultmind.memory.gaps import GapKind, GapStatus, GapStore, normalize_question
@@ -491,3 +494,212 @@ class TestRecallWeakRetrievalMinting:
 
         await handle_recall(ctx, message, "What is Kosha?", {})  # must not raise
         message.answer.assert_any_call("No matching notes found.")
+
+
+# ---------------------------------------------------------------------------
+# bot/handlers/gaps.py — /gaps command lifecycle surfacing
+# ---------------------------------------------------------------------------
+
+
+def _make_gaps_ctx(gap_store: GapStore, max_shown: int = 10) -> MagicMock:
+    ctx = MagicMock()
+    ctx.settings.telegram.allowed_user_ids = []
+    ctx.settings.gaps.max_shown = max_shown
+    ctx.gap_store = gap_store
+    return ctx
+
+
+class TestGapsCommandLifecycle:
+    @pytest.mark.asyncio
+    async def test_lifecycle_lists_open_gaps_oldest_first(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        gap_store.mint("First question?", GapKind.UNANSWERED_QUESTION)
+        gap_store.mint("Second question?", GapKind.WEAK_RETRIEVAL)
+        ctx = _make_gaps_ctx(gap_store)
+        message = MagicMock()
+        message.answer = AsyncMock()
+
+        await handle_gaps(ctx, message, gap_store)
+
+        text = message.answer.call_args_list[0].args[0]
+        assert text.index("First question?") < text.index("Second question?")
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_answered_gaps_excluded(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        gap = gap_store.mint("What is Kosha?", GapKind.UNANSWERED_QUESTION)
+        gap_store.answer(gap.gap_id, "ref")
+        ctx = _make_gaps_ctx(gap_store)
+        message = MagicMock()
+        message.answer = AsyncMock()
+
+        await handle_gaps(ctx, message, gap_store)
+
+        message.answer.assert_called_once_with("No open gaps.")
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_no_open_gaps_message(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        ctx = _make_gaps_ctx(gap_store)
+        message = MagicMock()
+        message.answer = AsyncMock()
+
+        await handle_gaps(ctx, message, gap_store)
+
+        message.answer.assert_called_once_with("No open gaps.")
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_auto_staled_gap_excluded_from_gaps_list(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path, stale_after_days=1)
+        gap = gap_store.mint("What is Kosha?", GapKind.UNANSWERED_QUESTION)
+        old = (datetime.now() - timedelta(days=5)).isoformat()
+        gap_store._conn.execute("UPDATE gaps SET last_seen = ? WHERE gap_id = ?", (old, gap.gap_id))
+        gap_store._conn.commit()
+        ctx = _make_gaps_ctx(gap_store)
+        message = MagicMock()
+        message.answer = AsyncMock()
+
+        await handle_gaps(ctx, message, gap_store)
+
+        message.answer.assert_called_once_with("No open gaps.")
+        staled = gap_store.get(gap.gap_id)
+        assert staled is not None
+        assert staled.status == GapStatus.STALE
+        gap_store.close()
+
+
+# ---------------------------------------------------------------------------
+# indexer/digest.py — Knowledge Gaps digest section
+# ---------------------------------------------------------------------------
+
+
+class _FakeDigestStore:
+    def search(self, query: str, n_results: int = 5, where: dict | None = None) -> list[dict]:
+        return []
+
+
+class _FakeDigestGraph:
+    def __init__(self) -> None:
+        import networkx as nx
+
+        self._graph = nx.DiGraph()
+
+    @property
+    def stats(self) -> dict:
+        return {"nodes": 0, "edges": 0}
+
+
+class _FakeDigestParser:
+    def iter_notes(self) -> list:
+        return []
+
+
+@dataclass
+class _FakeDigestConfig:
+    period_days: int = 7
+    max_trending: int = 10
+    max_suggestions: int = 5
+    connection_threshold_low: float = 0.70
+    connection_threshold_high: float = 0.85
+    inbox_folder: str = "00-inbox"
+    inbox_age_warning_days: int = 7
+    max_inbox_shown: int = 10
+
+
+class TestDigestKnowledgeGapsLifecycle:
+    def test_lifecycle_report_carries_open_gap_count_and_oldest(self, tmp_path: Path) -> None:
+        from vaultmind.indexer.digest import DigestGenerator
+
+        gap_store = _make_store(tmp_path)
+        gap_store.mint("First question?", GapKind.UNANSWERED_QUESTION)
+        gap_store.mint("Second question?", GapKind.WEAK_RETRIEVAL)
+        generator = DigestGenerator(
+            store=_FakeDigestStore(),  # type: ignore[arg-type]
+            graph=_FakeDigestGraph(),  # type: ignore[arg-type]
+            parser=_FakeDigestParser(),  # type: ignore[arg-type]
+            config=_FakeDigestConfig(),  # type: ignore[arg-type]
+            gap_store=gap_store,
+        )
+        report = generator.generate()
+        assert report.open_gap_count == 2
+        assert report.oldest_gap_question == "First question?"
+        gap_store.close()
+
+    def test_lifecycle_telegram_format_includes_gap_section(self, tmp_path: Path) -> None:
+        from vaultmind.indexer.digest import DigestGenerator
+
+        gap_store = _make_store(tmp_path)
+        gap_store.mint("What is Kosha?", GapKind.UNANSWERED_QUESTION)
+        generator = DigestGenerator(
+            store=_FakeDigestStore(),  # type: ignore[arg-type]
+            graph=_FakeDigestGraph(),  # type: ignore[arg-type]
+            parser=_FakeDigestParser(),  # type: ignore[arg-type]
+            config=_FakeDigestConfig(),  # type: ignore[arg-type]
+            gap_store=gap_store,
+        )
+        report = generator.generate()
+        text = generator.format_telegram(report)
+        assert "Knowledge Gaps" in text
+        assert "1 open gap" in text
+        gap_store.close()
+
+    def test_lifecycle_no_gap_store_leaves_report_zeroed(self, tmp_path: Path) -> None:
+        from vaultmind.indexer.digest import DigestGenerator
+
+        generator = DigestGenerator(
+            store=_FakeDigestStore(),  # type: ignore[arg-type]
+            graph=_FakeDigestGraph(),  # type: ignore[arg-type]
+            parser=_FakeDigestParser(),  # type: ignore[arg-type]
+            config=_FakeDigestConfig(),  # type: ignore[arg-type]
+        )
+        report = generator.generate()
+        assert report.open_gap_count == 0
+        assert report.oldest_gap_question == ""
+
+
+# ---------------------------------------------------------------------------
+# GapStore.close_from_research — research-closes-gap flow
+# ---------------------------------------------------------------------------
+
+
+class TestCloseFromResearchClosing:
+    def test_closing_closes_matching_open_gap(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        gap = gap_store.mint("What is Kosha?", GapKind.WEAK_RETRIEVAL)
+        closed = gap_store.close_from_research("What is Kosha?", "research/kosha/summary.md")
+        assert closed is not None
+        assert closed.gap_id == gap.gap_id
+        assert closed.status == GapStatus.ANSWERED
+        assert closed.resolution_ref == "research/kosha/summary.md"
+        gap_store.close()
+
+    def test_closing_returns_none_when_no_matching_gap(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        assert gap_store.close_from_research("Nothing here", "ref") is None
+        gap_store.close()
+
+    def test_closing_closes_stale_gap_reopened_by_research(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path, stale_after_days=1)
+        gap = gap_store.mint("What is Kosha?", GapKind.UNANSWERED_QUESTION)
+        old = (datetime.now() - timedelta(days=5)).isoformat()
+        gap_store._conn.execute("UPDATE gaps SET last_seen = ? WHERE gap_id = ?", (old, gap.gap_id))
+        gap_store._conn.commit()
+        gap_store.list_open()  # trigger lazy staleness transition
+
+        closed = gap_store.close_from_research("What is Kosha?", "ref")
+        assert closed is not None
+        assert closed.status == GapStatus.ANSWERED
+        gap_store.close()
+
+    def test_closing_does_not_reclose_already_answered_gap(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        gap = gap_store.mint("What is Kosha?", GapKind.WEAK_RETRIEVAL)
+        gap_store.answer(gap.gap_id, "first-ref")
+        assert gap_store.close_from_research("What is Kosha?", "second-ref") is None
+        still = gap_store.get(gap.gap_id)
+        assert still is not None
+        assert still.resolution_ref == "first-ref"
+        gap_store.close()
