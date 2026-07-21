@@ -1,0 +1,232 @@
+# VaultMind contradiction-detection eval set — labeled note pairs for
+# `vaultmind eval contradict`.
+#
+# This is a STARTER TEMPLATE, not real data about any vault. Replace or extend
+# the example entries below with pairs authored against your own vault before
+# relying on this eval to gate `[contradiction].auto_resolve`.
+#
+# Schema (per entry):
+#   id:                    stable unique identifier (string)
+#   note_a_title/body:     first note in the pair, as it would appear in the vault
+#   note_b_title/body:     second note in the pair
+#   materially_conflicts:  true  -> the two notes assert different, incompatible
+#                                   facts about the same subject
+#                          false -> the notes overlap, elaborate on each other,
+#                                   or are near-duplicates without a factual conflict
+#
+# `vaultmind eval contradict` runs the LLM conflict-detector over every pair and
+# reports precision/recall/F1 against these labels, alongside a trivial
+# always-escalate baseline (predicts `true` for every pair) — the detector must
+# beat that baseline before `[contradiction].auto_resolve` is safe to enable.
+
+version: 1
+pairs:
+  - id: db-choice-conflict
+    note_a_title: "Project Atlas — Database"
+    note_a_body: "Project Atlas uses PostgreSQL as its primary datastore, chosen for strong consistency guarantees."
+    note_b_title: "Atlas architecture notes"
+    note_b_body: "Atlas persists all application data in MongoDB, selected for schema flexibility during early iteration."
+    materially_conflicts: true
+
+  - id: meeting-time-conflict
+    note_a_title: "Weekly sync"
+    note_a_body: "The weekly engineering sync happens every Tuesday at 10am."
+    note_b_title: "Team calendar update"
+    note_b_body: "Engineering sync moved to Thursdays at 2pm going forward."
+    materially_conflicts: true
+
+  - id: decision-outcome-conflict
+    note_a_title: "Vendor decision"
+    note_a_body: "We decided to go with Vendor A for the payments integration after the review."
+    note_b_title: "Payments vendor selection"
+    note_b_body: "After further review, we selected Vendor B for payments processing instead of Vendor A."
+    materially_conflicts: true
+
+  - id: deploy-target-conflict
+    note_a_title: "Deployment target"
+    note_a_body: "The service deploys to AWS us-east-1."
+    note_b_title: "Infra notes"
+    note_b_body: "Production traffic for the service is served out of GCP us-central1."
+    materially_conflicts: true
+
+  - id: headcount-conflict
+    note_a_title: "Team roster Q1"
+    note_a_body: "The platform team has 6 engineers as of this quarter."
+    note_b_title: "Org update"
+    note_b_body: "The platform team currently has 9 engineers after the recent hires."
+    materially_conflicts: true
+
+  - id: license-conflict
+    note_a_title: "Library licensing"
+    note_a_body: "The charting library is MIT licensed, safe to use in commercial products."
+    note_b_title: "Legal review notes"
+    note_b_body: "The charting library is GPLv3 licensed, which requires derivative works to also be open-sourced."
+    materially_conflicts: true
+
+  - id: release-cadence-conflict
+    note_a_title: "Release process"
+    note_a_body: "We ship a new release every two weeks on Wednesdays."
+    note_b_title: "Release process update"
+    note_b_body: "Releases now go out monthly on the first Monday of the month."
+    materially_conflicts: true
+
+  - id: api-auth-conflict
+    note_a_title: "API auth"
+    note_a_body: "The public API authenticates requests using API keys passed in a header."
+    note_b_title: "API security notes"
+    note_b_body: "The public API requires OAuth2 bearer tokens for all requests; API keys are not supported."
+    materially_conflicts: true
+
+  - id: budget-conflict
+    note_a_title: "Q3 budget"
+    note_a_body: "The marketing budget for Q3 is set at $50,000."
+    note_b_title: "Budget revision"
+    note_b_body: "Marketing's Q3 budget was cut to $30,000 after the finance review."
+    materially_conflicts: true
+
+  - id: pricing-tier-conflict
+    note_a_title: "Pricing"
+    note_a_body: "The Pro plan is priced at $29/month per seat."
+    note_b_title: "Pricing update"
+    note_b_body: "The Pro plan now costs $49/month per seat as of the latest pricing change."
+    materially_conflicts: true
+
+  - id: policy-owner-conflict
+    note_a_title: "On-call policy"
+    note_a_body: "The SRE team owns the on-call rotation for production incidents."
+    note_b_title: "Incident response notes"
+    note_b_body: "On-call responsibilities were transferred to the platform team last quarter; SRE no longer handles rotation."
+    materially_conflicts: true
+
+  - id: storage-format-conflict
+    note_a_title: "Data pipeline"
+    note_a_body: "Raw events are stored as Parquet files partitioned by date."
+    note_b_title: "Pipeline redesign"
+    note_b_body: "Raw events are now stored as newline-delimited JSON, replacing the Parquet format."
+    materially_conflicts: true
+
+  - id: meeting-elaboration
+    note_a_title: "Weekly sync"
+    note_a_body: "The weekly engineering sync happens every Tuesday at 10am and covers sprint progress."
+    note_b_title: "Weekly sync — agenda template"
+    note_b_body: "Agenda for the Tuesday 10am engineering sync: sprint progress, blockers, upcoming deadlines."
+    materially_conflicts: false
+
+  - id: near-duplicate-notes
+    note_a_title: "Project Atlas — Database"
+    note_a_body: "Project Atlas uses PostgreSQL as its primary datastore, chosen for strong consistency."
+    note_b_title: "Atlas DB choice (copy)"
+    note_b_body: "Project Atlas uses PostgreSQL as its primary datastore, chosen for strong consistency guarantees."
+    materially_conflicts: false
+
+  - id: different-topics
+    note_a_title: "Project Atlas — Database"
+    note_a_body: "Project Atlas uses PostgreSQL as its primary datastore."
+    note_b_title: "Team lunch spot"
+    note_b_body: "The team usually gets lunch at the taco place on 5th street on Fridays."
+    materially_conflicts: false
+
+  - id: complementary-detail
+    note_a_title: "API auth"
+    note_a_body: "The public API authenticates requests using API keys passed in a header."
+    note_b_title: "API key rotation"
+    note_b_body: "API keys should be rotated every 90 days; the rotation script is in the ops repo."
+    materially_conflicts: false
+
+  - id: different-scope
+    note_a_title: "Deployment target"
+    note_a_body: "The main service deploys to AWS us-east-1."
+    note_b_title: "Staging environment"
+    note_b_body: "The staging environment for the main service runs in AWS us-west-2 for isolation."
+    materially_conflicts: false
+
+  - id: sequential-history
+    note_a_title: "Vendor decision — history"
+    note_a_body: "We initially picked Vendor A for payments, then switched to Vendor B after further review."
+    note_b_title: "Payments vendor selection"
+    note_b_body: "After further review, we selected Vendor B for payments processing instead of Vendor A."
+    materially_conflicts: false
+
+  - id: budget-breakdown
+    note_a_title: "Q3 budget"
+    note_a_body: "The marketing budget for Q3 is set at $50,000."
+    note_b_title: "Budget breakdown"
+    note_b_body: "Of the $50,000 marketing budget, $20,000 is allocated to paid ads and $30,000 to events."
+    materially_conflicts: false
+
+  - id: release-notes-detail
+    note_a_title: "Release process"
+    note_a_body: "We ship a new release every two weeks on Wednesdays."
+    note_b_title: "v2.3.0 release notes"
+    note_b_body: "v2.3.0 shipped on schedule this Wednesday with the new export feature."
+    materially_conflicts: false
+
+  - id: pricing-explanation
+    note_a_title: "Pricing"
+    note_a_body: "The Pro plan is priced at $29/month per seat."
+    note_b_title: "Pricing FAQ"
+    note_b_body: "The Pro plan's $29/month per-seat price includes unlimited projects and priority support."
+    materially_conflicts: false
+
+  - id: headcount-hiring-plan
+    note_a_title: "Team roster Q1"
+    note_a_body: "The platform team has 6 engineers as of this quarter."
+    note_b_title: "Hiring plan"
+    note_b_body: "We plan to grow the platform team to 9 engineers by the end of the year."
+    materially_conflicts: false
+
+  - id: onboarding-and-policy
+    note_a_title: "On-call policy"
+    note_a_body: "The SRE team owns the on-call rotation for production incidents."
+    note_b_title: "New hire onboarding"
+    note_b_body: "New SRE hires shadow an on-call rotation during their first two weeks."
+    materially_conflicts: false
+
+  - id: library-usage-not-licensing
+    note_a_title: "Library licensing"
+    note_a_body: "The charting library is MIT licensed, safe to use in commercial products."
+    note_b_title: "Charting library usage guide"
+    note_b_body: "Import the charting library and configure it with the theme tokens from the design system."
+    materially_conflicts: false
+
+  - id: storage-pipeline-metrics
+    note_a_title: "Data pipeline"
+    note_a_body: "Raw events are stored as Parquet files partitioned by date."
+    note_b_title: "Pipeline monitoring"
+    note_b_body: "The pipeline dashboard tracks ingestion latency and daily event volume."
+    materially_conflicts: false
+
+  - id: deploy-cadence-conflict
+    note_a_title: "Deployment cadence"
+    note_a_body: "Deployments to production happen automatically on every merge to main."
+    note_b_title: "Deployment process"
+    note_b_body: "Production deployments require manual approval and only happen on Fridays."
+    materially_conflicts: true
+
+  - id: retention-policy-conflict
+    note_a_title: "Data retention"
+    note_a_body: "User activity logs are retained for 30 days before deletion."
+    note_b_title: "Compliance notes"
+    note_b_body: "User activity logs must be retained for 1 year to meet the updated compliance requirement."
+    materially_conflicts: true
+
+  - id: api-version-conflict
+    note_a_title: "API versioning"
+    note_a_body: "The current stable API version is v2; v1 was deprecated last year."
+    note_b_title: "Integration guide"
+    note_b_body: "New integrations should target API v1, which is the current stable version."
+    materially_conflicts: true
+
+  - id: timezone-consistent
+    note_a_title: "Weekly sync"
+    note_a_body: "The weekly engineering sync happens every Tuesday at 10am Pacific."
+    note_b_title: "Calendar invite text"
+    note_b_body: "Engineering sync: Tuesdays, 10:00 AM PT, recurring."
+    materially_conflicts: false
+
+  - id: retention-policy-detail
+    note_a_title: "Data retention"
+    note_a_body: "User activity logs are retained for 30 days before deletion."
+    note_b_title: "Log storage costs"
+    note_b_body: "Activity log storage costs scale with the 30-day retention window; archived logs use cold storage."
+    materially_conflicts: false
