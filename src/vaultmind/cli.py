@@ -1999,5 +1999,232 @@ def eval_contradict(ctx: click.Context, eval_path_override: str | None) -> None:
         sys.exit(1)
 
 
+@cli.group("source")
+def source_group() -> None:
+    """Source connector commands (rss/youtube-channel/github-activity, M8)."""
+
+
+def _sources_config_path(settings: object) -> Path:
+    from vaultmind.config import Settings
+
+    assert isinstance(settings, Settings)
+    return (
+        Path(settings.sources.config_path)
+        if settings.sources.config_path
+        else Path("config/sources.toml")
+    )
+
+
+def _sources_db_path(settings: object) -> Path:
+    from vaultmind.config import VAULTMIND_HOME, Settings
+
+    assert isinstance(settings, Settings)
+    return (
+        Path(settings.sources.db_path)
+        if settings.sources.db_path
+        else VAULTMIND_HOME / "data" / "sources.db"
+    )
+
+
+@source_group.command("list")
+@click.pass_context
+def source_list(ctx: click.Context) -> None:
+    """List every configured connector instance and its cursor state."""
+    from vaultmind.config import load_settings
+    from vaultmind.sources.registry import load_source_instances
+    from vaultmind.sources.store import SourceStore
+
+    settings = load_settings(ctx.obj.get("config_path"))
+    sources_config = _sources_config_path(settings)
+    instances = load_source_instances(sources_config)
+    if not instances:
+        console.print(f"[yellow]No connector instances configured in {sources_config}[/yellow]")
+        return
+
+    source_store = SourceStore(_sources_db_path(settings))
+    console.print(f"[bold]Configured connector instances[/bold] ({sources_config})")
+    for inst in instances:
+        state = source_store.get_state(inst.name)
+        status = "[green]enabled[/green]" if inst.enabled else "[dim]disabled[/dim]"
+        last_run = state.last_run.isoformat() if state.last_run else "never"
+        console.print(
+            f"  [bold]{inst.name}[/bold] ({inst.kind}) — {status}"
+            f" | target: {inst.target} | runs: {state.run_count} | last run: {last_run}"
+        )
+    source_store.close()
+
+
+@source_group.command("status")
+@click.argument("name", required=False)
+@click.pass_context
+def source_status(ctx: click.Context, name: str | None) -> None:
+    """Show durable cursor state and recent run history for one or every instance."""
+    from vaultmind.config import load_settings
+    from vaultmind.sources.registry import load_source_instances
+    from vaultmind.sources.store import SourceStore
+
+    settings = load_settings(ctx.obj.get("config_path"))
+    sources_config = _sources_config_path(settings)
+    instances = {inst.name: inst for inst in load_source_instances(sources_config)}
+    if name is not None and name not in instances:
+        console.print(f"[red]✗[/red] Unknown connector instance {name!r} in {sources_config}")
+        sys.exit(1)
+
+    names = [name] if name is not None else list(instances)
+    if not names:
+        console.print(f"[yellow]No connector instances configured in {sources_config}[/yellow]")
+        return
+
+    source_store = SourceStore(_sources_db_path(settings))
+    for inst_name in names:
+        state = source_store.get_state(inst_name)
+        console.print(f"\n[bold]{inst_name}[/bold]")
+        console.print(
+            f"  cursor: last_seen_id={state.last_seen_id!r} last_seen_at={state.last_seen_at}"
+        )
+        console.print(f"  runs: {state.run_count}  last_run: {state.last_run}")
+        for run in source_store.list_runs(inst_name, limit=5):
+            run_status = f"[red]error: {run.error}[/red]" if run.error else "[green]ok[/green]"
+            console.print(
+                f"    {run.finished.isoformat()} — fetched {run.items_fetched},"
+                f" ingested {run.items_ingested} {run_status}"
+            )
+    source_store.close()
+
+
+@source_group.command("run")
+@click.argument("name")
+@click.pass_context
+def source_run(ctx: click.Context, name: str) -> None:
+    """Run one connector instance once, outside the scheduler.
+
+    Fetches new items since the stored cursor, routes each through the
+    review queue (M7) and distillation (M4-style) exactly as the scheduler
+    would, then advances the durable cursor and records a run summary —
+    the same `run_connector_once` orchestration `cli.py::bot`'s per-instance
+    scheduled jobs use.
+    """
+    from vaultmind.config import VAULTMIND_HOME, load_settings
+    from vaultmind.indexer import Embedder, VaultStore
+    from vaultmind.indexer.duplicate_detector import DuplicateDetector
+    from vaultmind.memory.gaps import GapStore
+    from vaultmind.services.review_queue import ProposalKind
+    from vaultmind.sources.pipeline import make_applier, run_connector_once
+    from vaultmind.sources.registry import load_source_instances
+    from vaultmind.sources.store import SourceStore
+    from vaultmind.vault import VaultParser
+    from vaultmind.vault.events import NoteCreatedEvent, NoteModifiedEvent, VaultEventBus
+
+    settings = load_settings(ctx.obj.get("config_path"))
+    if not settings.sources.enabled:
+        console.print("[red]✗[/red] Source connectors are disabled ([sources].enabled = false).")
+        sys.exit(1)
+
+    sources_config = _sources_config_path(settings)
+    instances = {inst.name: inst for inst in load_source_instances(sources_config)}
+    if name not in instances:
+        console.print(f"[red]✗[/red] Unknown connector instance {name!r} in {sources_config}")
+        sys.exit(1)
+    instance = instances[name]
+
+    _require_llm_key(settings)
+    is_openai = settings.embedding.provider == "openai"
+    embed_key = settings.openai_api_key if is_openai else settings.voyage_api_key
+    if not embed_key:
+        console.print(
+            "[red]✗[/red] Embedding API key not set."
+            " Set VAULTMIND_OPENAI_API_KEY or VAULTMIND_VOYAGE_API_KEY."
+        )
+        sys.exit(1)
+
+    cache = _create_embedding_cache(settings)
+    parser = VaultParser(settings.vault)
+    embedder = Embedder(settings.embedding, embed_key, cache=cache)
+    store = VaultStore(settings.chroma, embedder)
+    llm_client = _create_llm_client(settings)
+
+    event_bus = VaultEventBus()
+    detector: DuplicateDetector | None = None
+    if settings.duplicate_detection.enabled:
+        detector = DuplicateDetector(settings.duplicate_detection, store)
+
+    review_queue = _build_review_queue(settings)
+    distill_model = settings.distill.model or settings.llm.thinking_model
+
+    gap_store: GapStore | None = None
+    if settings.gaps.enabled:
+        gap_db = (
+            Path(settings.gaps.db_path)
+            if settings.gaps.db_path
+            else VAULTMIND_HOME / "data" / "gaps.db"
+        )
+        gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
+
+    review_queue.register_applier(
+        ProposalKind.SOURCE_INGESTION,
+        make_applier(
+            vault_root=settings.vault.path,
+            llm_client=llm_client,
+            model=distill_model,
+            gap_store=gap_store,
+        ),
+    )
+
+    if detector is not None:
+        dup_subscriber = _duplicate_review_subscriber(detector, review_queue)
+        event_bus.subscribe(NoteCreatedEvent, dup_subscriber)  # type: ignore[arg-type]
+        event_bus.subscribe(NoteModifiedEvent, dup_subscriber)  # type: ignore[arg-type]
+
+    if settings.contradiction.enabled and detector is not None:
+        from vaultmind.contradiction.detector import ContradictionDetector
+
+        contradiction_model = settings.contradiction.detection_model or settings.llm.fast_model
+        contradiction_detector = ContradictionDetector(
+            settings.contradiction,
+            detector,
+            llm_client,
+            contradiction_model,
+            settings.vault.path,
+            parser,
+            ranking_config=settings.ranking,
+            gap_store=gap_store,
+            review_queue=review_queue,
+        )
+        on_changed = contradiction_detector.on_note_changed
+        event_bus.subscribe(NoteCreatedEvent, on_changed)  # type: ignore[arg-type]
+        event_bus.subscribe(NoteModifiedEvent, on_changed)  # type: ignore[arg-type]
+
+    source_store = SourceStore(_sources_db_path(settings))
+
+    with console.status(f"Running connector '{name}'..."):
+        result = asyncio.run(
+            run_connector_once(
+                instance,
+                source_store=source_store,
+                review_queue=review_queue,
+                parser=parser,
+                store=store,
+                vault_root=settings.vault.path,
+                event_bus=event_bus,
+            )
+        )
+
+    if cache is not None:
+        cache.close()
+    if gap_store is not None:
+        gap_store.close()
+    source_store.close()
+    review_queue.close()
+
+    if result.error:
+        console.print(f"[red]✗[/red] Connector '{name}' failed: {result.error}")
+        sys.exit(1)
+
+    console.print(
+        f"[green]✓[/green] Connector '{name}' run complete:"
+        f" {result.items_fetched} fetched, {result.items_ingested} ingested"
+    )
+
+
 if __name__ == "__main__":
     cli()
