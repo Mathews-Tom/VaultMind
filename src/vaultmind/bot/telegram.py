@@ -61,6 +61,7 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "• `/episodes [entity]` → list episodes\n"
             "• `/workflows` → list active workflow patterns\n"
             "• `/workflow <id>` → show workflow steps\n"
+            "• `/gaps` → list open knowledge gaps\n"
             "• `/stats` → vault & graph statistics",
             parse_mode="Markdown",
         )
@@ -213,6 +214,7 @@ def register_handlers(handlers: CommandHandlers) -> None:
             "• `/distill` — distill session/last Q&A into a qa-artifact note\n\n"
             "*System*\n"
             "• `/health` — check system status\n"
+            "• `/gaps` — list open knowledge gaps\n"
             "• `/stats` — vault & graph statistics\n"
             "• `/review` — weekly review with graph insights",
             parse_mode="Markdown",
@@ -225,6 +227,10 @@ def register_handlers(handlers: CommandHandlers) -> None:
     @router.message(Command("stats"))
     async def cmd_stats(message: Message) -> None:
         await handlers.handle_stats(message)
+
+    @router.message(Command("gaps"))
+    async def cmd_gaps(message: Message) -> None:
+        await handlers.handle_gaps(message)
 
     @router.message(Command("evolve"))
     async def cmd_evolve(message: Message) -> None:

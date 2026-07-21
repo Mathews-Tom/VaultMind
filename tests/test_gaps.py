@@ -1,6 +1,8 @@
-"""Tests for the knowledge gap ledger — GapStore model + storage, and the
-minting call sites in `pipeline/distill.py`, `bot/thinking.py`, and
-`bot/handlers/recall.py` (M5)."""
+"""Tests for the knowledge gap ledger — GapStore model + storage; the minting
+call sites in `pipeline/distill.py`, `bot/thinking.py`, and
+`bot/handlers/recall.py`; and the surfacing/closing loop in
+`bot/handlers/gaps.py`, `indexer/digest.py`, and `GapStore.close_from_research`
+(M5)."""
 
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from vaultmind.bot.handlers.gaps import handle_gaps
 from vaultmind.bot.handlers.recall import handle_recall
 from vaultmind.bot.thinking import ThinkingPartner
 from vaultmind.memory.gaps import GapKind, GapStatus, GapStore, normalize_question
@@ -491,3 +494,78 @@ class TestRecallWeakRetrievalMinting:
 
         await handle_recall(ctx, message, "What is Kosha?", {})  # must not raise
         message.answer.assert_any_call("No matching notes found.")
+
+
+# ---------------------------------------------------------------------------
+# bot/handlers/gaps.py — /gaps command lifecycle surfacing
+# ---------------------------------------------------------------------------
+
+
+def _make_gaps_ctx(gap_store: GapStore, max_shown: int = 10) -> MagicMock:
+    ctx = MagicMock()
+    ctx.settings.telegram.allowed_user_ids = []
+    ctx.settings.gaps.max_shown = max_shown
+    ctx.gap_store = gap_store
+    return ctx
+
+
+class TestGapsCommandLifecycle:
+    @pytest.mark.asyncio
+    async def test_lifecycle_lists_open_gaps_oldest_first(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        gap_store.mint("First question?", GapKind.UNANSWERED_QUESTION)
+        gap_store.mint("Second question?", GapKind.WEAK_RETRIEVAL)
+        ctx = _make_gaps_ctx(gap_store)
+        message = MagicMock()
+        message.answer = AsyncMock()
+
+        await handle_gaps(ctx, message, gap_store)
+
+        text = message.answer.call_args_list[0].args[0]
+        assert text.index("First question?") < text.index("Second question?")
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_answered_gaps_excluded(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        gap = gap_store.mint("What is Kosha?", GapKind.UNANSWERED_QUESTION)
+        gap_store.answer(gap.gap_id, "ref")
+        ctx = _make_gaps_ctx(gap_store)
+        message = MagicMock()
+        message.answer = AsyncMock()
+
+        await handle_gaps(ctx, message, gap_store)
+
+        message.answer.assert_called_once_with("No open gaps.")
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_no_open_gaps_message(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        ctx = _make_gaps_ctx(gap_store)
+        message = MagicMock()
+        message.answer = AsyncMock()
+
+        await handle_gaps(ctx, message, gap_store)
+
+        message.answer.assert_called_once_with("No open gaps.")
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_auto_staled_gap_excluded_from_gaps_list(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path, stale_after_days=1)
+        gap = gap_store.mint("What is Kosha?", GapKind.UNANSWERED_QUESTION)
+        old = (datetime.now() - timedelta(days=5)).isoformat()
+        gap_store._conn.execute("UPDATE gaps SET last_seen = ? WHERE gap_id = ?", (old, gap.gap_id))
+        gap_store._conn.commit()
+        ctx = _make_gaps_ctx(gap_store)
+        message = MagicMock()
+        message.answer = AsyncMock()
+
+        await handle_gaps(ctx, message, gap_store)
+
+        message.answer.assert_called_once_with("No open gaps.")
+        staled = gap_store.get(gap.gap_id)
+        assert staled is not None
+        assert staled.status == GapStatus.STALE
+        gap_store.close()
