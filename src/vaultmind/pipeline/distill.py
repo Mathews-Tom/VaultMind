@@ -247,3 +247,32 @@ def extract_and_store_episodes(
             lessons = [str(item) for item in lessons_raw] if isinstance(lessons_raw, list) else []
             store.resolve(episode.episode_id, outcome, status, lessons)
     return len(episodes)
+
+
+def mint_gap_for_unresolved(
+    result: DistillResult,
+    gap_store: object,
+    source_ref: str,
+) -> None:
+    """Mint an `unanswered_question` gap for a qa-artifact with an empty `resolution`.
+
+    Shared by both the auto-trigger (`bot/thinking.py`) and manual `/distill`
+    (`bot/handlers/distill.py`) call sites — mirrors `extract_and_store_episodes`'s
+    "one shared pipeline helper, wired from two call sites" convention.
+    No-op if `gap_store` is not a `GapStore`, distillation failed, or the
+    artifact's `resolution` is non-empty.
+    """
+    from vaultmind.memory.gaps import GapKind
+    from vaultmind.memory.gaps import GapStore as _GapStore
+
+    if not isinstance(gap_store, _GapStore) or not result.success:
+        return
+    if result.frontmatter.get("resolution"):
+        return
+    question = str(result.frontmatter.get("question", ""))
+    if not question:
+        return
+    try:
+        gap_store.mint(question, GapKind.UNANSWERED_QUESTION, evidence_ref=source_ref)
+    except Exception:
+        logger.exception("Gap minting failed for qa-artifact question %r", question)

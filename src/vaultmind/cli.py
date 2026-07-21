@@ -482,6 +482,18 @@ def bot(ctx: click.Context) -> None:
     llm_client = _create_llm_client(settings)
     session_store = SessionStore(VAULTMIND_HOME / "data" / "sessions.db")
 
+    # Knowledge gap ledger (constructed early — wired into both ThinkingPartner and CommandHandlers)
+    from vaultmind.memory.gaps import GapStore
+
+    gap_store: GapStore | None = None
+    if settings.gaps.enabled:
+        gap_db = (
+            Path(settings.gaps.db_path)
+            if settings.gaps.db_path
+            else VAULTMIND_HOME / "data" / "gaps.db"
+        )
+        gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
+
     # Graph context builder for thinking partner
     from vaultmind.graph.context import GraphContextBuilder
 
@@ -502,6 +514,8 @@ def bot(ctx: click.Context) -> None:
         vault_root=settings.vault.path,
         parser=parser,
         distill_config=settings.distill,
+        gap_store=gap_store,
+        score_floor=settings.bench.score_floor,
     )
 
     # Duplicate detection
@@ -609,6 +623,7 @@ def bot(ctx: click.Context) -> None:
         maturation_pipeline=maturation_pipeline,
         episode_store=episode_store,
         procedural_memory=procedural_memory,
+        gap_store=gap_store,
     )
 
     tg_bot, dp = create_bot(settings.telegram.bot_token)
