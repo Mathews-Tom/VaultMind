@@ -1873,6 +1873,52 @@ def stats(ctx: click.Context, metadata_audit: bool) -> None:
             audit_cache.close()
 
 
+@cli.command("export-okf")
+@click.option(
+    "--output",
+    "output_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Output directory for the OKF bundle",
+)
+@click.option(
+    "--okf-version",
+    default="0.1",
+    show_default=True,
+    help="OKF version declared in the bundle root index.md",
+)
+@click.pass_context
+def export_okf(ctx: click.Context, output_path: Path, okf_version: str) -> None:
+    """Export permanent/concept notes as an OKF bundle for Kosha.
+
+    Writes a directory of OKF v0.1 concept documents plus index.md/log.md
+    bundle structure at --output. Read-only over the vault; safe to re-run.
+    Validate the result with Kosha's own `kosha validate <output>` when
+    Kosha is installed locally — this command does not invoke it.
+    """
+    from vaultmind.config import load_settings
+    from vaultmind.export.okf import export_okf_bundle
+    from vaultmind.vault import VaultParser
+
+    settings = load_settings(ctx.obj.get("config_path"))
+    parser = VaultParser(settings.vault)
+
+    with console.status("Parsing vault..."):
+        notes = parser.iter_notes()
+
+    result = export_okf_bundle(notes, output_path, okf_version=okf_version)
+
+    if result.concept_count == 0:
+        console.print(
+            "[yellow]No permanent/concept notes found — wrote an empty bundle "
+            f"skeleton to {result.output_dir}.[/yellow]"
+        )
+    else:
+        console.print(
+            f"[green]✓[/green] Exported {result.concept_count} concept(s) to {result.output_dir}"
+        )
+
+
 @cli.command()
 @click.option(
     "--golden",
