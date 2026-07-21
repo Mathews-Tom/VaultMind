@@ -7,10 +7,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from vaultmind.bot.handlers.recall import handle_recall
 from vaultmind.bot.thinking import ThinkingPartner
 from vaultmind.memory.gaps import GapKind, GapStatus, GapStore, normalize_question
 from vaultmind.pipeline.distill import DistillResult, mint_gap_for_unresolved
@@ -400,3 +401,93 @@ class TestThinkingWeakContextMinting:
         )
         reply = await partner.think(1, "What is Kosha?", store, _make_graph())
         assert reply == "I don't know"
+
+
+# ---------------------------------------------------------------------------
+# bot/handlers/recall.py — weak-retrieval minting for /recall misses
+# ---------------------------------------------------------------------------
+
+
+def _make_recall_ctx(*, score_floor: float = 0.5, gap_store: GapStore | None = None) -> MagicMock:
+    ctx = MagicMock()
+    ctx.settings.telegram.allowed_user_ids = []
+    ctx.settings.search.hybrid_enabled = True
+    ctx.settings.search.max_results = 10
+    ctx.settings.search.page_size = 5
+    ctx.settings.bench.score_floor = score_floor
+    ctx.settings.ranking.enabled = False
+    ctx.gap_store = gap_store
+    return ctx
+
+
+def _make_recall_message(user_id: int = 42) -> MagicMock:
+    message = MagicMock()
+    message.answer = AsyncMock()
+    message.from_user.id = user_id
+    return message
+
+
+class TestRecallWeakRetrievalMinting:
+    @pytest.mark.asyncio
+    async def test_minting_mints_gap_when_no_results(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        ctx = _make_recall_ctx(gap_store=gap_store)
+        ctx.store.hybrid_search.return_value = []
+        message = _make_recall_message()
+
+        await handle_recall(ctx, message, "What is Kosha?", {})
+
+        gaps = gap_store.list_open()
+        assert len(gaps) == 1
+        assert gaps[0].kind == GapKind.WEAK_RETRIEVAL
+        assert gaps[0].evidence_ref == "telegram-recall:42"
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_minting_mints_gap_when_best_distance_at_floor(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        ctx = _make_recall_ctx(gap_store=gap_store, score_floor=0.5)
+        ctx.store.hybrid_search.return_value = [
+            {"metadata": {"note_title": "x", "note_path": "x.md"}, "content": "c", "distance": 0.9}
+        ]
+        message = _make_recall_message()
+
+        await handle_recall(ctx, message, "What is Kosha?", {})
+
+        assert len(gap_store.list_open()) == 1
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_minting_no_gap_when_results_are_confident(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        ctx = _make_recall_ctx(gap_store=gap_store, score_floor=0.5)
+        ctx.store.hybrid_search.return_value = [
+            {"metadata": {"note_title": "x", "note_path": "x.md"}, "content": "c", "distance": 0.1}
+        ]
+        message = _make_recall_message()
+
+        await handle_recall(ctx, message, "What is Kosha?", {})
+
+        assert gap_store.list_open() == []
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_minting_reask_dedups_to_one_gap(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        ctx = _make_recall_ctx(gap_store=gap_store)
+        ctx.store.hybrid_search.return_value = []
+
+        await handle_recall(ctx, _make_recall_message(), "What is Kosha?", {})
+        await handle_recall(ctx, _make_recall_message(), "what is kosha?", {})
+
+        assert len(gap_store.list_open()) == 1
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_minting_no_gap_store_configured_is_a_noop(self) -> None:
+        ctx = _make_recall_ctx(gap_store=None)
+        ctx.store.hybrid_search.return_value = []
+        message = _make_recall_message()
+
+        await handle_recall(ctx, message, "What is Kosha?", {})  # must not raise
+        message.answer.assert_any_call("No matching notes found.")
