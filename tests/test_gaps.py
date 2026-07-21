@@ -658,3 +658,48 @@ class TestDigestKnowledgeGapsLifecycle:
         report = generator.generate()
         assert report.open_gap_count == 0
         assert report.oldest_gap_question == ""
+
+
+# ---------------------------------------------------------------------------
+# GapStore.close_from_research — research-closes-gap flow
+# ---------------------------------------------------------------------------
+
+
+class TestCloseFromResearchClosing:
+    def test_closing_closes_matching_open_gap(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        gap = gap_store.mint("What is Kosha?", GapKind.WEAK_RETRIEVAL)
+        closed = gap_store.close_from_research("What is Kosha?", "research/kosha/summary.md")
+        assert closed is not None
+        assert closed.gap_id == gap.gap_id
+        assert closed.status == GapStatus.ANSWERED
+        assert closed.resolution_ref == "research/kosha/summary.md"
+        gap_store.close()
+
+    def test_closing_returns_none_when_no_matching_gap(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        assert gap_store.close_from_research("Nothing here", "ref") is None
+        gap_store.close()
+
+    def test_closing_closes_stale_gap_reopened_by_research(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path, stale_after_days=1)
+        gap = gap_store.mint("What is Kosha?", GapKind.UNANSWERED_QUESTION)
+        old = (datetime.now() - timedelta(days=5)).isoformat()
+        gap_store._conn.execute("UPDATE gaps SET last_seen = ? WHERE gap_id = ?", (old, gap.gap_id))
+        gap_store._conn.commit()
+        gap_store.list_open()  # trigger lazy staleness transition
+
+        closed = gap_store.close_from_research("What is Kosha?", "ref")
+        assert closed is not None
+        assert closed.status == GapStatus.ANSWERED
+        gap_store.close()
+
+    def test_closing_does_not_reclose_already_answered_gap(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        gap = gap_store.mint("What is Kosha?", GapKind.WEAK_RETRIEVAL)
+        gap_store.answer(gap.gap_id, "first-ref")
+        assert gap_store.close_from_research("What is Kosha?", "second-ref") is None
+        still = gap_store.get(gap.gap_id)
+        assert still is not None
+        assert still.resolution_ref == "first-ref"
+        gap_store.close()
