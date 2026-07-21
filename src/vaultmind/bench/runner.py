@@ -16,6 +16,7 @@ top separately and is never required for `run_bench`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -170,10 +171,8 @@ def aggregate(results: list[QuestionResult], k: int) -> BenchReport:
     )
 
 
-class DeclineScorer(Protocol):
-    """Callable that scores cite-or-decline correctness for one question."""
-
-    def __call__(self, question: GoldenQuestion, hits: list[dict[str, Any]]) -> bool: ...
+DeclineScorer = Callable[["GoldenQuestion", "list[dict[str, Any]]"], bool]
+"""Callable that scores cite-or-decline correctness for one question."""
 
 
 def run_bench(
