@@ -14,6 +14,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Max host parameters to bind into a single statement. SQLite's
+# SQLITE_MAX_VARIABLE_NUMBER is 999 on many builds; stay safely under it.
+_SQLITE_VAR_CHUNK = 900
+
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS embedding_cache (
     content_hash TEXT NOT NULL,
@@ -102,28 +106,36 @@ class EmbeddingCache:
         if not content_hashes:
             return {}
 
-        placeholders = ",".join("?" for _ in content_hashes)
-        rows = self._conn.execute(
-            f"SELECT content_hash, embedding FROM embedding_cache "  # noqa: S608
-            f"WHERE provider = ? AND model = ? AND content_hash IN ({placeholders})",
-            [provider, model, *content_hashes],
-        ).fetchall()
-
+        # Chunk the IN-clause: SQLite caps host parameters per statement
+        # (SQLITE_MAX_VARIABLE_NUMBER — 999 on many builds). A full-vault
+        # index passes tens of thousands of chunk hashes at once, which
+        # overflows it ("too many SQL variables"). 900 leaves headroom for
+        # the fixed provider/model params.
         result: dict[str, list[float]] = {}
         hit_hashes: list[str] = []
-        for row in rows:
-            result[row[0]] = _blob_to_embedding(row[1])
-            hit_hashes.append(row[0])
+        for i in range(0, len(content_hashes), _SQLITE_VAR_CHUNK):
+            batch = content_hashes[i : i + _SQLITE_VAR_CHUNK]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(
+                f"SELECT content_hash, embedding FROM embedding_cache "  # noqa: S608
+                f"WHERE provider = ? AND model = ? AND content_hash IN ({placeholders})",
+                [provider, model, *batch],
+            ).fetchall()
+            for row in rows:
+                result[row[0]] = _blob_to_embedding(row[1])
+                hit_hashes.append(row[0])
 
-        # Batch update last_accessed for hits
+        # Batch update last_accessed for hits (chunked for the same reason)
         if hit_hashes:
             now = time.time()
-            hit_placeholders = ",".join("?" for _ in hit_hashes)
-            self._conn.execute(
-                f"UPDATE embedding_cache SET last_accessed = ? "  # noqa: S608
-                f"WHERE provider = ? AND model = ? AND content_hash IN ({hit_placeholders})",
-                [now, provider, model, *hit_hashes],
-            )
+            for i in range(0, len(hit_hashes), _SQLITE_VAR_CHUNK):
+                batch = hit_hashes[i : i + _SQLITE_VAR_CHUNK]
+                hit_placeholders = ",".join("?" for _ in batch)
+                self._conn.execute(
+                    f"UPDATE embedding_cache SET last_accessed = ? "  # noqa: S608
+                    f"WHERE provider = ? AND model = ? AND content_hash IN ({hit_placeholders})",
+                    [now, provider, model, *batch],
+                )
             self._conn.commit()
 
         return result
