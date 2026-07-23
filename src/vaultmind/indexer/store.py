@@ -52,6 +52,32 @@ class VaultStore:
             self._collection.count(),
         )
 
+        # Chroma rejects upserts above a per-call record cap (~5461 on
+        # default builds, derived from SQLite limits). Query it so large
+        # indexing runs can be split into accepted batches.
+        try:
+            self._max_batch_size: int = self._client.get_max_batch_size()
+        except AttributeError:  # older chromadb without the API
+            self._max_batch_size = 5000
+
+    def _upsert_chunks(self, chunks: list[NoteChunk], embeddings: list[Any]) -> None:
+        """Upsert chunks into ChromaDB in batches that respect the per-call cap.
+
+        A full index of a large vault (tens of thousands of chunks) exceeds
+        Chroma's maximum batch size and raises ValueError if sent as one call.
+        """
+        ids = [c.chunk_id for c in chunks]
+        texts = [c.content for c in chunks]
+        metas = [c.to_chroma_metadata() for c in chunks]
+        step = self._max_batch_size
+        for i in range(0, len(chunks), step):
+            self._collection.upsert(
+                ids=ids[i : i + step],
+                documents=texts[i : i + step],
+                embeddings=embeddings[i : i + step],
+                metadatas=metas[i : i + step],
+            )
+
     def index_notes(self, notes: list[Note], parser: VaultParser) -> int:
         """Full index: chunk and embed all notes. Returns number of chunks indexed."""
         all_chunks: list[NoteChunk] = []
@@ -67,13 +93,8 @@ class VaultStore:
         texts = [c.content for c in all_chunks]
         embeddings = self.embedder.embed_texts(texts)
 
-        # Upsert into ChromaDB
-        self._collection.upsert(
-            ids=[c.chunk_id for c in all_chunks],
-            documents=texts,
-            embeddings=embeddings,  # type: ignore[arg-type]
-            metadatas=[c.to_chroma_metadata() for c in all_chunks],
-        )
+        # Upsert into ChromaDB (batched to respect the per-call cap)
+        self._upsert_chunks(all_chunks, embeddings)
 
         # Sync BM25 index
         if self._bm25 is not None:
@@ -104,12 +125,7 @@ class VaultStore:
         texts = [c.content for c in chunks]
         embeddings = self.embedder.embed_texts(texts)
 
-        self._collection.upsert(
-            ids=[c.chunk_id for c in chunks],
-            documents=texts,
-            embeddings=embeddings,  # type: ignore[arg-type]
-            metadatas=[c.to_chroma_metadata() for c in chunks],
-        )
+        self._upsert_chunks(chunks, embeddings)
 
         # Sync BM25 index (delete + re-insert handled by upsert_batch)
         if self._bm25 is not None:
