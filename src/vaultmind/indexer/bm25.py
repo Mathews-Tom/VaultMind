@@ -14,6 +14,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Max host parameters to bind into a single statement. SQLite's
+# SQLITE_MAX_VARIABLE_NUMBER is 999 on many builds; stay safely under it.
+_SQLITE_VAR_CHUNK = 900
+
 _CREATE_FTS = """
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
     chunk_id,
@@ -71,12 +75,17 @@ class BM25Index:
         if not rows:
             return
         chunk_ids = [r[0] for r in rows]
-        placeholders = ",".join("?" * len(chunk_ids))
         with self._con:
-            self._con.execute(
-                f"DELETE FROM fts_chunks WHERE chunk_id IN ({placeholders})",
-                chunk_ids,
-            )
+            # Chunk the DELETE: SQLite caps host parameters per statement
+            # (SQLITE_MAX_VARIABLE_NUMBER — 999 on many builds), and a
+            # full-vault index passes tens of thousands of chunk_ids here.
+            for i in range(0, len(chunk_ids), _SQLITE_VAR_CHUNK):
+                batch = chunk_ids[i : i + _SQLITE_VAR_CHUNK]
+                placeholders = ",".join("?" * len(batch))
+                self._con.execute(
+                    f"DELETE FROM fts_chunks WHERE chunk_id IN ({placeholders})",
+                    batch,
+                )
             self._con.executemany(
                 "INSERT INTO fts_chunks(chunk_id, note_path, note_title, content)"
                 " VALUES (?, ?, ?, ?)",

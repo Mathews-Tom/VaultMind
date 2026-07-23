@@ -118,3 +118,28 @@ class TestEmptyQuery:
     def test_search_on_empty_index(self, bm25: BM25Index) -> None:
         results = bm25.search("anything")
         assert results == []
+
+
+class TestLargeBatch:
+    """Regression: upsert_batch with more rows than SQLITE_MAX_VARIABLE_NUMBER.
+
+    The delete-before-insert step bound one host param per chunk_id in a
+    single IN(...) clause, which overflows SQLite's per-statement variable
+    limit (999 on many builds) on a full-vault index.
+    """
+
+    def test_upsert_batch_exceeding_sqlite_variable_limit(self, bm25: BM25Index) -> None:
+        import sqlite3
+
+        # Emulate a conservative build regardless of what this SQLite allows
+        bm25._con.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+        rows = [
+            (f"note{i}::0", f"notes/note{i}.md", f"Note {i}", f"content {i}") for i in range(1500)
+        ]
+        bm25.upsert_batch(rows)
+        assert bm25.count == 1500
+
+        # Re-upsert the same ids: delete path must also handle >999 ids
+        bm25.upsert_batch(rows)
+        assert bm25.count == 1500
