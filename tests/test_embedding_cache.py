@@ -151,3 +151,30 @@ class TestClose:
         cache2 = EmbeddingCache(tmp_path / "close_test.db")
         assert cache2.get(content_hash("x"), PROVIDER, MODEL) is not None
         cache2.close()
+
+
+class TestLargeBatch:
+    """Regression: get_batch with more hashes than SQLITE_MAX_VARIABLE_NUMBER.
+
+    A single IN(...) clause with one host param per hash overflows SQLite's
+    per-statement variable limit (999 on many builds) once the vault is large
+    enough, aborting a full re-index with "too many SQL variables".
+    """
+
+    def test_get_batch_exceeding_sqlite_variable_limit(self, cache: EmbeddingCache) -> None:
+        import sqlite3
+
+        # Emulate a conservative build regardless of what this SQLite allows
+        cache._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+        hashes = [content_hash(f"note {i}") for i in range(1500)]
+        # Cache only a subset so we exercise both hit and miss paths
+        for h in hashes[:1000]:
+            cache.put(h, PROVIDER, MODEL, DIMS, SAMPLE_EMBEDDING)
+
+        result = cache.get_batch(hashes, PROVIDER, MODEL)
+
+        assert len(result) == 1000
+        assert set(result) == set(hashes[:1000])
+        for emb in result.values():
+            assert len(emb) == DIMS
