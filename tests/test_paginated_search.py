@@ -126,6 +126,22 @@ def test_render_first_page_text_contains_query() -> None:
     assert "test query" in text
 
 
+def test_render_page_mixed_evidence_shows_percent_only_for_vector_hits() -> None:
+    vec = _make_hit("Vec", "vec.md", "vector", distance=0.25)
+    lex_none = _make_hit("LexNone", "lex-none.md", "lexical")
+    lex_none["distance"] = None
+    lex_missing = _make_hit("LexMissing", "lex-missing.md", "lexical")
+    del lex_missing["distance"]
+    session = PaginatedSearch(
+        query="q", results=[lex_none, vec, lex_missing], page_size=5, current_page=0
+    )
+    text, _ = _render_page(session)
+    assert "**1. LexNone** (relevance unknown)" in text
+    assert "**2. Vec** (75% match)" in text
+    assert "**3. LexMissing** (relevance unknown)" in text
+    assert "100%" not in text
+
+
 def test_render_page_shows_correct_result_slice() -> None:
     session = _make_session(n_results=10, page_size=5, page=1)
     text, _ = _render_page(session)

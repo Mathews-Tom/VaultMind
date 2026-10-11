@@ -394,6 +394,65 @@ class TestThinkingWeakContextMinting:
         gap_store.close()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("distances", "expect_gap"),
+        [
+            ([0.5], True),  # equality with the floor is weak, never strong
+            ([0.4999], False),  # just under the floor is strong
+            ([None, None], False),  # lexical-only evidence is unknown, not weak
+            ([None, 0.9], False),  # unknown mixed with weak stays unknown
+            ([0.9, 0.7], True),  # all raw distances present and >= floor
+            ([None, 0.1], False),  # one strong raw distance wins over unknown
+        ],
+    )
+    async def test_minting_follows_shared_confidence_for_raw_distances(
+        self, tmp_path: Path, distances: list[float | None], expect_gap: bool
+    ) -> None:
+        gap_store = _make_store(tmp_path)
+        store = MagicMock()
+        store.search.return_value = [
+            {
+                "metadata": {"note_title": f"n{i}", "note_path": f"n{i}.md"},
+                "content": "c",
+                "distance": d,
+            }
+            for i, d in enumerate(distances)
+        ]
+        partner = ThinkingPartner(
+            llm_config=_FakeLLMConfig(),  # type: ignore[arg-type]
+            telegram_config=_FakeTelegramConfig(),  # type: ignore[arg-type]
+            llm_client=_make_thinking_llm_client("reply"),
+            gap_store=gap_store,
+            score_floor=0.5,
+        )
+        await partner.think(1, "What is Kosha?", store, _make_graph())
+
+        gaps = gap_store.list_open()
+        assert len(gaps) == (1 if expect_gap else 0)
+        if expect_gap:
+            assert gaps[0].kind == GapKind.UNANSWERED_QUESTION
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_minting_missing_distance_key_is_unknown_not_weak(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        store = MagicMock()
+        store.search.return_value = [
+            {"metadata": {"note_title": "Kosha", "note_path": "kosha.md"}, "content": "c"}
+        ]
+        partner = ThinkingPartner(
+            llm_config=_FakeLLMConfig(),  # type: ignore[arg-type]
+            telegram_config=_FakeTelegramConfig(),  # type: ignore[arg-type]
+            llm_client=_make_thinking_llm_client("reply"),
+            gap_store=gap_store,
+            score_floor=0.5,
+        )
+        await partner.think(1, "What is Kosha?", store, _make_graph())
+
+        assert gap_store.list_open() == []
+        gap_store.close()
+
+    @pytest.mark.asyncio
     async def test_minting_no_gap_store_configured_is_a_noop(self) -> None:
         store = MagicMock()
         store.search.return_value = []
@@ -447,17 +506,96 @@ class TestRecallWeakRetrievalMinting:
         gap_store.close()
 
     @pytest.mark.asyncio
-    async def test_minting_mints_gap_when_best_distance_at_floor(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        ("distances", "expect_gap"),
+        [
+            ([0.5], True),  # equality with the floor is weak, never strong
+            ([0.4999], False),  # just under the floor is strong
+            ([0.9, 0.7], True),
+            ([None, None], False),  # lexical-only hybrid evidence is unknown, not weak
+            ([None, 0.9], False),  # unknown mixed with weak stays unknown
+            ([None, 0.1], False),  # one strong raw distance wins over unknown
+        ],
+    )
+    async def test_minting_follows_shared_confidence_for_raw_distances(
+        self, tmp_path: Path, distances: list[float | None], expect_gap: bool
+    ) -> None:
         gap_store = _make_store(tmp_path)
         ctx = _make_recall_ctx(gap_store=gap_store, score_floor=0.5)
         ctx.store.hybrid_search.return_value = [
-            {"metadata": {"note_title": "x", "note_path": "x.md"}, "content": "c", "distance": 0.9}
+            {
+                "metadata": {"note_title": f"n{i}", "note_path": f"n{i}.md"},
+                "content": "c",
+                "distance": d,
+            }
+            for i, d in enumerate(distances)
         ]
         message = _make_recall_message()
 
         await handle_recall(ctx, message, "What is Kosha?", {})
 
-        assert len(gap_store.list_open()) == 1
+        gaps = gap_store.list_open()
+        assert len(gaps) == (1 if expect_gap else 0)
+        if expect_gap:
+            assert gaps[0].kind == GapKind.WEAK_RETRIEVAL
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_unknown_results_render_unknown_and_mint_no_gap(self, tmp_path: Path) -> None:
+        gap_store = _make_store(tmp_path)
+        ctx = _make_recall_ctx(gap_store=gap_store, score_floor=0.5)
+        ctx.store.hybrid_search.return_value = [
+            {"metadata": {"note_title": "Lex", "note_path": "lex.md"}, "content": "c"},
+            {
+                "metadata": {"note_title": "Lex2", "note_path": "lex2.md"},
+                "content": "c",
+                "distance": None,
+            },
+        ]
+        message = _make_recall_message()
+
+        await handle_recall(ctx, message, "What is Kosha?", {})
+
+        text = message.answer.call_args.args[0]
+        assert text.count("relevance unknown") == 2
+        assert "% match" not in text
+        assert gap_store.list_open() == []
+        gap_store.close()
+
+    @pytest.mark.asyncio
+    async def test_authority_reorder_keeps_confidence_and_per_hit_relevance(
+        self, tmp_path: Path
+    ) -> None:
+        from vaultmind.config import RankingConfig
+
+        gap_store = _make_store(tmp_path)
+        ctx = _make_recall_ctx(gap_store=gap_store, score_floor=0.5)
+        ctx.settings.ranking = RankingConfig(enabled=True)
+        # Vector hit has the higher rrf_score but low authority; the lexical-only hit
+        # overtakes it after the authority multiplier (1.15 vs 0.85).
+        ctx.store.hybrid_search.return_value = [
+            {
+                "metadata": {"note_title": "Vec", "note_path": "vec.md", "authority": 1},
+                "content": "c",
+                "distance": 0.3,
+                "rrf_score": 0.0100,
+            },
+            {
+                "metadata": {"note_title": "Lex", "note_path": "lex.md", "authority": 5},
+                "content": "c",
+                "distance": None,
+                "rrf_score": 0.0095,
+            },
+        ]
+        message = _make_recall_message()
+
+        await handle_recall(ctx, message, "What is Kosha?", {})
+
+        text = message.answer.call_args.args[0]
+        assert text.index("Lex") < text.index("Vec")  # authority reordered the hits
+        assert "**1. Lex** (relevance unknown)" in text
+        assert "**2. Vec** (70% match)" in text  # raw distance untouched by authority
+        assert gap_store.list_open() == []  # strong evidence survives the reorder
         gap_store.close()
 
     @pytest.mark.asyncio

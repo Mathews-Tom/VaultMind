@@ -6,9 +6,8 @@ Deterministic scoring (no LLM call):
   - recall@k / MRR over `answerable: true` questions, using each hit's
     `metadata["note_path"]` against the question's `expected_notes`.
   - a score-floor "honest decline" check over `answerable: false` questions:
-    correct when the best hit's distance is at or above `score_floor` (i.e.
-    retrieval found nothing confidently relevant for a question that has no
-    answer in the vault).
+    correct only for explicitly weak retrieval. Missing vector evidence is
+    unknown, not proof that no answer was retrieved. Fusion rank is not evidence.
 
 LLM-scored cite-or-decline (see `vaultmind.bench.llm_score`) is layered on
 top separately and is never required for `run_bench`.
@@ -20,7 +19,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from vaultmind.indexer.ranking import apply_authority, best_distance
+from vaultmind.indexer.ranking import (
+    RetrievalConfidence,
+    apply_authority,
+    retrieval_confidence,
+)
 
 if TYPE_CHECKING:
     from vaultmind.bench.golden import GoldenQuestion
@@ -55,6 +58,7 @@ class QuestionResult:
     retrieved_paths: tuple[str, ...]
     hit: bool
     rank: int | None
+    confidence: RetrievalConfidence
     retrieval_decline_correct: bool | None = None
     llm_decline_correct: bool | None = None
 
@@ -103,10 +107,10 @@ def score_question(
 ) -> QuestionResult:
     """Score one golden question against its retrieved hits."""
     paths = tuple(_note_path(h) for h in hits)
+    confidence = retrieval_confidence(hits, score_floor)
 
     if not question.answerable:
-        best = best_distance(hits)
-        declined = best is None or best >= score_floor
+        declined = confidence is RetrievalConfidence.WEAK
         return QuestionResult(
             question_id=question.id,
             question=question.question,
@@ -115,6 +119,7 @@ def score_question(
             hit=False,
             rank=None,
             retrieval_decline_correct=declined,
+            confidence=confidence,
         )
 
     rank: int | None = None
@@ -130,6 +135,7 @@ def score_question(
         retrieved_paths=paths,
         hit=rank is not None,
         rank=rank,
+        confidence=confidence,
     )
 
 

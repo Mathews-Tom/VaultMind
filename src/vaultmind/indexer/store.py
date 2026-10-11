@@ -186,7 +186,7 @@ class VaultStore:
                         "chunk_id": chunk_id,
                         "content": docs[0][i] if docs else "",
                         "metadata": metas[0][i] if metas else {},
-                        "distance": dists[0][i] if dists else 0.0,
+                        "distance": dists[0][i] if dists else None,
                     }
                 )
 
@@ -267,7 +267,8 @@ class VaultStore:
 
         Falls back to pure vector search when BM25 index is not configured.
 
-        Returns results in the same shape as ``search()`` for drop-in use.
+        ``distance`` preserves raw vector evidence (None for lexical-only hits);
+        ``rrf_score`` determines fusion ordering, never relevance confidence.
         """
         from vaultmind.indexer.hybrid import reciprocal_rank_fusion
 
@@ -290,7 +291,7 @@ class VaultStore:
                     "chunk_id": r.chunk_id,
                     "content": r.content,
                     "metadata": r.metadata,
-                    "distance": 1.0 - r.rrf_score,  # pseudo-distance for compat
+                    "distance": r.distance,
                     "rrf_score": r.rrf_score,
                     "vector_rank": r.vector_rank,
                     "bm25_rank": r.bm25_rank,

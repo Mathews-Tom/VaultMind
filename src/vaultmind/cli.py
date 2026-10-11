@@ -1977,6 +1977,7 @@ def bench(
     from vaultmind.bench.runner import RetrievalStore, passes_thresholds, run_bench
     from vaultmind.bench.trend import append_trend_record, build_trend_record, default_trend_path
     from vaultmind.config import load_settings
+    from vaultmind.indexer.ranking import RetrievalConfidence
 
     settings = load_settings(ctx.obj.get("config_path"))
     bench_cfg = settings.bench
@@ -2052,6 +2053,14 @@ def bench(
             f"  Questions: {report.n_answerable} answerable, {report.n_unanswerable} unanswerable"
         )
         console.print(f"  recall@{report.k}: {report.recall_at_k:.2f}  MRR: {report.mrr:.2f}")
+        unknown_count = sum(
+            result.confidence is RetrievalConfidence.UNKNOWN for result in report.results
+        )
+        if unknown_count:
+            console.print(
+                f"  Unknown retrieval confidence: {unknown_count} question(s); "
+                "not evidence of a correct decline."
+            )
         if report.retrieval_decline_accuracy is not None:
             console.print(f"  Retrieval decline accuracy: {report.retrieval_decline_accuracy:.2f}")
         if report.llm_cite_or_decline_accuracy is not None:

@@ -18,6 +18,7 @@ from vaultmind.bench.runner import (
     score_question,
 )
 from vaultmind.config import RankingConfig
+from vaultmind.indexer.ranking import RetrievalConfidence, apply_authority
 
 
 class FakeStore:
@@ -163,6 +164,39 @@ class TestScoreQuestionUnanswerable:
         result = score_question(question, hits, score_floor=0.5)
         assert result.hit is False
         assert result.rank is None
+
+    @pytest.mark.parametrize(
+        ("distances", "confidence", "decline"),
+        [
+            ([], RetrievalConfidence.WEAK, True),
+            ([None], RetrievalConfidence.UNKNOWN, False),
+            ([0.5], RetrievalConfidence.WEAK, True),
+            ([0.499999], RetrievalConfidence.STRONG, False),
+            ([0.9, None], RetrievalConfidence.UNKNOWN, False),
+            ([None, 0.1], RetrievalConfidence.STRONG, False),
+        ],
+    )
+    def test_fusion_and_authority_cannot_change_decline_evidence(
+        self,
+        distances: list[float | None],
+        confidence: RetrievalConfidence,
+        decline: bool,
+    ) -> None:
+        hits = [
+            {
+                "chunk_id": f"{i}::0",
+                "content": "candidate",
+                "metadata": {"note_path": f"{i}.md", "authority": 5 if i else 1},
+                "distance": distance,
+                "rrf_score": 0.01 + i * 0.001,
+            }
+            for i, distance in enumerate(distances)
+        ]
+        question = _q("unknown", answerable=False)
+        before = score_question(question, hits, 0.5)
+        after = score_question(question, apply_authority(hits, RankingConfig()), 0.5)
+        assert before.confidence is after.confidence is confidence
+        assert before.retrieval_decline_correct is after.retrieval_decline_correct is decline
 
 
 class TestAggregate:

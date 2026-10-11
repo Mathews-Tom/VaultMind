@@ -424,6 +424,29 @@ class TestFormatSearchResult:
         result = TelegramFormatter.format_search_result(self._hit(distance=0.2), 1)
         assert "80% match" in result
 
+    def test_exact_vector_match_is_genuine_100_percent(self) -> None:
+        result = TelegramFormatter.format_search_result(self._hit(distance=0.0), 1)
+        assert "100% match" in result
+
+    def test_distance_beyond_one_clamps_to_zero_percent(self) -> None:
+        result = TelegramFormatter.format_search_result(self._hit(distance=1.4), 1)
+        assert "0% match" in result
+
+    def test_none_distance_is_unknown_not_fabricated_percent(self) -> None:
+        hit = self._hit()
+        hit["distance"] = None
+        hit["rrf_score"] = 0.0164  # fusion score must never be shown as relevance
+        result = TelegramFormatter.format_search_result(hit, 1)
+        assert "(relevance unknown)" in result
+        assert "% match" not in result
+
+    def test_missing_distance_is_unknown_not_fabricated_percent(self) -> None:
+        hit = self._hit()
+        del hit["distance"]
+        result = TelegramFormatter.format_search_result(hit, 1)
+        assert "(relevance unknown)" in result
+        assert "100%" not in result
+
     def test_path_in_code(self) -> None:
         result = TelegramFormatter.format_search_result(self._hit(), 1)
         assert "<code>inbox/my-note.md</code>" in result

@@ -14,6 +14,7 @@ class HybridResult:
     vector_rank: int | None
     bm25_rank: int | None
     rrf_score: float
+    distance: float | None
 
 
 def reciprocal_rank_fusion(
@@ -63,6 +64,8 @@ def reciprocal_rank_fusion(
             hit = vector_by_id[chunk_id]
             content: str = hit.get("content", "")
             metadata: dict[str, Any] = hit.get("metadata", {})
+            raw_distance = hit.get("distance")
+            distance = float(raw_distance) if raw_distance is not None else None
         else:
             bm25_hit = bm25_by_id[chunk_id]
             content = ""
@@ -70,6 +73,7 @@ def reciprocal_rank_fusion(
                 "note_path": bm25_hit.get("note_path", ""),
                 "note_title": bm25_hit.get("note_title", ""),
             }
+            distance = None
 
         results.append(
             HybridResult(
@@ -79,6 +83,7 @@ def reciprocal_rank_fusion(
                 vector_rank=v_rank,
                 bm25_rank=b_rank,
                 rrf_score=rrf,
+                distance=distance,
             )
         )
 
