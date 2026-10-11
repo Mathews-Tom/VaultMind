@@ -17,7 +17,11 @@ from vaultmind.bot.handlers.utils import _is_authorized, _resolve_note_path
 from vaultmind.bot.sanitize import sanitize_path
 from vaultmind.contradiction.marking import write_superseded_block
 from vaultmind.graph.evolution import LineageStore
-from vaultmind.vault.security import PathTraversalError, validate_vault_path
+from vaultmind.vault.security import (
+    PathResolutionError,
+    PathTraversalError,
+    validate_vault_path,
+)
 
 if TYPE_CHECKING:
     from aiogram.types import CallbackQuery, Message
@@ -98,7 +102,7 @@ async def handle_delete_callback(ctx: HandlerContext, callback: CallbackQuery) -
         rel_path = data[len("delete_confirm:") :]
         try:
             filepath = validate_vault_path(rel_path, ctx.vault_root)
-        except PathTraversalError:
+        except (PathTraversalError, PathResolutionError):
             await callback.message.edit_text(  # type: ignore[union-attr]
                 "Path not allowed.",
             )

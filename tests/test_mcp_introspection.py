@@ -9,6 +9,8 @@ import pytest
 from vaultmind.config import GraphConfig
 from vaultmind.graph.evolution import EvolutionDetector
 from vaultmind.graph.knowledge_graph import KnowledgeGraph
+from vaultmind.mcp.auth import ProfileEnforcer
+from vaultmind.mcp.profiles import load_profile
 from vaultmind.mcp.server import _dispatch_tool
 from vaultmind.memory.procedural import ProceduralMemory
 from vaultmind.memory.store import EpisodeStore
@@ -86,7 +88,7 @@ def _dispatch(
     graph: KnowledgeGraph,
     **kwargs,
 ) -> dict:
-    """Thin wrapper that fills in unused positional stubs."""
+    """Thin wrapper that fills in unused positional stubs and the full-policy enforcer."""
     return _dispatch_tool(
         name,
         args,
@@ -94,6 +96,7 @@ def _dispatch(
         _StubStore(),  # type: ignore[arg-type]
         graph,
         _StubParser(),  # type: ignore[arg-type]
+        enforcer=ProfileEnforcer(load_profile("full"), vault_path),
         **kwargs,
     )
 

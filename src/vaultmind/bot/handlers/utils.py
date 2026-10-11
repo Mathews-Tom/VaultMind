@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 from typing import TYPE_CHECKING
 
-from vaultmind.vault.security import validate_vault_path
+from vaultmind.vault.security import PathResolutionError, validate_vault_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,6 +43,24 @@ def _split_message(text: str, max_len: int = 4000) -> list[str]:
     return chunks
 
 
+def _resolve_candidate(path: str, vault_root: Path) -> Path | None:
+    """Return an existing in-vault file for ``path``, or None to try the next strategy.
+
+    Unresolvable candidates (symlink loops, uninspectable components) fall
+    through; containment violations still propagate as PathTraversalError.
+    """
+    try:
+        candidate = validate_vault_path(path, vault_root)
+    except PathResolutionError:
+        return None
+    try:
+        return candidate if candidate.is_file() else None
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EPERM, errno.ENAMETOOLONG):
+            return None
+        raise
+
+
 def _resolve_note_path(ctx: HandlerContext, query: str) -> Path | None:
     """Resolve a note query to an absolute filepath.
 
@@ -52,31 +71,34 @@ def _resolve_note_path(ctx: HandlerContext, query: str) -> Path | None:
     4. Semantic search (first result)
     """
     # Exact path
-    candidate = validate_vault_path(query, ctx.vault_root)
-    if candidate.is_file():
+    candidate = _resolve_candidate(query, ctx.vault_root)
+    if candidate is not None:
         return candidate
 
     # With .md
     if not query.endswith(".md"):
-        candidate = validate_vault_path(query + ".md", ctx.vault_root)
-        if candidate.is_file():
+        candidate = _resolve_candidate(query + ".md", ctx.vault_root)
+        if candidate is not None:
             return candidate
 
     # Filename search
     query_lower = query.lower().strip()
     for md_file in ctx.vault_root.rglob("*.md"):
-        if md_file.stem.lower() == query_lower:
-            return md_file
-        if query_lower in md_file.stem.lower():
-            return md_file
+        if query_lower not in md_file.stem.lower():
+            continue
+        candidate = _resolve_candidate(
+            md_file.relative_to(ctx.vault_root).as_posix(), ctx.vault_root
+        )
+        if candidate is not None:
+            return candidate
 
     # Semantic search fallback
     results = ctx.store.search(query, n_results=1)
     if results:
         note_path: str = results[0]["metadata"].get("note_path", "")
         if note_path:
-            candidate = validate_vault_path(note_path, ctx.vault_root)
-            if candidate.is_file():
+            candidate = _resolve_candidate(note_path, ctx.vault_root)
+            if candidate is not None:
                 return candidate
 
     return None

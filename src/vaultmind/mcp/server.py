@@ -13,14 +13,18 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from vaultmind.mcp.auth import AuditLogger, ProfileEnforcer, ProfileError
-from vaultmind.vault.security import PathTraversalError, validate_vault_path
+from vaultmind.vault.security import (
+    PathResolutionError,
+    PathTraversalError,
+    validate_vault_path,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
 
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
@@ -453,10 +457,9 @@ def create_mcp_server(
                     from pathlib import Path as PathCls
 
                     enforcer.check_path(PathCls(arguments["path"]))
-                if name == "list_folder_index" and "folder" in arguments:
-                    from pathlib import Path as PathCls
-
-                    enforcer.check_path(PathCls(arguments["folder"]))
+                # list_folder_index scope is enforced per result in dispatch: a
+                # restricted profile's omitted/empty/root folder is a virtual
+                # aggregate of allowed roots, and an explicit forbidden folder is denied.
                 if name == "vault_write" and "content" in arguments:
                     enforcer.check_size(arguments["content"])
 
@@ -465,6 +468,7 @@ def create_mcp_server(
                 "store": store,
                 "graph": graph,
                 "parser": parser,
+                "enforcer": enforcer,
                 "duplicate_detector": duplicate_detector,
                 "note_suggester": note_suggester,
                 "episode_store": episode_store,
@@ -545,6 +549,33 @@ def _one_line_description(note: Note, max_len: int = 160) -> str:
     return ""
 
 
+def _require_enforcer(name: str, enforcer: ProfileEnforcer | None) -> ProfileEnforcer:
+    """Return the enforcer, failing closed when a scoped tool has none."""
+    if enforcer is None:
+        raise ProfileError(f"Tool '{name}' requires profile enforcement but none was supplied")
+    return enforcer
+
+
+def _scoped_markdown_files(
+    resolved_root: Path, enforcer: ProfileEnforcer, roots: list[Path]
+) -> list[Path]:
+    """Return sorted vault-relative markdown paths under ``roots`` allowed by the enforcer.
+
+    Every candidate (symlinks included) is checked with ``ProfileEnforcer.check_path``
+    before any caller parses or serializes it.
+    """
+    allowed: set[Path] = set()
+    for root in roots:
+        for md in root.rglob("*.md"):
+            try:
+                rel = md.relative_to(resolved_root)
+                enforcer.check_path(rel)
+            except (ValueError, ProfileError):
+                continue
+            allowed.add(rel)
+    return sorted(allowed)
+
+
 def _dispatch_tool(
     name: str,
     args: dict[str, Any],
@@ -553,6 +584,7 @@ def _dispatch_tool(
     graph: KnowledgeGraph,
     parser: VaultParser,
     *,
+    enforcer: ProfileEnforcer | None,
     duplicate_detector: object | None = None,
     note_suggester: object | None = None,
     episode_store: object | None = None,
@@ -612,10 +644,12 @@ def _dispatch_tool(
         return {"notes": sorted(notes), "count": len(notes)}
 
     elif name == "read_frontmatter":
+        scope = _require_enforcer(name, enforcer)
         try:
             filepath = validate_vault_path(args["path"], vault_path)
-        except PathTraversalError as e:
+        except (PathTraversalError, PathResolutionError) as e:
             return {"error": f"Path not allowed: {e.user_path}"}
+        scope.check_path(Path(args["path"]))
         if not filepath.exists():
             return {"error": f"Note not found: {args['path']}"}
         note = parser.parse_file(filepath)
@@ -633,22 +667,33 @@ def _dispatch_tool(
         }
 
     elif name == "list_folder_index":
+        scope = _require_enforcer(name, enforcer)
         try:
             folder = validate_vault_path(args.get("folder", ""), vault_path)
-        except PathTraversalError as e:
+        except (PathTraversalError, PathResolutionError) as e:
             return {"error": f"Path not allowed: {e.user_path}"}
-        if not folder.exists():
-            return {"error": f"Folder not found: {args.get('folder', '')}"}
+        resolved_root = vault_path.resolve()
+        if not scope.policy.allows_all_folders and folder == resolved_root:
+            # Omitted/empty/explicit root under a restricted profile is a virtual
+            # aggregate of the allowed roots only, never the whole vault.
+            roots = [
+                resolved_root / allowed for allowed in dict.fromkeys(scope.policy.folder_scope)
+            ]
+        else:
+            scope.check_path(Path(args.get("folder", "")))
+            if not folder.exists():
+                return {"error": f"Folder not found: {args.get('folder', '')}"}
+            roots = [folder]
         entries = []
-        for md in sorted(folder.rglob("*.md")):
+        for rel in _scoped_markdown_files(resolved_root, scope, roots):
             try:
-                note = parser.parse_file(md)
+                note = parser.parse_file(vault_path / rel)
             except Exception as e:
-                logger.warning("Failed to parse %s for folder index: %s", md, e)
+                logger.warning("Failed to parse %s for folder index: %s", rel, e)
                 continue
             entries.append(
                 {
-                    "path": str(md.relative_to(vault_path)),
+                    "path": str(rel),
                     "title": note.title,
                     "description": _one_line_description(note),
                     "note_type": note.note_type.value,
@@ -658,20 +703,43 @@ def _dispatch_tool(
         return {"folder": args.get("folder", ""), "notes": entries, "count": len(entries)}
 
     elif name == "follow_links":
+        scope = _require_enforcer(name, enforcer)
         try:
             filepath = validate_vault_path(args["path"], vault_path)
-        except PathTraversalError as e:
+        except (PathTraversalError, PathResolutionError) as e:
             return {"error": f"Path not allowed: {e.user_path}"}
+        resolved_root = vault_path.resolve()
+        scope.check_path(Path(args["path"]))
         if not filepath.exists():
             return {"error": f"Note not found: {args['path']}"}
         target_note = parser.parse_file(filepath)
-        all_notes = parser.iter_notes()
+        # Candidate notes are pre-filtered by the enforcer before they are parsed,
+        # so forbidden notes never contribute titles, paths, links or counts.
+        excluded = parser.config.excluded_folders
+        roots = (
+            [resolved_root]
+            if scope.policy.allows_all_folders
+            else [resolved_root / allowed for allowed in dict.fromkeys(scope.policy.folder_scope)]
+        )
+        all_notes: list[Note] = []
+        for rel in _scoped_markdown_files(resolved_root, scope, roots):
+            if any(part in excluded for part in rel.parts):
+                continue
+            try:
+                all_notes.append(parser.parse_file(vault_path / rel))
+            except Exception:
+                logger.exception("Failed to parse %s", rel)
         title_to_path = {n.title: str(n.path) for n in all_notes}
 
         out_links = [
             {"title": link_title, "path": title_to_path.get(link_title)}
             for link_title in target_note.wikilinks
         ]
+        if not scope.policy.allows_all_folders:
+            # A restricted client cannot tell a private target from a truly
+            # unresolved link without disclosing it, so only resolved in-scope
+            # links are emitted.
+            out_links = [link for link in out_links if link["path"] is not None]
         backlinks = [
             {"title": n.title, "path": str(n.path)}
             for n in all_notes

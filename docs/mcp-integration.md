@@ -60,7 +60,7 @@ uv run vaultmind mcp-serve --profile planner  # Planner profile
 uv run vaultmind mcp-serve --profile full     # Full access
 ```
 
-The server binds to `127.0.0.1:8765` by default. Configure in `[mcp]` section of `config/default.toml`.
+The CLI uses MCP stdio transport, not a listening HTTP port. Stdout contains only JSON-RPC protocol frames; startup diagnostics and logs go to stderr.
 
 ## Tools
 
@@ -266,9 +266,11 @@ List a folder's structured index: note titles and one-line descriptions, without
 
 **Parameters:**
 
-- `folder` (string, default `""`) — folder path relative to vault root (empty = root)
+- `folder` (string, default `""`) — folder path relative to vault root. Omitted, empty, or explicit vault-root input aggregates only the active profile's allowed roots; unrestricted profiles list the whole vault.
 
 **Returns:** `{folder, notes: [{path, title, description, note_type, tags}], count}`. `description` is the frontmatter `description` field if present, else the note's first non-heading body line.
+
+Explicit out-of-scope folders are denied before checking existence. Every candidate is checked against the active profile before parsing its metadata, including resolved symlink targets. `count` includes only returned entries.
 
 ### `follow_links`
 
@@ -278,7 +280,7 @@ Follow a note's wikilink neighborhood: outgoing `[[links]]` and incoming backlin
 
 - `path` (string, required) — note path relative to vault root
 
-**Returns:** `{path, title, out_links: [{title, path}], backlinks: [{title, path}], out_link_count, backlink_count}`. An out-link's `path` is `null` when no note in the vault has a matching title.
+**Returns:** `{path, title, out_links: [{title, path}], backlinks: [{title, path}], out_link_count, backlink_count}`. Restricted profiles return only outgoing targets resolved inside their folder scope and backlinks from allowed notes; unresolved or forbidden titles are omitted, not disguised as `null` paths. An allowed note with a duplicate title remains resolvable even when a forbidden note has the same title. Unrestricted profiles retain `null` paths for genuinely unresolved titles. Counts include only returned links.
 
 ## Profiles
 
@@ -326,6 +328,16 @@ write_enabled = false
 ### Path traversal protection
 
 All path-based tools validate that the requested path resolves within the vault root. Attempts to access `../`, absolute paths, or symlinks outside the vault are blocked.
+
+Traversal tools enforce the same `ProfileEnforcer` policy on inputs and every returned path. Wildcard folder access bypasses folder restrictions, never vault containment. Config-defined profiles override built-ins and use the same result filtering. Direct traversal dispatch requires an explicit enforcement context and denies calls without one.
+
+This verification covers only `read_frontmatter`, `list_folder_index`, and `follow_links`, not global MCP privacy. The planner profile's existing `vault_list` and `vault_search` do not filter results by folder scope and can disclose out-of-scope paths or content. Do not use planner as a whole-vault privacy sandbox. Traversal denials can echo caller-supplied paths but must not disclose unknown resolved symlink targets.
+
+Symlink loops fail closed with a caller-path-only error, on Python 3.12 and 3.13. Other strict-resolution filesystem errors fall back to ordinary non-strict lookup before containment and scope checks; allowed missing paths and children of files retain their normal not-found response. A genuine fallback-resolution failure remains an explicit caller-path-only error. Invalid or forbidden candidates do not contribute metadata or counts and do not prevent `list_folder_index` or `follow_links` from returning valid allowed notes. The offline receipt checks unknown targets on payloads, raw protocol frames, stderr, and audit reasons, and exercises each traversal tool through the registered SDK request handler with missing enforcement context and a valid-context control using the same arguments.
+
+### Offline stdio verification
+
+Run `uv run --extra dev --extra mcp python scripts/verify_acceptance.py --case mcp --offline` to exercise the installed CLI entrypoint and MCP SDK transport against temporary synthetic vaults. The receipt records per-call expected and actual results, stdout protocol validation, scope counts, package origins, and network-denial instrumentation. No hosted embeddings, model calls, private vault input, or Telegram delivery are involved.
 
 ### Audit logging
 
