@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 from vaultmind.mcp.profiles import DEFAULT_PROFILES, load_profile
 from vaultmind.mcp.server import _dispatch_tool
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
