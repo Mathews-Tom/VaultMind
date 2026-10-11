@@ -13,7 +13,13 @@ from unittest.mock import AsyncMock
 from vaultmind.bot.handlers.autonomy import build_block_notifier, handle_autonomy_callback
 from vaultmind.bot.handlers.context import HandlerContext
 from vaultmind.bot.notifier import Notifier
-from vaultmind.services.review_queue import Impact, Lane, ProposalKind, ProposalStatus, ReviewQueue
+from vaultmind.services.review_queue import (
+    Impact,
+    Lane,
+    ProposalKind,
+    ProposalStatus,
+    ReviewQueue,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -250,9 +256,7 @@ class TestHandleAutonomyCallbackSourceIngestionFollowUp:
         def _apply(payload: dict[str, object]) -> str:
             return "note.md"
 
-        queue = ReviewQueue(
-            tmp_path / "queue.db", appliers={ProposalKind.SOURCE_INGESTION: _apply}
-        )
+        queue = ReviewQueue(tmp_path / "queue.db", appliers={ProposalKind.SOURCE_INGESTION: _apply})
         proposal = queue.propose(
             ProposalKind.SOURCE_INGESTION,
             confidence=1.0,
@@ -283,9 +287,7 @@ class TestHandleAutonomyCallbackSourceIngestionFollowUp:
         def _apply(payload: dict[str, object]) -> str:
             return next(paths)
 
-        queue = ReviewQueue(
-            tmp_path / "queue.db", appliers={ProposalKind.SOURCE_INGESTION: _apply}
-        )
+        queue = ReviewQueue(tmp_path / "queue.db", appliers={ProposalKind.SOURCE_INGESTION: _apply})
         queue.propose(
             ProposalKind.SOURCE_INGESTION,
             confidence=1.0,
@@ -318,9 +320,7 @@ class TestHandleAutonomyCallbackSourceIngestionFollowUp:
         def _apply(payload: dict[str, object]) -> str:
             return "note.md"
 
-        queue = ReviewQueue(
-            tmp_path / "queue.db", appliers={ProposalKind.SOURCE_INGESTION: _apply}
-        )
+        queue = ReviewQueue(tmp_path / "queue.db", appliers={ProposalKind.SOURCE_INGESTION: _apply})
         proposal = queue.propose(
             ProposalKind.SOURCE_INGESTION,
             confidence=1.0,

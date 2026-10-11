@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from vaultmind.mcp.auth import AuditLogger, ProfileEnforcer, ProfileError
 from vaultmind.vault.security import PathTraversalError, validate_vault_path
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
@@ -54,7 +55,14 @@ def create_mcp_server(
 
     server = Server("vaultmind")
 
-    @server.list_tools()  # type: ignore[misc,untyped-decorator,unused-ignore]
+    # MCP 1.26 leaves this factory untyped; its decorator preserves this callback.
+    list_tools_factory = cast(
+        "Callable[[], Callable[[Callable[[], Awaitable[list[Tool]]]], "
+        "Callable[[], Awaitable[list[Tool]]]]]",
+        server.list_tools,
+    )
+
+    @list_tools_factory()
     async def list_tools() -> list[Tool]:
         return [
             Tool(
