@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
-from typing import Any
+import os
+from typing import TYPE_CHECKING, Any, cast
 
+import pytest
+
+from vaultmind.config import load_settings
+from vaultmind.indexer.bm25 import BM25Index
 from vaultmind.indexer.hybrid import HybridResult, reciprocal_rank_fusion
+from vaultmind.indexer.ranking import RetrievalConfidence, retrieval_confidence
+from vaultmind.indexer.store import VaultStore
+from vaultmind.vault.parser import VaultParser
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from vaultmind.indexer.embedder import Embedder
 
 
 def _make_vector_hit(chunk_id: str, distance: float = 0.2, content: str = "") -> dict[str, Any]:
@@ -159,3 +172,87 @@ class TestVectorOnlyFallback:
         r = results[0]
         assert r.chunk_id == "bm25only"
         assert r.metadata["note_path"] == "bm25only.md"
+
+
+def test_fusion_reordering_preserves_confidence_evidence() -> None:
+    """A boosted weak hit must not erase a lower-ranked strong hit's evidence."""
+    results = reciprocal_rank_fusion(
+        [_make_vector_hit("strong", distance=0.0), _make_vector_hit("weak", distance=0.9)],
+        [_make_bm25_hit("weak"), _make_bm25_hit("lexical")],
+    )
+    assert [r.chunk_id for r in results] == ["weak", "strong", "lexical"]
+    assert [r.distance for r in results] == [0.9, 0.0, None]
+    hits = [{"distance": r.distance, "rrf_score": r.rrf_score} for r in results]
+    assert retrieval_confidence(hits[:1], 0.5) == RetrievalConfidence.WEAK
+    assert retrieval_confidence(hits, 0.5) == RetrievalConfidence.STRONG
+    assert retrieval_confidence(hits[2:], 0.5) == RetrievalConfidence.UNKNOWN
+
+
+class _DeterministicEmbedder:
+    """Synthetic orthogonal vectors at the embedding boundary; no provider calls."""
+
+    def embed_query(self, text: str) -> list[float]:
+        return [1.0, 0.0] if "harbor" in text.lower() else [0.0, 1.0]
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed_query(text) for text in texts]
+
+
+def test_real_hybrid_preserves_confidence_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    vault = home / "vault"
+    data = home / "data"
+    vault.mkdir(parents=True)
+    data.mkdir()
+    for key in tuple(os.environ):
+        if key.startswith("VAULTMIND_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("ANONYMIZED_TELEMETRY", "False")
+    config = home / "config.toml"
+    config.write_text(
+        f'[vault]\npath = "{vault}"\n'
+        f'[chroma]\npersist_dir = "{data / "chroma"}"\n'
+        f'[graph]\npersist_path = "{data / "graph.json"}"\n'
+        f'[search]\nbm25_db_path = "{data / "bm25.db"}"\ncache_enabled = false\n'
+        f'[gaps]\ndb_path = "{data / "gaps.db"}"\n'
+        "[embedding]\ncache_enabled = false\n[bench]\nscore_floor = 0.5\n",
+        encoding="utf-8",
+    )
+    settings = load_settings(config)
+    note_path = vault / "harbor.md"
+    note_path.write_text(
+        "---\ntitle: Harbor\ntype: project\n---\n\nharbor lantern inspection\n",
+        encoding="utf-8",
+    )
+    parser = VaultParser(settings.vault)
+    note = parser.parse_file(note_path)
+    exact = parser.chunk_note(note)[0].content
+    bm25 = BM25Index(data / "bm25.db")
+    try:
+        store = VaultStore(settings.chroma, cast("Embedder", _DeterministicEmbedder()), bm25)
+        store.index_notes([note], parser)
+        vector = store.search(exact)
+        hybrid = store.hybrid_search(exact)
+        assert [h["chunk_id"] for h in hybrid] == [h["chunk_id"] for h in vector]
+        assert vector[0]["distance"] == pytest.approx(0.0, abs=1e-6)
+        assert hybrid[0]["distance"] == vector[0]["distance"]
+        assert (
+            retrieval_confidence(vector, settings.bench.score_floor) == RetrievalConfidence.STRONG
+        )
+        assert (
+            retrieval_confidence(hybrid, settings.bench.score_floor) == RetrievalConfidence.STRONG
+        )
+
+        # Deliberately insert only at the real BM25 boundary, not via parser indexing.
+        bm25.upsert("lexical::0", "lexical.md", "Lexical", "kestrelquartz field memo")
+        lexical = store.hybrid_search("kestrelquartz", where={"note_type": "concept"})
+        assert [h["chunk_id"] for h in lexical] == ["lexical::0"]
+        assert lexical[0]["distance"] is None
+        assert (
+            retrieval_confidence(lexical, settings.bench.score_floor) == RetrievalConfidence.UNKNOWN
+        )
+    finally:
+        bm25.close()

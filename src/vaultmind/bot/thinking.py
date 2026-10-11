@@ -12,7 +12,7 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from vaultmind.indexer.ranking import is_weak_retrieval
+from vaultmind.indexer.ranking import RetrievalConfidence, retrieval_confidence
 from vaultmind.llm.client import LLMError, Message
 from vaultmind.memory.gaps import GapKind
 from vaultmind.pipeline.distill import (
@@ -270,16 +270,17 @@ class ThinkingPartner:
         results: list[dict[str, Any]],
         user_id: int | None,
     ) -> None:
-        """Mint an `unanswered_question` gap when nothing confidently relevant was found.
+        """Mint an `unanswered_question` gap when retrieval is confidently weak.
 
         Zero-additional-LLM-cost signal: no vault evidence exists to answer
         `topic` from or cite, so any reply is necessarily a decline or
-        uncited — reuses the same score-floor check `/recall` and `bench`
-        already apply to `store.search()`/`hybrid_search()` hits.
+        uncited — uses the shared raw-distance confidence classifier `/recall`
+        and `bench` apply. Unknown evidence (no raw vector distance) never mints.
         """
         if self._gap_store is None:
             return
-        if not is_weak_retrieval(results, self._score_floor):
+        confidence = retrieval_confidence(results, self._score_floor)
+        if confidence is not RetrievalConfidence.WEAK:
             return
         evidence_ref = (
             f"telegram-thinking:{user_id}" if user_id is not None else "telegram-thinking"

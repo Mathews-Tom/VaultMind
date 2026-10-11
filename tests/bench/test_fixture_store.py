@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING
 import pytest
 
 from vaultmind.bench.fixture_store import BundleError, FixtureStore, load_bundle
+from vaultmind.bench.golden import GoldenQuestion
+from vaultmind.bench.runner import score_question
+from vaultmind.indexer.ranking import RetrievalConfidence
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -99,13 +102,6 @@ class TestLoadBundle:
         with pytest.raises(BundleError, match="note_path"):
             load_bundle(bundle_dir)
 
-    def test_hit_defaults_distance_when_omitted(self, tmp_path: Path) -> None:
-        retrieval = '"Where is A?":\n  - note_path: "a.md"\n'
-        bundle_dir = _write_bundle(tmp_path, _VALID_GOLDEN, retrieval)
-        bundle = load_bundle(bundle_dir)
-        hits = bundle.store.search("Where is A?", n_results=5)
-        assert hits[0]["distance"] == pytest.approx(0.1)
-
     def test_hit_authority_field_parsed_into_metadata(self, tmp_path: Path) -> None:
         retrieval = '"Where is A?":\n  - note_path: "a.md"\n    authority: 5\n'
         bundle_dir = _write_bundle(tmp_path, _VALID_GOLDEN, retrieval)
@@ -118,3 +114,17 @@ class TestLoadBundle:
         bundle = load_bundle(bundle_dir)
         hits = bundle.store.search("Where is A?", n_results=5)
         assert "authority" not in hits[0]["metadata"]
+
+    @pytest.mark.parametrize("distance_field", ["", "    distance: null\n"])
+    def test_missing_vector_evidence_cannot_score_a_correct_decline(
+        self, tmp_path: Path, distance_field: str
+    ) -> None:
+        retrieval = '"Where is A?":\n  - note_path: "a.md"\n    rrf_score: 0.02\n' + distance_field
+        bundle_dir = _write_bundle(tmp_path, _VALID_GOLDEN, retrieval)
+        hits = load_bundle(bundle_dir).store.hybrid_search("Where is A?")
+        question = GoldenQuestion(
+            id="unknown", question="Where is A?", answerable=False, expected_notes=()
+        )
+        result = score_question(question, hits, 0.5)
+        assert result.confidence is RetrievalConfidence.UNKNOWN
+        assert result.retrieval_decline_correct is False

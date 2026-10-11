@@ -68,6 +68,19 @@ _PLACEHOLDER_PREFIX = "\x00CB"
 _PLACEHOLDER_SUFFIX = "\x00"
 
 
+def relevance_label(hit: dict[str, Any]) -> str:
+    """Relevance text for a search hit, derived only from raw vector distance.
+
+    A hit with no raw vector distance (lexical-only hybrid hit, or a missing or
+    None `distance`) has no relevance evidence, so it reads "relevance unknown"
+    rather than a fabricated percentage. RRF/fusion scores are never shown here.
+    """
+    distance = hit.get("distance")
+    if isinstance(distance, bool) or not isinstance(distance, (int, float)):
+        return "relevance unknown"
+    return f"{max(0, round((1 - distance) * 100))}% match"
+
+
 class TelegramFormatter:
     """Convert VaultNote content to Telegram-compatible HTML."""
 
@@ -107,8 +120,7 @@ class TelegramFormatter:
         title = _escape(meta.get("note_title", "Untitled"))
         note_path = _escape(meta.get("note_path", ""))
         heading = _escape(meta.get("heading", ""))
-        distance = hit.get("distance", 0.0)
-        relevance = max(0, round((1 - distance) * 100))
+        relevance = relevance_label(hit)
 
         raw_content = hit.get("content", "")
         content_raw = raw_content[:200].replace("\n", " ").strip()
@@ -120,7 +132,7 @@ class TelegramFormatter:
         if heading:
             location += f" → {heading}"
 
-        return f"<b>{index}. {title}</b> ({relevance}% match)\n{location}\n<i>{content}</i>"
+        return f"<b>{index}. {title}</b> ({relevance})\n{location}\n<i>{content}</i>"
 
     # ------------------------------------------------------------------
     # Private helpers

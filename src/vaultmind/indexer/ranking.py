@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 NOTE_TYPE_CONFIG: dict[str, dict[str, float | None]] = {
@@ -350,7 +351,8 @@ def apply_authority(hits: list[dict[str, Any]], ranking_config: Any = None) -> l
         rrf = hit.get("rrf_score")
         if rrf is not None:
             return float(rrf)
-        return 1.0 - float(hit.get("distance", 0.0))
+        distance = hit.get("distance")
+        return 1.0 - float(distance) if distance is not None else 0.0
 
     scored: list[dict[str, Any]] = []
     for hit in hits:
@@ -364,24 +366,26 @@ def apply_authority(hits: list[dict[str, Any]], ranking_config: Any = None) -> l
     return scored
 
 
-def best_distance(hits: list[dict[str, Any]]) -> float | None:
-    """Lowest (best) `distance` across retrieval hits, or `None` if there are none.
+class RetrievalConfidence(StrEnum):
+    """Relevance evidence, independent of fusion and authority ranking scores."""
 
-    Shared by `bench/runner.py`'s deterministic honest-decline scoring and
-    the live weak-retrieval gap-minting checks in `bot/handlers/recall.py`
-    and `bot/thinking.py` — one implementation of "nothing confidently
-    relevant was retrieved" for every caller that needs it.
+    STRONG = "strong"
+    WEAK = "weak"
+    UNKNOWN = "unknown"
+
+
+def retrieval_confidence(hits: list[dict[str, Any]], score_floor: float) -> RetrievalConfidence:
+    """Classify the result set using only raw vector distances.
+
+    Any distance below the unchanged floor proves strong retrieval. Empty
+    retrieval, or all known distances at/above the floor, is weak. Missing
+    vector evidence prevents a weak conclusion unless another hit is strong.
     """
-    if not hits:
-        return None
-    return min(float(h.get("distance", 1.0)) for h in hits)
-
-
-def is_weak_retrieval(hits: list[dict[str, Any]], score_floor: float) -> bool:
-    """True when nothing confidently relevant was retrieved for a query.
-
-    Mirrors `bench/runner.py::score_question`'s honest-decline check: no
-    hits, or the best hit's distance is at or above `score_floor`.
-    """
-    best = best_distance(hits)
-    return best is None or best >= score_floor
+    unknown = False
+    for hit in hits:
+        distance = hit.get("distance")
+        if distance is None:
+            unknown = True
+        elif float(distance) < score_floor:
+            return RetrievalConfidence.STRONG
+    return RetrievalConfidence.UNKNOWN if unknown else RetrievalConfidence.WEAK

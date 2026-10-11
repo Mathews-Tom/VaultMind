@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from vaultmind.bot.formatter import relevance_label
 from vaultmind.bot.handlers.utils import _is_authorized
 from vaultmind.bot.sanitize import MAX_QUERY_LENGTH, sanitize_text
-from vaultmind.indexer.ranking import apply_authority, is_weak_retrieval
+from vaultmind.indexer.ranking import RetrievalConfidence, apply_authority, retrieval_confidence
 from vaultmind.memory.gaps import GapKind, GapStore
 
 if TYPE_CHECKING:
@@ -51,8 +52,7 @@ def _render_page(session: PaginatedSearch) -> tuple[str, InlineKeyboardMarkup]:
         title = meta.get("note_title", "Untitled")
         note_path = meta.get("note_path", "")
         heading = meta.get("heading", "")
-        distance = hit.get("distance", 0)
-        relevance = max(0, round((1 - distance) * 100))
+        relevance = relevance_label(hit)
 
         content = hit["content"][:200].replace("\n", " ").strip()
         if len(hit["content"]) > 200:
@@ -62,7 +62,7 @@ def _render_page(session: PaginatedSearch) -> tuple[str, InlineKeyboardMarkup]:
         if heading:
             location += f" \u2192 {heading}"
 
-        lines.append(f"**{i}. {title}** ({relevance}% match)\n{location}\n_{content}_\n")
+        lines.append(f"**{i}. {title}** ({relevance})\n{location}\n_{content}_\n")
 
     text = "\n".join(lines)
 
@@ -147,8 +147,10 @@ async def handle_recall(
 
     user_id = message.from_user.id if message.from_user else 0
 
-    if isinstance(ctx.gap_store, GapStore) and is_weak_retrieval(
-        results, ctx.settings.bench.score_floor
+    if (
+        isinstance(ctx.gap_store, GapStore)
+        and retrieval_confidence(results, ctx.settings.bench.score_floor)
+        is RetrievalConfidence.WEAK
     ):
         try:
             await asyncio.to_thread(

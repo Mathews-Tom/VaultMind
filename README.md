@@ -385,6 +385,30 @@ uv run ruff check src/ tests/
 uv run ruff format src/ tests/
 ```
 
+### Retrieval confidence and the acceptance smoke
+
+`/recall`, `vaultmind bench`, and the thinking partner's gap minting share one relevance judgement, `retrieval_confidence(hits, score_floor)` in `indexer/ranking.py`. It reads **only the raw vector distance** (`hit["distance"]`, lower is closer) against `[bench].score_floor` (default `0.5`) and returns one of three states:
+
+| State     | When                                                                                           | Effect                                                                                       |
+| --------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `strong`  | any hit has a raw distance strictly below the floor                                            | no gap is minted; no decline credit (a strong result is not an honest decline)               |
+| `weak`    | no hits at all, or every hit has a raw distance at or above the floor                          | mints a weak-retrieval gap (`/recall`) or unanswered-question gap (thinking); earns decline credit in `vaultmind bench` |
+| `unknown` | non-empty results where no hit is below the floor and at least one hit has no raw distance     | **no gap is minted and no decline credit is given**; a hit without a raw distance renders as `relevance unknown` instead of a percentage |
+
+Raw distance is never replaced by a fusion pseudo-distance. In hybrid search a lexical-only (BM25) hit has `distance: None` — it has keyword evidence but no vector evidence — so it can never prove relevance and never proves irrelevance. `rrf_score` (fusion) and `authority_score` (source-trust reweighting) only change *ordering*; they never change a hit's `distance` or the result set's confidence.
+
+`vaultmind bench --bundle <dir>` reads `<dir>/retrieval.yaml`, a mapping of exact golden-question text to an ordered hit list. Each hit needs `note_path` and may carry `distance`, `authority`, `rrf_score`, `content`. A hit whose `distance` is **missing or `null` is explicit unknown evidence** (it is not defaulted to a "good" or "bad" distance), so a bundle can model lexical-only hits and the unknown path deterministically.
+
+`scripts/verify_acceptance.py` is a small real-surface smoke for this behaviour:
+
+```bash
+uv run python scripts/verify_acceptance.py --case retrieval --offline
+```
+
+It builds a fresh temporary `HOME`, vault, ChromaDB, BM25 index, gap ledger and graph from explicit TOML files, indexes a small corpus through the real parser, then drives the real `/recall` handler, the real bench runner, and the real thinking partner. The lexical-only row is deliberately inserted directly at the BM25 fixture boundary, separately from the parser-indexed notes; it is never added to the vector index. It asserts exact self-match is `strong` in vector and hybrid modes, empty retrieval is `weak`, that lexical-only BM25 chunk is `unknown` (and mints no gap), recall and bench retrieve identical result sets, the floor boundary (`floor - ε` strong, `floor` weak, `None`/missing unknown), and that authority re-ordering changes order but never distance or confidence. It prints a machine-readable JSON receipt (git revision, working-tree dirty flag, package/API-origin/corpus digests, boundary labels, every check's expected and observed value) and exits non-zero on any failed check or error, including under `python -O`.
+
+Smoke limits — what it does **not** prove: embeddings are a deterministic hash-bucket stand-in, the LLM is a scripted client, and Telegram delivery is an in-process recorder, so it demonstrates plumbing and raw-distance semantics, not retrieval quality or live-provider behaviour. The direct BM25 fixture insert tests missing vector evidence, not native-provider quality or parser creation of a lexical-only note. Exact floor-boundary values come from a clearly labeled scripted store kept separate from the real storage path. Thinking retrieves with vector-only search, so its `unknown` state is exercised only through that scripted store. No network or paid calls are made (the run fails if a connect is attempted).
+
 ## Architecture
 
 ```text

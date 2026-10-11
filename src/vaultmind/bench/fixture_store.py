@@ -63,11 +63,14 @@ def _parse_hit(query: str, raw_hit: Any) -> dict[str, Any]:
     metadata: dict[str, Any] = {"note_path": note_path}
     if "authority" in raw_hit:
         metadata["authority"] = int(raw_hit["authority"])
+    raw_distance = raw_hit.get("distance")
+    raw_rrf = raw_hit.get("rrf_score")
     return {
         "chunk_id": f"{note_path}::0",
         "content": str(raw_hit.get("content", "")),
         "metadata": metadata,
-        "distance": float(raw_hit.get("distance", 0.1)),
+        "distance": float(raw_distance) if raw_distance is not None else None,
+        **({"rrf_score": float(raw_rrf)} if raw_rrf is not None else {}),
     }
 
 

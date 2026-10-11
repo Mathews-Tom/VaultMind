@@ -108,9 +108,9 @@ src/vaultmind/
 │   └── eval.py          # Scores the detector vs. a trivial always-escalate baseline
 │
 ├── bench/           # Retrieval self-benchmark (`vaultmind bench`)
-│   ├── runner.py        # recall@k/MRR scoring against the live hybrid+ranking path
+│   ├── runner.py        # recall@k/MRR + retrieval-confidence scoring against the live hybrid+ranking path
 │   ├── golden.py        # benchmarks/golden.yaml schema loader
-│   ├── fixture_store.py # Deterministic FixtureStore for `--bundle` CI-safe self-tests
+│   ├── fixture_store.py # Deterministic FixtureStore for `--bundle` CI-safe self-tests (missing/null distance = unknown)
 │   ├── llm_score.py     # `--llm` opt-in cite-or-decline scoring
 │   └── trend.py         # Per-run JSONL trend record storage
 │
@@ -173,6 +173,29 @@ Query → Vector search (ChromaDB) ─┐
 ```
 
 When hybrid search is enabled (default), both vector and keyword results are merged via Reciprocal Rank Fusion (RRF, k=60). Items appearing in both lists get boosted. Post-retrieval ranking applies note-type multipliers, mode multipliers (operational > learning), activation-based scoring, and temporal decay.
+
+### Retrieval Confidence
+
+Fusion and relevance are separate signals. `hybrid_search()` returns, per hit:
+
+| Key            | Meaning                                                                                       |
+| -------------- | --------------------------------------------------------------------------------------------- |
+| `distance`     | **Raw vector distance** (`float`, lower is closer) or `None` for a lexical-only (BM25) hit      |
+| `rrf_score`    | Reciprocal Rank Fusion score — ordering only, never relevance evidence                        |
+| `authority_score` | Added by `apply_authority()` — `rrf_score` (or `1 - distance`) × the stamped-authority weight; ordering only |
+
+`retrieval_confidence(hits, score_floor)` (`indexer/ranking.py`) is the single classifier used by `/recall` gap minting, `vaultmind bench` decline scoring, and the thinking partner's gap minting. It looks only at raw `distance` and returns a `RetrievalConfidence` (`StrEnum`):
+
+1. empty result set → `weak`
+2. any raw distance `< score_floor` (`[bench].score_floor`, default `0.5`) → `strong`
+3. otherwise, any hit with a `None`/missing distance → `unknown`
+4. otherwise → `weak`
+
+`unknown` means "the results are non-empty, but no hit has vector evidence of relevance and at least one has no vector evidence at all" — typically lexical-only BM25 hits. It is deliberately not weak: no knowledge gap is minted (`GapKind.WEAK_RETRIEVAL` / `UNANSWERED_QUESTION`), `vaultmind bench` withholds deterministic decline credit and counts the question as unknown confidence, and `formatter.relevance_label()` renders `relevance unknown` rather than a fabricated percentage. Authority re-ranking can reorder hits but never rewrites `distance`, so it cannot change the confidence of a result set. Raw-vector consumers (duplicate detection, note suggestions, digest) are unchanged.
+
+The bench `--bundle` fixture (`retrieval.yaml`: golden query text → ordered hit list) follows the same contract: a hit's `distance` is optional, and a **missing or `null` distance is explicit unknown evidence**, never defaulted to a number. Optional `rrf_score`, `authority` and `content` pass through unchanged.
+
+`scripts/verify_acceptance.py --case retrieval --offline` exercises this contract through the real parser → ChromaDB + BM25 → `handle_recall` / `run_bench` / `ThinkingPartner.think` → `GapStore` path in a fresh temporary HOME configured by explicit TOML, and emits a JSON receipt (git revision, dirty flag, code/API-origin/corpus digests, boundary labels, per-assertion expected vs observed). Its boundary substitutions are labeled in the receipt: a deterministic hash embedder (no embedding provider), a scripted LLM client, an in-process fake Telegram message, a scripted store used *only* for exact floor-boundary values (`floor − ε`, `floor`, `None`, missing key), and a direct BM25 insert that creates the lexical-only chunk. It is a plumbing and raw-distance-semantics check, not retrieval-quality or live-provider evidence; thinking retrieves with vector-only `store.search()`, so its `unknown` branch is covered only through the scripted store.
 
 ### Watch Pipeline
 
