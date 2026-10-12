@@ -91,6 +91,10 @@ async def handle_delete(ctx: HandlerContext, message: Message, query: str) -> No
 
 async def handle_delete_callback(ctx: HandlerContext, callback: CallbackQuery) -> None:
     """Process delete confirmation/cancellation."""
+    if not _is_authorized(ctx, callback):
+        await callback.answer("\u26d4 Unauthorized")
+        return
+
     data = callback.data or ""
 
     if data == "delete_cancel":

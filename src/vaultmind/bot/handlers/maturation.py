@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from vaultmind.bot.handlers.utils import _is_authorized, _split_message
+from vaultmind.errors import VaultMindError
 
 if TYPE_CHECKING:
     from aiogram.types import Message
@@ -90,13 +91,12 @@ async def _handle_synthesize(
         return
 
     await message.answer(f"Synthesizing from {len(match.note_paths)} notes...")
-    result = await asyncio.to_thread(pipeline.synthesize, match)
-
-    if result.startswith("Synthesis failed"):
-        msg = f"Synthesis failed for cluster '{match.top_entity}' — review manually."
-        await message.answer(msg)
-    else:
-        await message.answer(f"Created permanent note: `{result}`", parse_mode="Markdown")
+    try:
+        result = await asyncio.to_thread(pipeline.synthesize, match)
+    except VaultMindError as exc:
+        await message.answer(f"Synthesis failed for cluster '{match.top_entity}': {exc}")
+        return
+    await message.answer(f"Created permanent note: `{result}`", parse_mode="Markdown")
 
 
 async def _handle_dismiss(

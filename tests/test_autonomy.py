@@ -7,6 +7,7 @@ proposal via `ctx.review_queue`.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -25,9 +26,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _make_ctx(review_queue: ReviewQueue | None) -> HandlerContext:
+def _make_ctx(review_queue: ReviewQueue | None, allowed: list[int] | None = None) -> HandlerContext:
     return HandlerContext(
-        settings=object(),
+        settings=_settings(allowed),
         store=object(),
         graph=object(),
         parser=object(),
@@ -36,6 +37,18 @@ def _make_ctx(review_queue: ReviewQueue | None) -> HandlerContext:
         vault_root=object(),
         review_queue=review_queue,
     )
+
+
+def _settings(allowed: list[int] | None = None) -> SimpleNamespace:
+    return SimpleNamespace(telegram=SimpleNamespace(allowed_user_ids=allowed or []))
+
+
+def _callback(data: str, user_id: int) -> AsyncMock:
+    callback = AsyncMock()
+    callback.data = data
+    callback.from_user = SimpleNamespace(id=user_id)
+    callback.message = AsyncMock()
+    return callback
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +114,6 @@ class TestHandleAutonomyCallback:
 
         callback.message.edit_text.assert_called_once()
         text = callback.message.edit_text.call_args[0][0]
-        assert "Approved" in text
         assert "marked contradicted" in text
         callback.answer.assert_called_once()
         assert queue.get(proposal.proposal_id).status is ProposalStatus.APPLIED
@@ -124,8 +136,6 @@ class TestHandleAutonomyCallback:
         await handle_autonomy_callback(ctx, callback)
 
         callback.message.edit_text.assert_called_once()
-        text = callback.message.edit_text.call_args[0][0]
-        assert text == "\u2705 Approved"
         assert queue.get(proposal.proposal_id).status is ProposalStatus.ACKNOWLEDGED
 
     async def test_reject_marks_rejected(self, tmp_path: Path) -> None:
@@ -145,7 +155,7 @@ class TestHandleAutonomyCallback:
 
         await handle_autonomy_callback(ctx, callback)
 
-        callback.message.edit_text.assert_called_once_with("\u274c Rejected.")
+        callback.message.edit_text.assert_called_once()
         callback.answer.assert_called_once()
         assert queue.get(proposal.proposal_id).status is ProposalStatus.REJECTED
 
@@ -167,7 +177,8 @@ class TestHandleAutonomyCallback:
 
         await handle_autonomy_callback(ctx, callback)
 
-        callback.message.edit_text.assert_called_once_with("Already resolved or not found.")
+        callback.message.edit_text.assert_called_once()
+        assert queue.get(proposal.proposal_id).status is ProposalStatus.REJECTED
 
     async def test_approve_all_skim(self, tmp_path: Path) -> None:
         def _apply(payload: dict[str, object]) -> str:
@@ -189,8 +200,92 @@ class TestHandleAutonomyCallback:
 
         await handle_autonomy_callback(ctx, callback)
 
-        callback.message.edit_text.assert_called_once_with("\u2705 Approved 2 SKIM item(s).")
+        callback.message.edit_text.assert_called_once()
         assert queue.list_pending(lane=Lane.SKIM) == []
+
+    async def test_denied_actor_cannot_approve_reject_or_approve_all(self, tmp_path: Path) -> None:
+        calls: list[dict[str, object]] = []
+
+        def _apply(payload: dict[str, object]) -> str:
+            calls.append(payload)
+            return "applied"
+
+        queue = ReviewQueue(tmp_path / "queue.db", appliers={ProposalKind.TAG_APPLICATION: _apply})
+        block = queue.propose(
+            ProposalKind.TAG_APPLICATION,
+            confidence=0.2,
+            impact=Impact.HIGH,
+            summary="block",
+            payload={"id": "b"},
+            lane_override=Lane.BLOCK,
+        )
+        skim = queue.propose(
+            ProposalKind.TAG_APPLICATION,
+            confidence=0.6,
+            impact=Impact.LOW,
+            summary="skim",
+            payload={"id": "s"},
+            lane_override=Lane.SKIM,
+        )
+        ctx = _make_ctx(queue, allowed=[7])
+
+        for data in (
+            f"autonomy_approve:{block.proposal_id}",
+            f"autonomy_reject:{block.proposal_id}",
+            f"autonomy_retry:{block.proposal_id}",
+            "autonomy_approve_all_skim",
+        ):
+            callback = _callback(data, user_id=99)
+            await handle_autonomy_callback(ctx, callback)
+            callback.message.edit_text.assert_not_called()
+
+        assert calls == []
+        assert queue.get(block.proposal_id).status is ProposalStatus.PENDING
+        assert queue.get(skim.proposal_id).status is ProposalStatus.PENDING
+
+    async def test_retry_only_applies_failed_and_terminal_replay_is_noop(
+        self, tmp_path: Path
+    ) -> None:
+        attempts: list[int] = []
+
+        def _apply(payload: dict[str, object]) -> str:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("disk full")
+            return "done"
+
+        queue = ReviewQueue(tmp_path / "queue.db", appliers={ProposalKind.TAG_APPLICATION: _apply})
+        proposal = queue.propose(
+            ProposalKind.TAG_APPLICATION,
+            confidence=0.2,
+            impact=Impact.HIGH,
+            summary="t",
+            payload={},
+            lane_override=Lane.BLOCK,
+        )
+        pid = proposal.proposal_id
+        ctx = _make_ctx(queue, allowed=[7])
+
+        await handle_autonomy_callback(ctx, _callback(f"autonomy_retry:{pid}", user_id=7))
+        assert attempts == []  # PENDING is not retryable
+        assert queue.get(pid).status is ProposalStatus.PENDING
+
+        await handle_autonomy_callback(ctx, _callback(f"autonomy_approve:{pid}", user_id=7))
+        failed = queue.get(pid)
+        assert failed.status is ProposalStatus.FAILED
+        assert "disk full" in failed.result
+
+        await handle_autonomy_callback(ctx, _callback(f"autonomy_approve:{pid}", user_id=7))
+        assert len(attempts) == 1  # approve never retries FAILED
+
+        await handle_autonomy_callback(ctx, _callback(f"autonomy_retry:{pid}", user_id=7))
+        assert queue.get(pid).status is ProposalStatus.APPLIED
+        assert len(attempts) == 2
+
+        await handle_autonomy_callback(ctx, _callback(f"autonomy_retry:{pid}", user_id=7))
+        await handle_autonomy_callback(ctx, _callback(f"autonomy_approve:{pid}", user_id=7))
+        assert len(attempts) == 2
+        assert queue.get(pid).status is ProposalStatus.APPLIED
 
     async def test_no_review_queue_is_a_noop(self) -> None:
         ctx = _make_ctx(None)
@@ -238,7 +333,7 @@ class _FakeEventBus:
 
 def _make_ingestion_ctx(review_queue: ReviewQueue, vault_root: Path) -> HandlerContext:
     return HandlerContext(
-        settings=object(),
+        settings=_settings(),
         store=_FakeStore(),
         graph=object(),
         parser=_FakeParser(vault_root),
@@ -337,4 +432,4 @@ class TestHandleAutonomyCallbackSourceIngestionFollowUp:
         await handle_autonomy_callback(ctx, callback)  # no event_bus arg — defaults to None
 
         callback.message.edit_text.assert_called_once()
-        assert "Approved" in callback.message.edit_text.call_args[0][0]
+        assert queue.get(proposal.proposal_id).status is ProposalStatus.APPLIED

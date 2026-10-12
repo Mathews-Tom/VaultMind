@@ -27,19 +27,55 @@ def _make_ctx(tmp_path: Path, *, lineage_store: LineageStore | None = None) -> A
 
     ctx = MagicMock(spec=HandlerContext)
     ctx.vault_root = tmp_path
+    ctx.settings = MagicMock()
+    ctx.settings.telegram.allowed_user_ids = []
     ctx.store = MagicMock()
     ctx.store.delete_note = MagicMock(return_value=None)
     ctx.lineage_store = lineage_store
     return ctx
 
 
-def _fake_callback(data: str) -> MagicMock:
+def _fake_callback(data: str, user_id: int = 7) -> MagicMock:
     callback = MagicMock()
     callback.data = data
+    callback.from_user = MagicMock(id=user_id)
     callback.message = MagicMock()
     callback.message.edit_text = AsyncMock()
     callback.answer = AsyncMock()
     return callback
+
+
+class TestHandleDeleteCallbackAuthorization:
+    def test_unlisted_actor_confirm_leaves_note_index_and_lineage_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        path = _write_note(tmp_path)
+        original = path.read_text()
+        lineage_store = LineageStore(store_path=tmp_path / "lineage.json")
+        ctx = _make_ctx(tmp_path, lineage_store=lineage_store)
+        ctx.settings.telegram.allowed_user_ids = [7]
+        callback = _fake_callback("delete_confirm:note.md", user_id=99)
+
+        from vaultmind.bot.handlers.delete import handle_delete_callback
+
+        asyncio.run(handle_delete_callback(ctx, callback))
+
+        assert path.read_text() == original
+        ctx.store.delete_note.assert_not_called()
+        assert lineage_store.get_lineage("note.md") == []
+        callback.message.edit_text.assert_not_called()
+
+    def test_missing_actor_cannot_cancel_when_allowlist_set(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path)
+        ctx.settings.telegram.allowed_user_ids = [7]
+        callback = _fake_callback("delete_cancel")
+        callback.from_user = None
+
+        from vaultmind.bot.handlers.delete import handle_delete_callback
+
+        asyncio.run(handle_delete_callback(ctx, callback))
+
+        callback.message.edit_text.assert_not_called()
 
 
 class TestHandleDeleteCallbackSupersede:

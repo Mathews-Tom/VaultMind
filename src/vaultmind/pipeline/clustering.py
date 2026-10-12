@@ -60,7 +60,7 @@ def discover_clusters(
         include=["embeddings", "metadatas"],  # type: ignore[list-item]
     )
 
-    if not results["ids"] or not results["embeddings"]:
+    if not results["ids"] or results["embeddings"] is None or len(results["embeddings"]) == 0:
         logger.info("No embeddings found for types %s", types)
         return []
 
