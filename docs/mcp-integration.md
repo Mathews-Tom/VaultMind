@@ -88,7 +88,7 @@ Read the full content of a note.
 
 ### `vault_write`
 
-Create or overwrite a note. The note is automatically re-indexed in ChromaDB after writing.
+Create or overwrite a note. The saved note is immediately indexed into the configured vector and keyword indexes using its current-content projection. Full `vault_read` responses still include preserved history. If parsing, projection or indexing fails after the file write, the response contains `error`, `saved: true` and `path`, not `status: "ok"`; the saved Markdown is retained and the audit outcome is `ERROR`. Chroma/SQLite replacement is not a cross-database transaction.
 
 **Parameters:**
 
@@ -173,7 +173,7 @@ Quick-capture a note to the vault inbox.
 
 ### `capture_note`
 
-Rich note capture with full frontmatter control. Creates the note, writes full YAML frontmatter, and indexes immediately.
+Rich note capture with full frontmatter control. Creates the note, writes full YAML frontmatter, and indexes immediately. A failed post-write index returns `error`, `saved: true` and the saved `path`; it does not report successful capture or remove the file.
 
 **Parameters:**
 

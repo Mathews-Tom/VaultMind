@@ -17,6 +17,7 @@ src/vaultmind/
 ├── vault/           # Vault I/O layer
 │   ├── parser.py        # Markdown + YAML frontmatter parsing, heading-aware chunking
 │   ├── models.py        # Note, NoteChunk, NoteType data classes
+│   ├── projection.py    # Shared current-content and bot history boundary grammar
 │   ├── watcher.py       # Watchdog-based file system watcher
 │   ├── watch_handler.py # Two-stage hash stability, debounce, event dispatch
 │   ├── events.py        # Async event bus (NoteIndexedEvent, NoteDeletedEvent, etc.)
@@ -159,9 +160,19 @@ Markdown files → Parser (contextual chunks) → Embedder → ChromaDB
               Frontmatter metadata         Embedding Cache   BM25 Index (FTS5)
 ```
 
-1. `VaultParser` reads markdown files, splits by headings into `NoteChunk` objects, and prepends a contextual prefix (`note: {title} (type: {type}) | section: {heading} | tags: {t1, t2}`) for embedding quality
-2. `Embedder` generates vectors, checking `EmbeddingCache` first (keyed by content hash + provider + model)
-3. `VaultStore` upserts chunks into ChromaDB with metadata (note type, mode, tags, source path) and syncs the BM25 FTS5 index in parallel
+1. `VaultParser` retains the complete Markdown body in `Note.content`. `Note.current_content()` projects only the current revision before heading-aware chunking, contextual prefixes, inline tags and importance scoring.
+2. `Embedder` generates vectors, checking `EmbeddingCache` first (keyed by content hash + provider + model). All supplied notes are parsed/projected/chunked and all embeddings are prepared before replacement starts.
+3. `VaultStore` reconciles its configured ChromaDB collection and optional BM25 FTS5 index sequentially. Incremental replacement removes obsolete chunks for that path; a zero-chunk soft-delete retires both indexes. Full indexing treats the supplied notes as the canonical snapshot: absent paths, shorter revisions and an empty snapshot remove obsolete derived rows. Other Chroma collections, Markdown files and lineage are not cleared.
+
+### Preserved History and Current Evidence
+
+Bot `/delete` and `/edit` preserve the complete previous body under dated supersede callouts. Full-note reads remain historical reads; vector, keyword and hybrid retrieval all use the same current-content projection. A bot-deleted note produces no chunks, and two edits index only the latest claim while retaining both older revisions on disk. Ordinary authored `[!superseded]` callouts are not retirement instructions.
+
+New bot mutations pair `supersede_boundaries: ["<32hex-id>=<superseded_at-value>", ...]` with `<!-- vaultmind:supersede id=<32hex-id> -->` directly above the generated callout. Paired markers must be unique and in newest-first body order; the random ID prevents accidental collisions with authored lookalikes, not deliberate forgery. Unpaired marker-looking text remains authored content. Legacy deletion requires `superseded_at: bot:delete` plus the exact dated `Deleted via bot` callout/rationale; legacy edit UTC ISO stamps pair one-to-one with dated `Edited via bot` / `Instruction:` callouts. Ambiguous or malformed boundaries raise an indexing error without rewriting the source or silently indexing preserved history. A full parse failure aborts snapshot reconciliation rather than interpreting an omitted note as a deletion.
+
+Embedding preparation failure leaves the last-good vector and keyword evidence unchanged, for both incremental and full indexing. Chroma and SQLite are separate stores: a failure after replacement starts can leave partially updated derived state. Such errors are reported explicitly, not as successful indexing or cross-database atomicity. Bot/MCP writes retain their saved Markdown and report the indexing failure; a failed edit/delete still retains its mutation lineage. Recovery is an explicit subsequent index operation, not a new retry service.
+
+The watcher advances its last-indexed hash and publishes successful note events only after indexing succeeds. Another filesystem event for unchanged failed content retries it instead of being suppressed as already indexed. `scripts/verify_acceptance.py --case lineage --offline` exercises the real parser, Chroma, SQLite BM25, hybrid search, bot edit/delete flows, lineage and filesystem-event handler with isolated TOML fixtures, deterministic embeddings, scripted LLM responses and fake Telegram delivery. Receipts are fixture plumbing/failure evidence; native provider, hosted embedding quality and production vault operations remain **NOT QUALIFIED**.
 
 ### Hybrid Search
 

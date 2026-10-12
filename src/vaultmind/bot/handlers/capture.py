@@ -70,8 +70,17 @@ async def handle_capture(ctx: HandlerContext, message: Message, text: str) -> No
                     metadata=result.metadata,
                 )
             note_path = create_vault_note(result, ctx.vault_root, ctx.settings.ingest.inbox_folder)
-            note = await asyncio.to_thread(ctx.parser.parse_file, note_path)
-            await asyncio.to_thread(ctx.store.index_single_note, note, ctx.parser)
+            try:
+                note = await asyncio.to_thread(ctx.parser.parse_file, note_path)
+                await asyncio.to_thread(ctx.store.index_single_note, note, ctx.parser)
+            except Exception as exc:
+                logger.exception("Failed to index ingested source: %s", note_path)
+                rel = note_path.relative_to(ctx.vault_root)
+                await message.answer(
+                    f"Source saved to `{rel}`, but indexing failed: {exc}",
+                    parse_mode="Markdown",
+                )
+                return
             rel = note_path.relative_to(ctx.vault_root)
             await message.answer(
                 f"\U0001f517 Ingested {result.source_type} source:\n"
@@ -114,8 +123,13 @@ async def handle_capture(ctx: HandlerContext, message: Message, text: str) -> No
     try:
         note = await asyncio.to_thread(ctx.parser.parse_file, filepath)
         await asyncio.to_thread(ctx.store.index_single_note, note, ctx.parser)
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to index captured note")
+        await message.answer(
+            f"Note saved to `{filepath.relative_to(ctx.vault_root)}`, but indexing failed: {exc}",
+            parse_mode="Markdown",
+        )
+        return
 
     inbox = ctx.settings.vault.inbox_folder
     await message.answer(
@@ -235,8 +249,14 @@ async def handle_photo_capture(ctx: HandlerContext, message: Message) -> None:
         try:
             note = await asyncio.to_thread(ctx.parser.parse_file, note_path)
             await asyncio.to_thread(ctx.store.index_single_note, note, ctx.parser)
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to index photo note")
+            await message.answer(
+                f"Photo note saved to `{note_path.relative_to(ctx.vault_root)}`, "
+                f"but indexing failed: {exc}",
+                parse_mode="Markdown",
+            )
+            return
 
         inbox = ctx.settings.vault.inbox_folder
         await message.answer(

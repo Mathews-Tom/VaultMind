@@ -211,11 +211,8 @@ authority: 3
     # 6. Index all notes
     all_paths = [*source_paths, summary_path]
     for path in all_paths:
-        try:
-            note = await asyncio.to_thread(parser.parse_file, path)
-            await asyncio.to_thread(store.index_single_note, note, parser)
-        except Exception:
-            logger.warning("Failed to index: %s", path)
+        note = await asyncio.to_thread(parser.parse_file, path)
+        await asyncio.to_thread(store.index_single_note, note, parser)
 
     logger.info(
         "Research pipeline complete: %d sources, summary at %s",

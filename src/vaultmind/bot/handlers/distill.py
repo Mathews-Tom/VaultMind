@@ -80,8 +80,16 @@ async def handle_distill(
         await message.answer(f"Distillation failed: {result.error}")
         return
 
-    note = await asyncio.to_thread(ctx.parser.parse_file, ctx.vault_root / result.output_path)
-    await asyncio.to_thread(ctx.store.index_single_note, note, ctx.parser)
+    try:
+        note = await asyncio.to_thread(ctx.parser.parse_file, ctx.vault_root / result.output_path)
+        await asyncio.to_thread(ctx.store.index_single_note, note, ctx.parser)
+    except Exception as exc:
+        logger.exception("Failed to index distilled note %s", result.output_path)
+        await message.answer(
+            f"qa-artifact saved to `{result.output_path}`, but indexing failed: {exc}",
+            parse_mode="Markdown",
+        )
+        return
 
     extracted = 0
     if ctx.episode_store is not None:

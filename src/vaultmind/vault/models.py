@@ -10,6 +10,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field
 
+from vaultmind.vault.projection import project
+
 
 class NoteType(StrEnum):
     """Note types following Zettelkasten conventions."""
@@ -77,6 +79,16 @@ class Note(BaseModel):
             if len(parts) >= 3:
                 return parts[2].strip()
         return self.content
+
+    def current_content(self) -> str:
+        """Return the body that counts as current evidence for retrieval.
+
+        Preserved history under bot supersede boundaries (and bot-deleted
+        notes entirely) is excluded; `content` and `body_without_frontmatter()`
+        still return the complete body. Raises `AmbiguousHistoryError`
+        (a `ValueError`) when bot supersede metadata and body do not reconcile.
+        """
+        return project(self.frontmatter, self.body_without_frontmatter()).current
 
 
 class NoteChunk(BaseModel):

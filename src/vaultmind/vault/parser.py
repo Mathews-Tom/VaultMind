@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import frontmatter
 
 from vaultmind.vault.models import Note, NoteChunk, NoteMode, NoteType
+from vaultmind.vault.projection import AmbiguousHistoryError, project
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,6 +25,21 @@ WIKILINK_PATTERN = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 TAG_PATTERN = re.compile(r"(?:^|\s)#([a-zA-Z][a-zA-Z0-9_/-]*)", re.MULTILINE)
 
 
+class VaultParseError(Exception):
+    """One or more vault files could not be parsed.
+
+    Raised by `VaultParser.iter_notes()` so a caller that reconciles derived
+    state against the returned snapshot never treats an unreadable note as
+    an absent one.
+    """
+
+    def __init__(self, failures: list[tuple[Path, Exception]]) -> None:
+        self.failures = failures
+        shown = "; ".join(f"{path}: {type(exc).__name__}: {exc}" for path, exc in failures[:5])
+        more = f" (+{len(failures) - 5} more)" if len(failures) > 5 else ""
+        super().__init__(f"Failed to parse {len(failures)} note(s): {shown}{more}")
+
+
 class VaultParser:
     """Parses an Obsidian vault into structured Note objects."""
 
@@ -32,18 +48,33 @@ class VaultParser:
         self.vault_root = config.path
 
     def iter_notes(self) -> list[Note]:
-        """Iterate all markdown files in the vault, yielding parsed Notes."""
+        """Parse every markdown file in the vault into Notes.
+
+        A file that cannot be parsed is a failure, not an absent note: every
+        file is attempted, then all failures are raised together as
+        `VaultParseError`, so the returned list is always the complete
+        snapshot and a caller reconciling derived state against it can never
+        mistake an unreadable note for a deleted one.
+        """
         notes: list[Note] = []
+        failures: list[tuple[Path, Exception]] = []
         for md_file in self.vault_root.rglob("*.md"):
             # Skip excluded folders
             rel = md_file.relative_to(self.vault_root)
             if any(part in self.config.excluded_folders for part in rel.parts):
                 continue
+            if not md_file.is_file():
+                continue  # directory named *.md, or a dangling symlink: not a note
             try:
-                note = self.parse_file(md_file)
-                notes.append(note)
-            except Exception:
+                notes.append(self.parse_file(md_file))
+            except Exception as exc:
+                if isinstance(exc, FileNotFoundError) and not md_file.exists():
+                    logger.info("Skipping %s: removed while the vault was being parsed", md_file)
+                    continue
                 logger.exception("Failed to parse %s", md_file)
+                failures.append((rel, exc))
+        if failures:
+            raise VaultParseError(failures)
         logger.info("Parsed %d notes from vault", len(notes))
         return notes
 
@@ -74,8 +105,15 @@ class VaultParser:
         if not 1 <= authority <= 5:
             authority = 0
 
-        # Extract inline tags from content (merge with frontmatter tags)
-        inline_tags = TAG_PATTERN.findall(post.content)
+        # Extract inline tags from current content only (merge with frontmatter tags): a
+        # tag that only occurs in preserved, retired history is not current evidence. When
+        # the supersede history is ambiguous no inline tag is provably current, so none is
+        # taken; chunking such a note raises instead of indexing it.
+        try:
+            current_body = project(meta, post.content).current
+        except AmbiguousHistoryError:
+            current_body = ""
+        inline_tags = TAG_PATTERN.findall(current_body)
         fm_tags = meta.get("tags", [])
         if isinstance(fm_tags, str):
             fm_tags = [fm_tags]
@@ -107,14 +145,14 @@ class VaultParser:
         3. Each chunk preserves the heading context
         4. A contextual prefix is prepended for embedding quality
         """
-        body = note.body_without_frontmatter()
+        body = note.current_content()
         if not body.strip():
             return []
 
         from vaultmind.indexer.importance import compute_importance
 
         note_importance = compute_importance(
-            content=note.content,
+            content=body,
             tags=note.tags,
             entities=note.entities,
         )

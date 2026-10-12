@@ -84,6 +84,45 @@ class BM25Index:
             )
         logger.debug("BM25 upserted %d chunks", len(rows))
 
+    def replace_note(
+        self,
+        note_path: str,
+        rows: list[tuple[str, str, str, str]],
+    ) -> None:
+        """Atomically make *rows* the complete keyword index for one note.
+
+        Every existing row for *note_path* is removed and *rows* inserted in a
+        single SQLite transaction, so a failure leaves the previous rows intact.
+        Empty *rows* retires the note. Every row must belong to *note_path* and
+        carry a distinct chunk id; violations raise ``ValueError`` before any
+        change is made.
+        """
+        _validate_rows(rows, note_path=note_path)
+        with self._con:
+            self._con.execute("DELETE FROM fts_chunks WHERE note_path = ?", (note_path,))
+            self._insert_rows(rows)
+        logger.debug("BM25 replaced %s with %d chunks", note_path, len(rows))
+
+    def replace_all(self, rows: list[tuple[str, str, str, str]]) -> None:
+        """Atomically make *rows* the complete content of the keyword index.
+
+        Used for full-snapshot reconciliation: rows for notes absent from the
+        snapshot are removed. Empty *rows* clears the index. Only the FTS table
+        of this index is touched. Duplicate chunk ids raise ``ValueError``
+        before any change is made.
+        """
+        _validate_rows(rows, note_path=None)
+        with self._con:
+            self._con.execute("DELETE FROM fts_chunks")
+            self._insert_rows(rows)
+        logger.debug("BM25 replaced entire index with %d chunks", len(rows))
+
+    def _insert_rows(self, rows: list[tuple[str, str, str, str]]) -> None:
+        self._con.executemany(
+            "INSERT INTO fts_chunks(chunk_id, note_path, note_title, content) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+
     def delete_note(self, note_path: str) -> None:
         """Remove all chunks belonging to a note."""
         with self._con:
@@ -169,3 +208,16 @@ def _fts5_escape(query: str) -> str:
         if safe:
             escaped.append(f'"{safe}"')
     return " ".join(escaped) if escaped else '""'
+
+
+def _validate_rows(rows: list[tuple[str, str, str, str]], note_path: str | None) -> None:
+    """Reject rows that would corrupt the index before any transaction starts."""
+    seen: set[str] = set()
+    for chunk_id, row_note_path, _title, _content in rows:
+        if chunk_id in seen:
+            raise ValueError(f"Duplicate chunk id in keyword rows: {chunk_id!r}")
+        seen.add(chunk_id)
+        if note_path is not None and row_note_path != note_path:
+            raise ValueError(
+                f"Keyword row {chunk_id!r} belongs to {row_note_path!r}, not {note_path!r}"
+            )

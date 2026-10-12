@@ -6,11 +6,19 @@ the model's mercy); on confirmation, the new body is written above a dated
 `> [!superseded]` callout, with the full prior body preserved, unchanged,
 beneath it. One `LineageEdge` is recorded per confirmed edit, queryable via
 `ctx.lineage_store.get_lineage(note_path)`.
+
+M14: the model is shown the note's *current* text only (preserved history
+never feeds the next revision), the callout carries an explicit paired
+boundary (`vaultmind.vault.projection`) so only the newest text is indexed,
+and a note with ambiguous bot history or a bot delete is refused rather than
+edited. After the file is written the lineage edge is recorded, then the note
+is re-indexed; an indexing failure is reported, never claimed as success.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import frontmatter
@@ -21,6 +29,14 @@ from vaultmind.contradiction.marking import write_superseded_block
 from vaultmind.graph.evolution import LineageStore
 from vaultmind.llm.client import LLMError
 from vaultmind.llm.client import Message as LLMMessage
+from vaultmind.vault.projection import (
+    EDIT_RATIONALE_PREFIX,
+    EDIT_TITLE,
+    SUPERSEDED_CALLOUT,
+    SUPERSEDED_KEY,
+    RetiredNoteError,
+    project,
+)
 from vaultmind.vault.security import (
     PathResolutionError,
     PathTraversalError,
@@ -84,7 +100,21 @@ async def handle_edit(
         return
 
     rel_path = filepath.relative_to(ctx.vault_root)
-    original_body = frontmatter.load(str(filepath)).content
+    try:
+        post = frontmatter.load(str(filepath))
+        projection = project(post.metadata, post.content)
+    except Exception as exc:
+        logger.exception("Cannot determine the current text of %s", rel_path)
+        await message.answer(
+            f"Edit not applied: cannot determine the current text of {rel_path}: {exc}"
+        )
+        return
+    if projection.deleted:
+        await message.answer(
+            f"Edit not applied: {rel_path} was deleted via bot; its content is retired."
+        )
+        return
+    original_body = projection.current
 
     await message.answer("\u270f\ufe0f Generating edit...")
 
@@ -204,31 +234,67 @@ async def handle_edit_callback(
 
         # Apply the new body above a dated superseded callout; the prior
         # body stays fully intact beneath it — never overwritten.
-        from datetime import UTC, datetime
-
         ts = datetime.now(UTC)
-        rationale = f"Instruction: {pending['instruction']}"
-        write_superseded_block(
-            filepath,
-            callout_type="superseded",
-            title="Edited via bot",
-            rationale=rationale,
-            frontmatter_key="superseded_at",
-            frontmatter_value=ts.isoformat(),
-            dated=True,
-            timestamp=ts,
-            new_content=pending["edited"],
-        )
+        rationale = f"{EDIT_RATIONALE_PREFIX}{pending['instruction']}"
+        try:
+            written = write_superseded_block(
+                filepath,
+                callout_type=SUPERSEDED_CALLOUT,
+                title=EDIT_TITLE,
+                rationale=rationale,
+                frontmatter_key=SUPERSEDED_KEY,
+                frontmatter_value=ts.isoformat(),
+                dated=True,
+                timestamp=ts,
+                new_content=pending["edited"],
+                boundary="edit",
+            )
+        except RetiredNoteError:
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"Edit not applied: {pending['path']} was deleted via bot; its content is retired."
+            )
+            await callback.answer()
+            return
+        except Exception as exc:
+            logger.exception("Failed to apply edit to %s", pending["path"])
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"Edit not applied to {pending['path']}: {exc}\nThe note was not changed."
+            )
+            await callback.answer()
+            return
+        if not written:
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"Edit not applied to {pending['path']}: this edit was already recorded."
+            )
+            await callback.answer()
+            return
 
-        # Re-index
+        # The file now carries the edit. Record the lineage edge for that mutation, then
+        # re-index; neither failure undoes the saved edit, and neither is hidden.
+        problems: list[str] = []
+        stale_search = False
+        try:
+            if isinstance(ctx.lineage_store, LineageStore):
+                ctx.lineage_store.record(pending["path"], "edited", rationale)
+        except Exception as exc:
+            logger.exception("Failed to record edit lineage for %s", pending["path"])
+            problems.append(f"the lineage edge was not recorded ({exc})")
         try:
             note = ctx.parser.parse_file(filepath)
             ctx.store.index_single_note(note, ctx.parser)
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to re-index edited note")
+            problems.append(f"indexing failed ({exc})")
+            stale_search = True
 
-        if isinstance(ctx.lineage_store, LineageStore):
-            ctx.lineage_store.record(pending["path"], "edited", rationale)
+        if problems:
+            tail = " Search may still show the previous text." if stale_search else ""
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"\u26a0\ufe0f Edit saved to {pending['path']} (prior text preserved), "
+                f"but {'; '.join(problems)}.{tail}"
+            )
+            await callback.answer()
+            return
 
         logger.info("Edited note (superseded prior body): %s", pending["path"])
         await callback.message.edit_text(  # type: ignore[union-attr]

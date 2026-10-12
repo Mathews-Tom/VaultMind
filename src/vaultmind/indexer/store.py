@@ -1,15 +1,30 @@
-"""Vector store — ChromaDB-backed storage for note chunks with incremental indexing."""
+"""Vector store — ChromaDB-backed storage for note chunks with incremental indexing.
+
+Index mutations follow one discipline: everything that can fail without
+touching an index (chunking through the shared current-content projection,
+embedding, batch validation) is finished *before* the first write. Writes then
+go vector index first, keyword index second. The two indexes are separate
+databases, so there is no cross-index atomicity: a failure raises
+:class:`IndexUpdateError` naming the failing stage and the stages already
+applied, and every operation is idempotent so repeating it converges.
+"""
 
 from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
+from vaultmind.errors import VaultMindError
+
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+
     from vaultmind.config import ChromaConfig
     from vaultmind.indexer.bm25 import BM25Index
     from vaultmind.indexer.embedder import Embedder
@@ -18,12 +33,123 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Chroma deletes by id with an ``IN (...)`` predicate; keep each call well below
+# SQLite's bound-parameter limit so clearing a large collection cannot fail on size.
+_DELETE_BATCH = 500
+
+
+class IndexStage(StrEnum):
+    """Stage of an index mutation, as reported by :class:`IndexUpdateError`."""
+
+    EMBED = "embed"
+    VECTOR_LOOKUP = "vector_lookup"
+    VECTOR_UPSERT = "vector_upsert"
+    VECTOR_DELETE = "vector_delete"
+    KEYWORD_REPLACE = "keyword_replace"
+    KEYWORD_DELETE = "keyword_delete"
+
+    @property
+    def writes(self) -> bool:
+        """Whether the stage changes an index (EMBED and VECTOR_LOOKUP only read)."""
+        return self not in (IndexStage.EMBED, IndexStage.VECTOR_LOOKUP)
+
+
+class IndexUpdateError(VaultMindError):
+    """An index mutation failed; the vector and keyword indexes may now disagree.
+
+    ``stage`` is the failing stage, ``completed_stages`` the write stages that
+    had fully applied before it (empty when nothing was changed). The original
+    exception is chained as ``__cause__``. Content errors raised before any
+    stage runs (``ValueError`` from chunking an ambiguous note, duplicate chunk
+    ids) are not wrapped: they leave both indexes untouched.
+    """
+
+    def __init__(
+        self,
+        operation: str,
+        scope: str,
+        stage: IndexStage,
+        completed_stages: tuple[IndexStage, ...],
+        cause: BaseException,
+    ) -> None:
+        self.operation = operation
+        self.scope = scope
+        self.stage = stage
+        self.completed_stages = completed_stages
+        if completed_stages:
+            progress = (
+                "stages applied before the failure: "
+                + ", ".join(s.value for s in completed_stages)
+                + "; vector and keyword indexes may disagree until the operation is repeated"
+            )
+        elif stage.writes:
+            progress = "the failing stage may be partially applied; repeat the operation"
+        else:
+            progress = "no index changes were applied"
+        super().__init__(
+            f"{operation} failed for {scope} at stage '{stage.value}' "
+            f"({type(cause).__name__}: {cause}); {progress}"
+        )
+
+
+class _Mutation:
+    """Runs the stages of one index mutation and records which writes applied."""
+
+    def __init__(self, operation: str, scope: str) -> None:
+        self._operation = operation
+        self._scope = scope
+        self._completed: list[IndexStage] = []
+
+    def run[**P, T](
+        self,
+        stage: IndexStage,
+        fn: Callable[P, T],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> T:
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as exc:
+            raise IndexUpdateError(
+                self._operation, self._scope, stage, tuple(self._completed), exc
+            ) from exc
+        if stage.writes:
+            self._completed.append(stage)
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedChunks:
+    """Chunks with embeddings and every write payload, built before any write."""
+
+    ids: list[str]
+    documents: list[str]
+    embeddings: list[list[float]]
+    metadatas: list[Mapping[str, str | int | float | bool]]
+    keyword_rows: list[tuple[str, str, str, str]]
+
+
+def _validate_embeddings(embeddings: Sequence[Sequence[float]], expected: int) -> None:
+    """Reject an embedder batch the vector index could not accept, before any write."""
+    if len(embeddings) != expected:
+        raise ValueError(f"Embedder returned {len(embeddings)} vectors for {expected} chunks")
+    dimensions: set[int] = set()
+    for position, vector in enumerate(embeddings):
+        if len(vector) == 0:
+            raise ValueError(f"Embedder returned an empty vector for chunk {position}")
+        dimensions.add(len(vector))
+        if not all(math.isfinite(value) for value in vector):
+            raise ValueError(f"Embedder returned a non-finite value for chunk {position}")
+    if len(dimensions) > 1:
+        raise ValueError(f"Embedder returned differing vector dimensions: {sorted(dimensions)}")
+
 
 class VaultStore:
     """Manages the vector index over vault notes.
 
     Supports full and incremental indexing, semantic search with metadata
-    filtering, and chunk-level retrieval.
+    filtering, and chunk-level retrieval. Indexed text is whatever
+    ``parser.chunk_note`` yields, i.e. the shared current-content projection.
     """
 
     def __init__(
@@ -53,92 +179,163 @@ class VaultStore:
         )
 
     def index_notes(self, notes: list[Note], parser: VaultParser) -> int:
-        """Full index: chunk and embed all notes. Returns number of chunks indexed."""
-        all_chunks: list[NoteChunk] = []
+        """Full index: reconcile the configured indexes to exactly *notes*.
+
+        *notes* is the canonical snapshot. Chunks for every note are embedded
+        first; only then are the configured Chroma collection and BM25 index
+        made to contain precisely those chunks, removing rows for notes and
+        chunks absent from the snapshot. An empty snapshot (or one with no
+        indexable content) clears both indexes. Other Chroma collections and
+        the notes themselves are never touched. Returns the chunk count.
+
+        Raises ``ValueError`` before any write for unchunkable notes or
+        duplicate chunk ids, and :class:`IndexUpdateError` for embedding or
+        index failures.
+        """
+        mutation = _Mutation("index_notes", f"snapshot of {len(notes)} notes")
+        chunks: list[NoteChunk] = []
         for note in notes:
-            chunks = parser.chunk_note(note)
-            all_chunks.extend(chunks)
+            try:
+                chunks.extend(parser.chunk_note(note))
+            except ValueError as exc:
+                raise ValueError(f"Cannot index {note.path}: {exc}") from exc
+        prepared = self._prepare(chunks, mutation)
+        keep = set(prepared.ids)
 
-        if not all_chunks:
-            logger.warning("No chunks to index")
-            return 0
-
-        # Embed all chunks
-        texts = [c.content for c in all_chunks]
-        embeddings = self.embedder.embed_texts(texts)
-
-        # Upsert into ChromaDB
-        self._collection.upsert(
-            ids=[c.chunk_id for c in all_chunks],
-            documents=texts,
-            embeddings=embeddings,  # type: ignore[arg-type]
-            metadatas=[c.to_chroma_metadata() for c in all_chunks],
-        )
-
-        # Sync BM25 index
-        if self._bm25 is not None:
-            bm25_rows = [
-                (
-                    c.chunk_id,
-                    str(c.note_path),
-                    c.note_title,
-                    c.content,
+        try:
+            existing = mutation.run(IndexStage.VECTOR_LOOKUP, self._vector_ids, None)
+            if prepared.ids:
+                mutation.run(IndexStage.VECTOR_UPSERT, self._vector_upsert, prepared)
+            stale = [chunk_id for chunk_id in existing if chunk_id not in keep]
+            if stale:
+                mutation.run(IndexStage.VECTOR_DELETE, self._vector_delete, stale)
+            if self._bm25 is not None:
+                mutation.run(
+                    IndexStage.KEYWORD_REPLACE, self._bm25.replace_all, prepared.keyword_rows
                 )
-                for c in all_chunks
-            ]
-            self._bm25.upsert_batch(bm25_rows)
+        finally:
+            self._clear_search_cache()
 
-        logger.info("Indexed %d chunks from %d notes", len(all_chunks), len(notes))
-        return len(all_chunks)
+        if not prepared.ids:
+            logger.warning("Full index snapshot has no indexable chunks; indexes cleared")
+        logger.info(
+            "Indexed %d chunks from %d notes (%d stale vector chunks removed)",
+            len(prepared.ids),
+            len(notes),
+            len(stale),
+        )
+        return len(prepared.ids)
 
     def index_single_note(self, note: Note, parser: VaultParser) -> int:
-        """Incremental index: re-index a single note (delete old chunks, add new)."""
-        # Delete existing chunks for this note
-        self.delete_note(str(note.path))
+        """Incremental index: make the indexes hold exactly the note's current chunks.
 
-        # Chunk and embed
+        Embeds before writing, upserts the new chunks, removes chunk ids the
+        note no longer produces (vector and keyword), and retires the note from
+        both indexes when its current content yields no chunks. Returns the
+        chunk count. Errors follow :meth:`index_notes`.
+        """
+        note_path = str(note.path)
+        mutation = _Mutation("index_single_note", note_path)
         chunks = parser.chunk_note(note)
         if not chunks:
+            self._retire(note_path, mutation)
+            logger.info("No current content for %s; retired from both indexes", note_path)
             return 0
 
-        texts = [c.content for c in chunks]
-        embeddings = self.embedder.embed_texts(texts)
+        foreign = {chunk.note_path for chunk in chunks} - {note_path}
+        if foreign:
+            raise ValueError(f"Chunks for {note_path} carry other note paths: {sorted(foreign)}")
+        prepared = self._prepare(chunks, mutation)
+        keep = set(prepared.ids)
 
-        self._collection.upsert(
-            ids=[c.chunk_id for c in chunks],
-            documents=texts,
-            embeddings=embeddings,  # type: ignore[arg-type]
-            metadatas=[c.to_chroma_metadata() for c in chunks],
-        )
-
-        # Sync BM25 index (delete + re-insert handled by upsert_batch)
-        if self._bm25 is not None:
-            bm25_rows = [
-                (
-                    c.chunk_id,
-                    str(c.note_path),
-                    c.note_title,
-                    c.content,
+        try:
+            existing = mutation.run(IndexStage.VECTOR_LOOKUP, self._vector_ids, note_path)
+            mutation.run(IndexStage.VECTOR_UPSERT, self._vector_upsert, prepared)
+            stale = [chunk_id for chunk_id in existing if chunk_id not in keep]
+            if stale:
+                mutation.run(IndexStage.VECTOR_DELETE, self._vector_delete, stale)
+            if self._bm25 is not None:
+                mutation.run(
+                    IndexStage.KEYWORD_REPLACE,
+                    self._bm25.replace_note,
+                    note_path,
+                    prepared.keyword_rows,
                 )
-                for c in chunks
-            ]
-            self._bm25.upsert_batch(bm25_rows)
+        finally:
+            self._clear_search_cache()
 
         logger.info("Re-indexed %d chunks for %s", len(chunks), note.path)
         return len(chunks)
 
     def delete_note(self, note_path: str) -> None:
-        """Remove all chunks for a given note path."""
-        # ChromaDB where filter on metadata
-        existing = self._collection.get(
-            where={"note_path": note_path},
-        )
-        if existing["ids"]:
-            self._collection.delete(ids=existing["ids"])
-            logger.debug("Deleted %d chunks for %s", len(existing["ids"]), note_path)
+        """Remove all chunks for a given note path from the vector and keyword index."""
+        self._retire(note_path, _Mutation("delete_note", note_path))
 
-        if self._bm25 is not None:
-            self._bm25.delete_note(note_path)
+    # ------------------------------------------------------------------
+    # Mutation helpers
+    # ------------------------------------------------------------------
+
+    def _prepare(self, chunks: list[NoteChunk], mutation: _Mutation) -> _PreparedChunks:
+        """Build every write payload; nothing here changes an index."""
+        if not chunks:
+            return _PreparedChunks([], [], [], [], [])
+
+        ids = [chunk.chunk_id for chunk in chunks]
+        if len(set(ids)) != len(ids):
+            duplicates = sorted({chunk_id for chunk_id in ids if ids.count(chunk_id) > 1})
+            raise ValueError(f"Duplicate chunk ids cannot be indexed: {duplicates}")
+
+        documents = [chunk.content for chunk in chunks]
+        metadatas: list[Mapping[str, str | int | float | bool]] = [
+            chunk.to_chroma_metadata() for chunk in chunks
+        ]
+        keyword_rows = [
+            (chunk.chunk_id, str(chunk.note_path), chunk.note_title, chunk.content)
+            for chunk in chunks
+        ]
+        embeddings = mutation.run(IndexStage.EMBED, self._embed, documents)
+        return _PreparedChunks(ids, documents, embeddings, metadatas, keyword_rows)
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        embeddings = self.embedder.embed_texts(texts)
+        _validate_embeddings(embeddings, expected=len(texts))
+        return embeddings
+
+    def _retire(self, note_path: str, mutation: _Mutation) -> None:
+        try:
+            ids = mutation.run(IndexStage.VECTOR_LOOKUP, self._vector_ids, note_path)
+            if ids:
+                mutation.run(IndexStage.VECTOR_DELETE, self._vector_delete, ids)
+                logger.debug("Deleted %d chunks for %s", len(ids), note_path)
+            if self._bm25 is not None:
+                mutation.run(IndexStage.KEYWORD_DELETE, self._bm25.delete_note, note_path)
+        finally:
+            self._clear_search_cache()
+
+    def _vector_ids(self, note_path: str | None) -> list[str]:
+        """Chunk ids in the configured collection, for one note or all notes."""
+        if note_path is None:
+            found = self._collection.get(include=[])
+        else:
+            found = self._collection.get(where={"note_path": note_path}, include=[])
+        return list(found["ids"])
+
+    def _vector_upsert(self, prepared: _PreparedChunks) -> None:
+        self._collection.upsert(
+            ids=prepared.ids,
+            documents=prepared.documents,
+            embeddings=prepared.embeddings,  # type: ignore[arg-type]
+            metadatas=prepared.metadatas,
+        )
+
+    def _vector_delete(self, ids: list[str]) -> None:
+        for start in range(0, len(ids), _DELETE_BATCH):
+            self._collection.delete(ids=ids[start : start + _DELETE_BATCH])
+
+    def _clear_search_cache(self) -> None:
+        """Drop cached results so a mutation can never be masked by retired hits."""
+        if self._search_cache is not None:
+            self._search_cache.clear()
 
     def search(
         self,

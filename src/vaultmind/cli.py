@@ -567,11 +567,14 @@ def index(ctx: click.Context) -> None:
     embedder = Embedder(settings.embedding, api_key, cache=cache)
     store = VaultStore(settings.chroma, embedder, bm25=bm25)
 
-    with console.status("Parsing vault..."):
-        notes = parser.iter_notes()
+    try:
+        with console.status("Parsing vault..."):
+            notes = parser.iter_notes()
 
-    with console.status(f"Indexing {len(notes)} notes..."):
-        count = store.index_notes(notes, parser)
+        with console.status(f"Indexing {len(notes)} notes..."):
+            count = store.index_notes(notes, parser)
+    except Exception as exc:
+        raise click.ClickException(f"Indexing failed: {exc}") from exc
 
     console.print(f"[green]✓[/green] Indexed {count} chunks from {len(notes)} notes")
 
