@@ -31,7 +31,9 @@ if TYPE_CHECKING:
     from vaultmind.indexer.bm25 import BM25Index
     from vaultmind.indexer.embedding_cache import EmbeddingCache
     from vaultmind.llm.client import LLMClient
-    from vaultmind.services.review_queue import Applier, ProposalKind, ReviewQueue
+    from vaultmind.pipeline.maturation import MaturationPipeline
+    from vaultmind.services.review_delivery import BlockNotifier
+    from vaultmind.services.review_queue import Applier, ProposalKind, ReviewProposal, ReviewQueue
 
 console = Console()
 
@@ -139,6 +141,7 @@ def _build_review_queue(
 def _duplicate_review_subscriber(
     detector: object,
     queue: ReviewQueue,
+    on_block: BlockNotifier | None = None,
 ) -> Callable[[object], Awaitable[None]]:
     """Wrap a `DuplicateDetector` event-bus callback so merge-band matches
     are also routed into the review queue as `DUPLICATE_MERGE` proposals.
@@ -148,6 +151,7 @@ def _duplicate_review_subscriber(
     proposals from the freshly cached results.
     """
     from vaultmind.indexer.duplicate_detector import DuplicateDetector
+    from vaultmind.services.review_delivery import deliver_block
     from vaultmind.services.review_queue import ReviewQueue, mint_duplicate_proposals
 
     assert isinstance(detector, DuplicateDetector)
@@ -158,9 +162,55 @@ def _duplicate_review_subscriber(
         note = getattr(event, "note", None)
         if note is not None:
             matches = detector.get_results(str(note.path))
-            mint_duplicate_proposals(queue, note, matches)
+            proposals = mint_duplicate_proposals(queue, note, matches)
+            for proposal in proposals:
+                await deliver_block(proposal, on_block)
 
     return _handle
+
+
+def _maturation_review_job(
+    pipeline: MaturationPipeline,
+    queue: ReviewQueue | None,
+    on_block: BlockNotifier | None = None,
+) -> Callable[[], Awaitable[None]]:
+    """Bind the existing maturation scheduler proposal and real synthesis operation."""
+    from vaultmind.services.review_delivery import deliver_block
+    from vaultmind.services.review_queue import Impact, Lane, ProposalKind
+
+    if queue is not None:
+
+        def apply_synthesis(payload: dict[str, Any]) -> str:
+            fingerprint = str(payload["fingerprint"])
+            match = next(
+                (cluster for cluster in pipeline.discover() if cluster.fingerprint == fingerprint),
+                None,
+            )
+            if match is None:
+                raise ValueError("cluster no longer available (dismissed or already synthesized)")
+            return pipeline.synthesize(match)
+
+        queue.register_applier(ProposalKind.MATURATION_SYNTHESIS, apply_synthesis)
+
+    async def run() -> None:
+        clusters = pipeline.discover()
+        if clusters:
+            logging.getLogger(__name__).info("Maturation digest: %d clusters ready", len(clusters))
+            if queue is not None:
+                for cluster in clusters:
+                    proposal = queue.propose(
+                        ProposalKind.MATURATION_SYNTHESIS,
+                        cluster.score,
+                        Impact.MEDIUM,
+                        f"Synthesize permanent note from {len(cluster.note_paths)} "
+                        f"notes ({cluster.top_entity})",
+                        {"fingerprint": cluster.fingerprint},
+                        lane_override=Lane.BLOCK if queue._thresholds.force_block else Lane.SKIM,
+                    )
+                    await deliver_block(proposal, on_block)
+        pipeline.mark_run()
+
+    return run
 
 
 @click.group()
@@ -740,22 +790,17 @@ def bot(ctx: click.Context) -> None:
 
     # Proactive notifier — hoisted here (not gated on maturation) so
     # contradiction escalation can notify regardless of maturation config.
+    from vaultmind.bot.handlers.autonomy import build_block_notifier
     from vaultmind.bot.notifier import Notifier
 
-    notifier: Notifier | None = None
-    if settings.telegram.notification_chat_id:
-        notifier = Notifier(bot=tg_bot, chat_id=settings.telegram.notification_chat_id)
+    notifier = Notifier(bot=tg_bot, chat_id=settings.telegram.notification_chat_id)
+    on_block = build_block_notifier(notifier)
 
     # Contradiction detection
     from vaultmind.contradiction.detector import ContradictionDetector
 
     contradiction_detector: ContradictionDetector | None = None
     if settings.contradiction.enabled and detector is not None:
-        on_escalate = None
-        if notifier is not None:
-            from vaultmind.bot.handlers.autonomy import build_block_notifier
-
-            on_escalate = build_block_notifier(notifier)
         contradiction_model = settings.contradiction.detection_model or settings.llm.fast_model
         contradiction_detector = ContradictionDetector(
             settings.contradiction,
@@ -766,7 +811,7 @@ def bot(ctx: click.Context) -> None:
             parser,
             ranking_config=settings.ranking,
             gap_store=gap_store,
-            on_escalate=on_escalate,
+            on_block=on_block,
             review_queue=review_queue,
         )
 
@@ -784,7 +829,7 @@ def bot(ctx: click.Context) -> None:
     # Subscribe duplicate detection and note suggestions to watch events
     if detector is not None:
         if review_queue is not None:
-            dup_subscriber = _duplicate_review_subscriber(detector, review_queue)
+            dup_subscriber = _duplicate_review_subscriber(detector, review_queue, on_block)
             event_bus.subscribe(NoteCreatedEvent, dup_subscriber)  # type: ignore[arg-type]
             event_bus.subscribe(NoteModifiedEvent, dup_subscriber)  # type: ignore[arg-type]
         else:
@@ -836,51 +881,13 @@ def bot(ctx: click.Context) -> None:
     jobs: list[ScheduledJob] = []
 
     if maturation_pipeline is not None:
-        if review_queue is not None:
-            from vaultmind.services.review_queue import ProposalKind
-
-            def _maturation_applier(payload: dict[str, Any]) -> str:
-                assert maturation_pipeline is not None
-                fingerprint = str(payload["fingerprint"])
-                match = next(
-                    (c for c in maturation_pipeline.discover() if c.fingerprint == fingerprint),
-                    None,
-                )
-                if match is None:
-                    raise ValueError(
-                        "cluster no longer available (dismissed or already synthesized)"
-                    )
-                return maturation_pipeline.synthesize(match)
-
-            review_queue.register_applier(ProposalKind.MATURATION_SYNTHESIS, _maturation_applier)
-
-        async def _maturation_digest() -> None:
-            assert maturation_pipeline is not None
-            clusters = maturation_pipeline.discover()
-            if clusters:
-                logging.getLogger(__name__).info(
-                    "Maturation digest: %d clusters ready", len(clusters)
-                )
-                if review_queue is not None:
-                    from vaultmind.services.review_queue import Impact, Lane, ProposalKind
-
-                    for cluster in clusters:
-                        review_queue.propose(
-                            ProposalKind.MATURATION_SYNTHESIS,
-                            cluster.score,
-                            Impact.MEDIUM,
-                            f"Synthesize permanent note from {len(cluster.note_paths)} "
-                            f"notes ({cluster.top_entity})",
-                            {"fingerprint": cluster.fingerprint},
-                            lane_override=Lane.SKIM,
-                        )
-            maturation_pipeline.mark_run()
+        maturation_job = _maturation_review_job(maturation_pipeline, review_queue, on_block)
 
         jobs.append(
             ScheduledJob.legacy(
                 name="maturation_digest",
                 interval=timedelta(days=7),
-                execute=_maturation_digest,
+                execute=maturation_job,
             )
         )
 
@@ -1001,6 +1008,7 @@ def bot(ctx: click.Context) -> None:
                         store=store,
                         vault_root=settings.vault.path,
                         event_bus=event_bus,
+                        on_block=on_block,
                     )
                     if result.error:
                         logging.getLogger(__name__).warning(
@@ -1191,12 +1199,12 @@ def auto_tag(
     from vaultmind.config import VAULTMIND_HOME, load_settings
     from vaultmind.indexer.auto_tagger import AutoTagger
     from vaultmind.indexer.tags import load_tag_vocabulary
+    from vaultmind.services.review_delivery import DeliveryStatus, deliver_block
     from vaultmind.services.review_queue import (
         Impact,
         Lane,
         ProposalKind,
         ProposalStatus,
-        ReviewProposal,
         migrate_quarantine,
     )
     from vaultmind.vault import VaultParser
@@ -1306,6 +1314,12 @@ def auto_tag(
             )
             proposals.setdefault(vocab_proposal.proposal_id, vocab_proposal)
 
+    for proposal in proposals.values():
+        delivery = asyncio.run(deliver_block(proposal))
+        if delivery is not DeliveryStatus.NOT_REQUIRED:
+            console.print(
+                f"BLOCK delivery {delivery.value}: {proposal.summary} (no active CLI bot)"
+            )
     terminal = {ProposalStatus.APPLIED, ProposalStatus.ACKNOWLEDGED, ProposalStatus.REJECTED}
     newly_applied = sum(
         p.status is ProposalStatus.APPLIED and p.occurrence_count == 1 for p in proposals.values()

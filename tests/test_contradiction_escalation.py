@@ -93,7 +93,7 @@ def _make_detector(
     match: DuplicateMatch,
     auto_resolve: bool = False,
     gap_store: GapStore | None = None,
-    on_escalate: object = None,
+    on_block: object = None,
     review_queue: object = None,
 ) -> ContradictionDetector:
     candidate_path = tmp_path / match.match_path
@@ -107,7 +107,7 @@ def _make_detector(
         tmp_path,
         FakeParser(candidate),
         gap_store=gap_store,
-        on_escalate=on_escalate,
+        on_block=on_block,
         review_queue=review_queue,
     )
 
@@ -212,7 +212,7 @@ class TestNonConflictingVerdict:
         gap_store = GapStore(tmp_path / "gaps.db")
         on_escalate = AsyncMock()
         detector = _make_detector(
-            tmp_path, llm, candidate, match, gap_store=gap_store, on_escalate=on_escalate
+            tmp_path, llm, candidate, match, gap_store=gap_store, on_block=on_escalate
         )
 
         await detector.on_note_changed(NoteCreatedEvent(path=tmp_path / "new.md", note=note))
@@ -228,13 +228,12 @@ class TestNonConflictingVerdict:
 
 
 class TestEscalationDefault:
-    async def test_conflict_mints_gap_and_calls_escalate_callback(self, tmp_path: Path) -> None:
+    async def test_conflict_mints_open_gap(self, tmp_path: Path) -> None:
         note = _note()
         candidate = _note("candidate.md", "Candidate Note")
         match = _match()
         llm = _make_llm(True, reasoning="different facts")
         gap_store = GapStore(tmp_path / "gaps.db")
-        on_escalate = AsyncMock()
         detector = _make_detector(
             tmp_path,
             llm,
@@ -242,7 +241,6 @@ class TestEscalationDefault:
             match,
             auto_resolve=False,
             gap_store=gap_store,
-            on_escalate=on_escalate,
         )
 
         await detector.on_note_changed(NoteCreatedEvent(path=tmp_path / "new.md", note=note))
@@ -251,7 +249,6 @@ class TestEscalationDefault:
         assert len(gaps) == 1
         assert gaps[0].kind == GapKind.CONTRADICTION_ESCALATED
         assert gaps[0].status == GapStatus.OPEN
-        on_escalate.assert_called_once()
         gap_store.close()
 
     async def test_conflict_never_mutates_the_vault_when_not_auto_resolving(
@@ -333,7 +330,7 @@ class TestAutoResolveEnabled:
             match,
             auto_resolve=True,
             gap_store=gap_store,
-            on_escalate=on_escalate,
+            on_block=on_escalate,
         )
 
         await detector.on_note_changed(NoteCreatedEvent(path=tmp_path / "new.md", note=note))
@@ -351,7 +348,6 @@ class TestAutoResolveEnabled:
         match = _match()
         llm = _make_llm(True)
         gap_store = GapStore(tmp_path / "gaps.db")
-        on_escalate = AsyncMock()
         detector = _make_detector(
             tmp_path,
             llm,
@@ -359,7 +355,6 @@ class TestAutoResolveEnabled:
             match,
             auto_resolve=True,
             gap_store=gap_store,
-            on_escalate=on_escalate,
         )
 
         await detector.on_note_changed(NoteCreatedEvent(path=tmp_path / "new.md", note=note))
@@ -367,51 +362,7 @@ class TestAutoResolveEnabled:
         content = (tmp_path / "candidate.md").read_text(encoding="utf-8")
         assert "contradicted_by" not in content
         assert len(gap_store.list_open()) == 1
-        on_escalate.assert_called_once()
         gap_store.close()
-
-
-class TestNotifierSendWithKeyboard:
-    async def test_disabled_when_chat_id_zero(self) -> None:
-        bot = AsyncMock()
-        notifier = Notifier(bot=bot, chat_id=0)
-        keyboard = MagicMock()
-        await notifier.send_with_keyboard("hello", keyboard)
-        bot.send_message.assert_not_called()
-
-    async def test_sends_with_reply_markup(self) -> None:
-        bot = AsyncMock()
-        notifier = Notifier(bot=bot, chat_id=12345)
-        keyboard = MagicMock()
-        await notifier.send_with_keyboard("hello", keyboard)
-        bot.send_message.assert_called_once_with(
-            chat_id=12345, text="hello", parse_mode="Markdown", reply_markup=keyboard
-        )
-
-    async def test_handles_exception(self) -> None:
-        bot = AsyncMock()
-        bot.send_message.side_effect = RuntimeError("network error")
-        notifier = Notifier(bot=bot, chat_id=12345)
-        keyboard = MagicMock()
-        await notifier.send_with_keyboard("hello", keyboard)  # should not raise
-
-
-class TestMintGapErrorHandling:
-    async def test_gap_store_none_returns_empty_string(self, tmp_path: Path) -> None:
-        note = _note()
-        candidate = _note("candidate.md", "Candidate Note")
-        match = _match()
-        llm = _make_llm(True)
-        on_escalate = AsyncMock()
-        detector = _make_detector(
-            tmp_path, llm, candidate, match, gap_store=None, on_escalate=on_escalate
-        )
-
-        await detector.on_note_changed(NoteCreatedEvent(path=tmp_path / "new.md", note=note))
-
-        on_escalate.assert_called_once()
-        _, _, _, gap_id, _ = on_escalate.call_args[0]
-        assert gap_id == ""
 
 
 # ---------------------------------------------------------------------------
@@ -454,7 +405,10 @@ class TestReviewQueueIntegration:
         match = _match()
         llm = _make_llm(True, reasoning="different facts")
         gap_store = GapStore(tmp_path / "gaps.db")
-        on_escalate = AsyncMock()
+        from vaultmind.bot.handlers.autonomy import build_block_notifier, decode_proposal_id
+
+        bot = AsyncMock()
+        on_block = build_block_notifier(Notifier(bot, chat_id=12345))
         queue = ReviewQueue(tmp_path / "queue.db")
         detector = _make_detector(
             tmp_path,
@@ -463,7 +417,7 @@ class TestReviewQueueIntegration:
             match,
             auto_resolve=False,
             gap_store=gap_store,
-            on_escalate=on_escalate,
+            on_block=on_block,
             review_queue=queue,
         )
 
@@ -472,11 +426,14 @@ class TestReviewQueueIntegration:
         pending = queue.list_pending(lane=Lane.BLOCK)
         assert len(pending) == 1
         assert pending[0].kind is ProposalKind.CONTRADICTION_ESCALATION
-        # Escalation still fires the existing Telegram notify + gap mint —
-        # queue routing is additive, not a replacement for the notify path.
-        on_escalate.assert_called_once()
-        called_proposal_id = on_escalate.call_args[0][4]
-        assert called_proposal_id == pending[0].proposal_id
+        assert bot.send_message.await_count == 1
+        keyboard = bot.send_message.call_args.kwargs["reply_markup"]
+        token = keyboard.inline_keyboard[0][0].callback_data.partition(":")[2]
+        assert decode_proposal_id(token) == pending[0].proposal_id
+        original = (tmp_path / "candidate.md").read_bytes()
+        await detector.on_note_changed(NoteCreatedEvent(path=tmp_path / "new.md", note=note))
+        assert bot.send_message.await_count == 1
+        assert (tmp_path / "candidate.md").read_bytes() == original
         assert len(gap_store.list_open()) == 1
         gap_store.close()
 

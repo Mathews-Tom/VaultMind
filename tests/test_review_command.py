@@ -1,13 +1,22 @@
-"""Tests for `/review` — weekly review prompts + pending SKIM-lane items (M7 PR-3)."""
+"""Tests for `/review` — weekly review prompts + pending/failed review-queue items."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
+import pytest
+
+from vaultmind.bot.handlers.autonomy import callback_data, handle_autonomy_callback
 from vaultmind.bot.handlers.context import HandlerContext
 from vaultmind.bot.handlers.review import handle_review
-from vaultmind.services.review_queue import Impact, ProposalKind, ReviewQueue
+from vaultmind.services.review_queue import (
+    Impact,
+    Lane,
+    ProposalKind,
+    ProposalStatus,
+    ReviewQueue,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -51,50 +60,178 @@ def _message() -> AsyncMock:
     return message
 
 
-class TestHandleReview:
-    async def test_no_review_queue_sends_plain_review(self) -> None:
-        ctx = _make_ctx(None)
-        message = _message()
+class TestReviewRecovery:
+    """`/review` is how a human recovers BLOCK and FAILED items after the fact."""
 
-        await handle_review(ctx, message)
-
-        message.answer.assert_called_once()
-        _, kwargs = message.answer.call_args
-        assert kwargs.get("reply_markup") is None
-        text = message.answer.call_args[0][0]
-        assert "Weekly Review" in text
-        assert "Pending Review" not in text
-
-    async def test_no_pending_skim_items_omits_section(self, tmp_path: Path) -> None:
+    async def test_undelivered_block_proposal_is_decidable_from_review(
+        self, tmp_path: Path
+    ) -> None:
         queue = ReviewQueue(tmp_path / "queue.db")
-        ctx = _make_ctx(queue)
-        message = _message()
-
-        await handle_review(ctx, message)
-
-        text = message.answer.call_args[0][0]
-        assert "Pending Review" not in text
-        assert message.answer.call_args.kwargs.get("reply_markup") is None
-
-    async def test_pending_skim_items_shown_with_approve_all_button(self, tmp_path: Path) -> None:
-        queue = ReviewQueue(tmp_path / "queue.db")
-        queue.propose(
+        block = queue.propose(
             ProposalKind.DUPLICATE_MERGE,
-            confidence=0.85,
-            impact=Impact.MEDIUM,
-            summary="Merge candidate: 'A' ~ 'B' (85% similar)",
-            payload={"source_path": "a.md", "match_path": "b.md"},
+            confidence=0.1,
+            impact=Impact.HIGH,
+            summary="needs a human",
+            payload={"n": 1},
+            lane_override=Lane.BLOCK,
         )
-        ctx = _make_ctx(queue)
         message = _message()
 
-        await handle_review(ctx, message)
+        await handle_review(_make_ctx(queue), message)
+
+        assert "needs a human" in message.answer.call_args[0][0]
+        buttons = _buttons(message.answer.call_args.kwargs["reply_markup"])
+        assert [b.callback_data for b in buttons] == [
+            callback_data("approve", block.proposal_id),
+            callback_data("reject", block.proposal_id),
+        ]
+        assert all(len(b.callback_data.encode()) <= 64 for b in buttons)
+
+        # The button actually resolves the proposal through the real callback handler.
+        callback = AsyncMock()
+        callback.data = buttons[0].callback_data
+        callback.from_user.id = 1
+        await handle_autonomy_callback(_make_ctx(queue), callback)
+        assert queue.get(block.proposal_id).status is ProposalStatus.ACKNOWLEDGED
+
+    async def test_failed_proposal_is_listed_after_reopen_with_working_retry(
+        self, tmp_path: Path
+    ) -> None:
+        attempts: list[int] = []
+
+        def _flaky(payload: dict[str, object]) -> str:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise OSError("disk full")
+            return "done"
+
+        db = tmp_path / "queue.db"
+        queue = ReviewQueue(db, appliers={ProposalKind.TAG_VOCABULARY: _flaky})
+        proposal = queue.propose(
+            ProposalKind.TAG_VOCABULARY,
+            confidence=0.1,
+            impact=Impact.HIGH,
+            summary="add tag",
+            payload={"tag": "t"},
+            lane_override=Lane.BLOCK,
+        )
+        queue.approve(proposal.proposal_id)
+        queue.close()
+
+        reopened = ReviewQueue(db, appliers={ProposalKind.TAG_VOCABULARY: _flaky})
+        message = _message()
+        await handle_review(_make_ctx(reopened), message)
 
         text = message.answer.call_args[0][0]
-        assert "Pending Review" in text
-        assert "Merge candidate" in text
-        keyboard = message.answer.call_args.kwargs.get("reply_markup")
-        assert keyboard is not None
-        button = keyboard.inline_keyboard[0][0]
-        assert button.callback_data == "autonomy_approve_all_skim"
-        assert "1" in button.text
+        assert "disk full" in text
+        assert attempts == [1]  # listing never retries
+        (retry,) = _buttons(message.answer.call_args.kwargs["reply_markup"])
+        assert retry.callback_data == callback_data("retry", proposal.proposal_id)
+
+        callback = AsyncMock()
+        callback.data = retry.callback_data
+        callback.from_user.id = 1
+        await handle_autonomy_callback(_make_ctx(reopened), callback)
+        assert reopened.get(proposal.proposal_id).status is ProposalStatus.APPLIED
+        assert attempts == [1, 1]
+
+        recovered = _message()
+        await handle_review(_make_ctx(reopened), recovered)
+        assert recovered.answer.call_args.kwargs.get("reply_markup") is None
+
+
+@pytest.mark.parametrize("hostile", [False, True])
+async def test_large_review_preserves_proposals_and_delivers_working_actions(
+    tmp_path: Path,
+    hostile: bool,
+) -> None:
+    import json
+
+    import frontmatter
+
+    from vaultmind.config import load_settings
+    from vaultmind.indexer.tags import tag_appliers
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    database = tmp_path / "review.db"
+    config = tmp_path / "fixture.toml"
+    config.write_text(
+        f"[vault]\npath = {json.dumps(str(vault))}\n"
+        "[telegram]\nallowed_user_ids = [1]\n"
+        f"[autonomy]\ndb_path = {json.dumps(str(database))}\n"
+    )
+    queue = ReviewQueue(database, appliers=tag_appliers(vault, tmp_path / "vocabulary.json"))
+    ctx = _make_ctx(queue)
+    ctx.settings = load_settings(config)
+    listed = []
+    for lane, count in ((Lane.SKIM, 10), (Lane.BLOCK, 5)):
+        for i in range(count):
+            summary = f"Common producer prefix awaiting a distinct decision {i}: "
+            summary += "inspection rationale " * 15
+            if hostile and lane is Lane.BLOCK and i == 0:
+                summary += " _*`[" * 600
+            listed.append(
+                queue.propose(
+                    ProposalKind.DUPLICATE_MERGE,
+                    0.5,
+                    Impact.MEDIUM,
+                    summary,
+                    {"lane": lane.value, "item": i},
+                    lane_override=lane,
+                )
+            )
+    for i in range(6):
+        proposal = queue.propose(
+            ProposalKind.TAG_APPLICATION,
+            0.5,
+            Impact.LOW,
+            f"missing {i}: " + "reviewed tag application " * 15,
+            {"note_path": f"missing-{i}.md", "tags": ["reviewed"]},
+            lane_override=Lane.BLOCK,
+        )
+        listed.append(queue.approve(proposal.proposal_id))
+    before = {p.proposal_id: queue.get(p.proposal_id) for p in listed}
+    delivered: list[tuple[str, Any]] = []
+
+    async def bounded_transport(text: str, **kwargs: Any) -> None:
+        if len(text) > 4096:
+            raise ValueError("Telegram text exceeds 4096 characters")
+        delivered.append((text, kwargs.get("reply_markup")))
+
+    message = _message()
+    message.answer.side_effect = bounded_transport
+    try:
+        await handle_review(ctx, message)
+        assert {p.proposal_id: queue.get(p.proposal_id) for p in listed} == before
+        buttons = [
+            button for _, markup in delivered if markup is not None for button in _buttons(markup)
+        ]
+        actions = [button.callback_data for button in buttons]
+        assert len({button.text for button in buttons}) == len(buttons)
+        blocked = [p for p in listed if p.status is ProposalStatus.PENDING and p.lane is Lane.BLOCK]
+        failed = [p for p in listed if p.status is ProposalStatus.FAILED]
+        assert all(callback_data("approve", p.proposal_id) in actions for p in blocked)
+        assert all(callback_data("reject", p.proposal_id) in actions for p in blocked)
+        assert all(callback_data("retry", p.proposal_id) in actions for p in failed)
+        assert all(len(action.encode()) <= 64 for action in actions)
+        for action, proposal in (("approve", blocked[0]), ("retry", failed[-1])):
+            if action == "retry":
+                (vault / proposal.payload["note_path"]).write_text("Preserved note body.\n")
+            callback = AsyncMock()
+            callback.data = next(
+                data for data in actions if data == callback_data(action, proposal.proposal_id)
+            )
+            callback.from_user.id = 1
+            await handle_autonomy_callback(ctx, callback)
+        assert queue.get(blocked[0].proposal_id).status is ProposalStatus.ACKNOWLEDGED
+        assert queue.get(failed[-1].proposal_id).status is ProposalStatus.APPLIED
+        assert all(queue.get(p.proposal_id).status is ProposalStatus.FAILED for p in failed[:-1])
+        tagged = frontmatter.load(vault / failed[-1].payload["note_path"])
+        assert tagged.metadata["tags"] == ["reviewed"]
+    finally:
+        queue.close()
+
+
+def _buttons(markup: Any) -> list[Any]:
+    return [b for row in markup.inline_keyboard for b in row]

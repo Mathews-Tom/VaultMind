@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from vaultmind.bot.notifier import Notifier
+from vaultmind.services.review_delivery import DeliveryStatus
 
 
 class TestNotifier:
@@ -47,3 +48,26 @@ class TestNotifier:
         notifier = Notifier(bot=bot, chat_id=12345)
         # Should not raise
         await notifier.send("hello")
+
+
+class TestSendWithKeyboardStatus:
+    """The keyboard path reports what actually happened; `send` stays fire-and-forget."""
+
+    async def test_disabled_chat_reports_disabled_and_sends_nothing(self) -> None:
+        bot = AsyncMock()
+        status = await Notifier(bot=bot, chat_id=0).send_with_keyboard("hi", MagicMock())
+        assert status is DeliveryStatus.DISABLED
+        bot.send_message.assert_not_called()
+
+    async def test_delivered_message_reports_sent_with_keyboard_attached(self) -> None:
+        bot = AsyncMock()
+        keyboard = MagicMock()
+        status = await Notifier(bot=bot, chat_id=7).send_with_keyboard("hi", keyboard)
+        assert status is DeliveryStatus.SENT
+        assert bot.send_message.call_args.kwargs["reply_markup"] is keyboard
+
+    async def test_transport_error_reports_failed(self) -> None:
+        bot = AsyncMock()
+        bot.send_message.side_effect = RuntimeError("network error")
+        status = await Notifier(bot=bot, chat_id=7).send_with_keyboard("hi", MagicMock())
+        assert status is DeliveryStatus.FAILED

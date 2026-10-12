@@ -19,24 +19,23 @@ from vaultmind.contradiction.detection import detect_conflict
 from vaultmind.contradiction.marking import mark_contradicted
 from vaultmind.contradiction.policy import resolve_conflict
 from vaultmind.indexer.duplicate_detector import MatchType
+from vaultmind.services.review_delivery import deliver_block
+from vaultmind.vault.security import validate_vault_path
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     from vaultmind.config import ContradictionConfig
     from vaultmind.contradiction.policy import ResolutionOutcome
     from vaultmind.indexer.duplicate_detector import DuplicateDetector, DuplicateMatch
     from vaultmind.llm.client import LLMClient
+    from vaultmind.services.review_delivery import BlockNotifier
     from vaultmind.services.review_queue import ReviewQueue
     from vaultmind.vault.events import NoteCreatedEvent, NoteModifiedEvent
     from vaultmind.vault.models import Note
     from vaultmind.vault.parser import VaultParser
 
 logger = logging.getLogger(__name__)
-
-# (note_a_title, note_b_title, rationale, gap_id, proposal_id) -> None
-type EscalationCallback = Callable[[str, str, str, str, str], Any]
 
 
 class RankingConfigLike(Protocol):
@@ -58,7 +57,7 @@ class ContradictionDetector:
         parser: VaultParser,
         ranking_config: RankingConfigLike | None = None,
         gap_store: object = None,
-        on_escalate: EscalationCallback | None = None,
+        on_block: BlockNotifier | None = None,
         review_queue: ReviewQueue | None = None,
     ) -> None:
         self._config = config
@@ -69,7 +68,7 @@ class ContradictionDetector:
         self._parser = parser
         self._ranking_config = ranking_config
         self._gap_store = gap_store
-        self._on_escalate = on_escalate
+        self._on_block = on_block
         self._review_queue = review_queue
         if review_queue is not None:
             from vaultmind.services.review_queue import ProposalKind
@@ -82,10 +81,8 @@ class ContradictionDetector:
         """Sync applier registered onto `review_queue` for
         `CONTRADICTION_RESOLUTION` proposals — invoked by the queue's own
         `_apply()`, on a worker thread via `asyncio.to_thread`."""
-        from pathlib import Path as _Path
-
         mark_contradicted(
-            _Path(str(payload["loser_path"])),
+            validate_vault_path(str(payload["loser_path"]), self._vault_root),
             str(payload["winner_path"]),
             str(payload["winner_title"]),
             str(payload["rationale"]),
@@ -173,7 +170,7 @@ class ContradictionDetector:
             "rationale": outcome.rationale,
         }
         try:
-            await asyncio.to_thread(
+            proposal = await asyncio.to_thread(
                 self._review_queue.propose,
                 ProposalKind.CONTRADICTION_RESOLUTION,
                 1.0,
@@ -181,11 +178,12 @@ class ContradictionDetector:
                 f"Mark '{loser_rel}' contradicted by '{winner_rel}'",
                 payload,
             )
+            await deliver_block(proposal, self._on_block)
         except Exception:
             logger.exception("Failed to mark %s as contradicted by %s", loser_rel, winner_rel)
 
     async def _escalate(self, note: Note, candidate: Note, rationale: str) -> None:
-        proposal_id = ""
+        proposal = None
         if self._review_queue is not None:
             from vaultmind.services.review_queue import Impact, Lane, ProposalKind
 
@@ -195,24 +193,18 @@ class ContradictionDetector:
                     ProposalKind.CONTRADICTION_ESCALATION,
                     0.0,
                     Impact.HIGH,
-                    f"Contradiction escalated: '{note.title}' vs '{candidate.title}'",
+                    f"Contradiction escalated: '{note.title}' vs '{candidate.title}': {rationale}",
                     {"note_path": str(note.path), "candidate_path": str(candidate.path)},
                     lane_override=Lane.BLOCK,
                 )
-                proposal_id = proposal.proposal_id
             except Exception:
                 logger.exception(
                     "Escalation queue-proposal failed for %s vs %s", note.title, candidate.title
                 )
 
-        gap_id = self._mint_gap(note, candidate)
-        if self._on_escalate is not None:
-            try:
-                await self._on_escalate(note.title, candidate.title, rationale, gap_id, proposal_id)
-            except Exception:
-                logger.exception(
-                    "Escalation notification failed for %s vs %s", note.title, candidate.title
-                )
+        self._mint_gap(note, candidate)
+        if proposal is not None:
+            await deliver_block(proposal, self._on_block)
 
     def _mint_gap(self, note: Note, candidate: Note) -> str:
         from vaultmind.memory.gaps import GapKind
@@ -234,4 +226,4 @@ class ContradictionDetector:
         return gap.gap_id
 
 
-__all__ = ["ContradictionDetector", "EscalationCallback", "RankingConfigLike"]
+__all__ = ["ContradictionDetector", "RankingConfigLike"]
