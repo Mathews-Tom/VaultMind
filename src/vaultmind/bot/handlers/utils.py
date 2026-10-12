@@ -10,17 +10,17 @@ from vaultmind.vault.security import PathResolutionError, validate_vault_path
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from aiogram.types import Message
+    from aiogram.types import CallbackQuery, Message
 
     from vaultmind.bot.handlers.context import HandlerContext
 
 
-def _is_authorized(ctx: HandlerContext, message: Message) -> bool:
-    """Check if the user is allowed to use the bot."""
+def _is_authorized(ctx: HandlerContext, event: Message | CallbackQuery) -> bool:
+    """Check if the actual Telegram actor of a message or callback is allowed."""
     allowed = ctx.settings.telegram.allowed_user_ids
     if not allowed:
         return True
-    return message.from_user is not None and message.from_user.id in allowed
+    return event.from_user is not None and event.from_user.id in allowed
 
 
 def _split_message(text: str, max_len: int = 4000) -> list[str]:

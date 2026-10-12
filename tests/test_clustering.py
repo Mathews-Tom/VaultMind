@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from vaultmind.pipeline.clustering import NoteCluster, _cluster_fingerprint, discover_clusters
+from vaultmind.pipeline.clustering import _cluster_fingerprint, discover_clusters
 
 
 def _mock_collection(
@@ -15,11 +15,11 @@ def _mock_collection(
     embeddings: list[list[float]],
     metadatas: list[dict[str, Any]],
 ) -> MagicMock:
-    """Create a mock ChromaDB collection."""
+    """Substitute the Chroma boundary, including its real ndarray embedding shape."""
     collection = MagicMock()
     collection.get.return_value = {
         "ids": ids,
-        "embeddings": embeddings,
+        "embeddings": np.asarray(embeddings, dtype=np.float32),
         "metadatas": metadatas,
     }
     return collection
@@ -58,8 +58,8 @@ class TestDiscoverClusters:
             ],
         )
         clusters = discover_clusters(collection, min_samples=3)
-        assert len(clusters) >= 1
-        assert all(isinstance(c, NoteCluster) for c in clusters)
+        assert len(clusters) == 1
+        assert set(clusters[0].note_paths) == {"a.md", "b.md", "c.md", "d.md"}
 
     def test_single_note_never_forms_cluster(self) -> None:
         collection = _mock_collection(

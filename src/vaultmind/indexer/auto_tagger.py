@@ -19,11 +19,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import frontmatter
-
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from vaultmind.config import AutoTagConfig
     from vaultmind.llm.client import LLMClient
     from vaultmind.vault.models import Note
@@ -159,27 +155,6 @@ class AutoTagger:
             if result and (result.suggested_tags or result.new_tags):
                 suggestions.append(result)
         return suggestions
-
-    def apply_tags(self, note_path: Path, tags: list[str]) -> None:
-        """Write tags to a note's frontmatter.
-
-        Merges with existing tags (no duplicates). Uses python-frontmatter
-        for safe round-trip editing.
-        """
-        with open(note_path, encoding="utf-8") as f:
-            post = frontmatter.load(f)
-
-        existing = post.metadata.get("tags", [])
-        if isinstance(existing, str):
-            existing = [existing]
-
-        merged = list(dict.fromkeys(existing + tags))
-        post.metadata["tags"] = merged
-
-        with open(note_path, "w", encoding="utf-8") as f:
-            f.write(frontmatter.dumps(post))
-
-        logger.info("Applied tags %s to %s", tags, note_path)
 
     def collect_vault_tags(self, notes: list[Note]) -> set[str]:
         """Collect all unique tags from a list of notes."""

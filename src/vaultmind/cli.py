@@ -14,7 +14,6 @@ Commands:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import sys
 from pathlib import Path
@@ -115,6 +114,7 @@ def _build_review_queue(
     through the queue (`watch`, `bot`, `auto-tag`).
     """
     from vaultmind.config import VAULTMIND_HOME, Settings
+    from vaultmind.indexer.tags import tag_appliers
     from vaultmind.services.review_queue import AutonomyThresholds, ReviewQueue
 
     assert isinstance(settings, Settings)
@@ -123,6 +123,8 @@ def _build_review_queue(
         if settings.autonomy.db_path
         else VAULTMIND_HOME / "data" / "review_queue.db"
     )
+    operations = tag_appliers(settings.vault.path, VAULTMIND_HOME / "data" / "tag_vocabulary.json")
+    operations.update(appliers or {})
     return ReviewQueue(
         queue_db,
         AutonomyThresholds(
@@ -130,7 +132,7 @@ def _build_review_queue(
             skim_below=settings.autonomy.skim_below,
             force_block=settings.autonomy.force_block,
         ),
-        appliers=appliers,
+        appliers=operations,
     )
 
 
@@ -845,7 +847,9 @@ def bot(ctx: click.Context) -> None:
                     None,
                 )
                 if match is None:
-                    return "cluster no longer available (dismissed or already synthesized)"
+                    raise ValueError(
+                        "cluster no longer available (dismissed or already synthesized)"
+                    )
                 return maturation_pipeline.synthesize(match)
 
             review_queue.register_applier(ProposalKind.MATURATION_SYNTHESIS, _maturation_applier)
@@ -1165,18 +1169,6 @@ def watch(ctx: click.Context, with_graph: bool) -> None:
         console.print("\n[yellow]Watcher stopped.[/yellow]")
 
 
-def _load_tag_vocabulary(path: Path) -> set[str]:
-    """Load the durable approved-tag vocabulary (M7 review-queue applier state)."""
-    if not path.exists():
-        return set()
-    return set(json.loads(path.read_text()).get("approved", []))
-
-
-def _save_tag_vocabulary(path: Path, tags: set[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"approved": sorted(tags)}, indent=2))
-
-
 @cli.command("auto-tag")
 @click.option("--apply", "do_apply", is_flag=True, help="Route suggestions through the queue")
 @click.option("--approve-skim", is_flag=True, help="Approve all pending SKIM-lane tag proposals")
@@ -1198,10 +1190,13 @@ def auto_tag(
     """
     from vaultmind.config import VAULTMIND_HOME, load_settings
     from vaultmind.indexer.auto_tagger import AutoTagger
+    from vaultmind.indexer.tags import load_tag_vocabulary
     from vaultmind.services.review_queue import (
         Impact,
         Lane,
         ProposalKind,
+        ProposalStatus,
+        ReviewProposal,
         migrate_quarantine,
     )
     from vaultmind.vault import VaultParser
@@ -1215,28 +1210,7 @@ def auto_tag(
 
     vocab_path = VAULTMIND_HOME / "data" / "tag_vocabulary.json"
 
-    def _apply_tag_application(payload: dict[str, Any]) -> str:
-        note_path = settings.vault.path / str(payload["note_path"])
-        tags = list(payload["tags"])
-        if not note_path.exists():
-            raise FileNotFoundError(note_path)
-        tagger.apply_tags(note_path, tags)
-        return f"applied {len(tags)} tag(s) to {payload['note_path']}"
-
-    def _apply_tag_vocabulary(payload: dict[str, Any]) -> str:
-        tag = str(payload["tag"])
-        approved = _load_tag_vocabulary(vocab_path)
-        approved.add(tag)
-        _save_tag_vocabulary(vocab_path, approved)
-        return f"'{tag}' added to vocabulary"
-
-    queue = _build_review_queue(
-        settings,
-        appliers={
-            ProposalKind.TAG_APPLICATION: _apply_tag_application,
-            ProposalKind.TAG_VOCABULARY: _apply_tag_vocabulary,
-        },
-    )
+    queue = _build_review_queue(settings)
 
     quarantine_path = VAULTMIND_HOME / "data" / "tag_quarantine.json"
     migrated = migrate_quarantine(queue, quarantine_path)
@@ -1246,8 +1220,24 @@ def auto_tag(
         )
 
     if approve_skim:
-        approved = queue.approve_all(lane=Lane.SKIM)
-        console.print(f"[green]✓[/green] Approved {len(approved)} SKIM-lane tag proposal(s).")
+        approved = []
+        tag_kinds = (ProposalKind.TAG_APPLICATION, ProposalKind.TAG_VOCABULARY)
+        for proposal in queue.list_pending(lane=Lane.SKIM):
+            if proposal.kind not in tag_kinds:
+                continue
+            outcome = queue.approve(proposal.proposal_id)
+            if outcome is not None:
+                approved.append(outcome)
+        counts = {status: sum(p.status is status for p in approved) for status in ProposalStatus}
+        console.print(
+            f"SKIM outcomes: {counts[ProposalStatus.APPLIED]} applied; "
+            f"{counts[ProposalStatus.ACKNOWLEDGED]} acknowledged; "
+            f"{counts[ProposalStatus.FAILED]} failed."
+        )
+        if counts[ProposalStatus.FAILED]:
+            raise click.ClickException(
+                "One or more queued operations failed; explicit retry required."
+            )
         return
 
     if show_pending:
@@ -1265,7 +1255,7 @@ def auto_tag(
     with console.status("Parsing vault..."):
         notes = parser.iter_notes()
 
-    vault_tags = tagger.collect_vault_tags(notes) | _load_tag_vocabulary(vocab_path)
+    vault_tags = tagger.collect_vault_tags(notes) | load_tag_vocabulary(vocab_path)
     console.print(f"  Vault tag vocabulary: {len(vault_tags)} unique tags")
 
     # Filter to notes without many tags (likely need tagging)
@@ -1294,8 +1284,8 @@ def auto_tag(
         console.print("  Run with --apply to route these through the review queue.")
         return
 
-    auto_count = 0
-    skim_count = 0
+    proposals: dict[str, ReviewProposal] = {}
+    # Keep the first snapshot: later duplicates increment occurrence_count.
     for s in suggestions:
         if s.suggested_tags:
             proposal = queue.propose(
@@ -1305,10 +1295,7 @@ def auto_tag(
                 summary=f"Apply {len(s.suggested_tags)} known tag(s) to '{s.note_title}'",
                 payload={"note_path": s.note_path, "tags": s.suggested_tags},
             )
-            if proposal.lane is Lane.AUTO:
-                auto_count += 1
-            else:
-                skim_count += 1
+            proposals.setdefault(proposal.proposal_id, proposal)
         for tag in s.new_tags:
             vocab_proposal = queue.propose(
                 ProposalKind.TAG_VOCABULARY,
@@ -1317,14 +1304,24 @@ def auto_tag(
                 summary=f"New tag vocabulary: '{tag}'",
                 payload={"tag": tag},
             )
-            if vocab_proposal.lane is not Lane.AUTO:
-                skim_count += 1
+            proposals.setdefault(vocab_proposal.proposal_id, vocab_proposal)
 
-    console.print(
-        f"[green]✓[/green] {auto_count} tag-application(s) applied immediately (AUTO); "
-        f"{skim_count} queued for review (SKIM) — see `auto-tag --show-pending`, "
-        "the bot's /review command, or the next `vaultmind digest`."
+    terminal = {ProposalStatus.APPLIED, ProposalStatus.ACKNOWLEDGED, ProposalStatus.REJECTED}
+    newly_applied = sum(
+        p.status is ProposalStatus.APPLIED and p.occurrence_count == 1 for p in proposals.values()
     )
+    previously_resolved = sum(
+        p.status in terminal and p.occurrence_count > 1 for p in proposals.values()
+    )
+    failed = sum(p.status is ProposalStatus.FAILED for p in proposals.values())
+    pending_count = sum(p.status is ProposalStatus.PENDING for p in proposals.values())
+    console.print(
+        f"{len(proposals)} unique proposal(s): {newly_applied} newly applied; "
+        f"{previously_resolved} previously resolved (no new mutation); "
+        f"{failed} failed; {pending_count} pending review — see /review or auto-tag --show-pending."
+    )
+    if failed:
+        raise click.ClickException("One or more queued operations failed; explicit retry required.")
 
 
 @cli.command("tag-synonyms")

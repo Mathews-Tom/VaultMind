@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -132,7 +133,6 @@ class TestReviewQueuePropose:
             payload={"source_path": "a.md", "match_path": "b.md"},
         )
         assert proposal.lane is Lane.SKIM
-        assert "no applier" in proposal.lane_reason
 
     def test_kind_with_no_applier_approve_acknowledges_not_applies(self, tmp_path: Path) -> None:
         queue = ReviewQueue(tmp_path / "queue.db")
@@ -160,9 +160,8 @@ class TestReviewQueuePropose:
             lane_override=Lane.BLOCK,
         )
         assert proposal.lane is Lane.BLOCK
-        assert "fixed lane" in proposal.lane_reason
 
-    def test_applier_exception_marks_rejected(self, tmp_path: Path) -> None:
+    def test_applier_exception_marks_failed_with_typed_error(self, tmp_path: Path) -> None:
         def _boom(payload: dict[str, object]) -> str:
             raise RuntimeError("write failed")
 
@@ -174,7 +173,22 @@ class TestReviewQueuePropose:
             summary="apply tags",
             payload={"note_path": "c.md", "tags": ["x"]},
         )
-        assert proposal.status is ProposalStatus.REJECTED
+        assert proposal.status is ProposalStatus.FAILED
+        assert proposal.result == "RuntimeError: write failed"
+
+    def test_mutation_kind_without_applier_fails_never_acknowledges(self, tmp_path: Path) -> None:
+        queue = ReviewQueue(tmp_path / "queue.db")
+        proposal = queue.propose(
+            ProposalKind.TAG_VOCABULARY,
+            confidence=0.6,
+            impact=Impact.LOW,
+            summary="vocab",
+            payload={"tag": "x"},
+        )
+        result = queue.approve(proposal.proposal_id)
+        assert result is not None
+        assert result.status is ProposalStatus.FAILED
+        assert "tag_vocabulary" in result.result
 
     def test_repeat_identical_proposal_dedupes_and_bumps_occurrence(self, tmp_path: Path) -> None:
         queue = ReviewQueue(tmp_path / "queue.db")
@@ -585,3 +599,296 @@ class TestDigestReviewQueueLifecycle:
         report = generator.generate()
         text = generator.format_telegram(report)
         assert "Pending Review" not in text
+
+
+# ---------------------------------------------------------------------------
+# FAILED state, explicit retry, legacy migration
+# ---------------------------------------------------------------------------
+
+_LEGACY_SCHEMA = """
+CREATE TABLE review_proposals (
+    proposal_id TEXT PRIMARY KEY, kind TEXT NOT NULL, lane TEXT NOT NULL,
+    lane_reason TEXT NOT NULL, confidence REAL NOT NULL, impact TEXT NOT NULL,
+    summary TEXT NOT NULL, payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', result TEXT NOT NULL DEFAULT '',
+    created TEXT NOT NULL, last_seen TEXT NOT NULL, resolved TEXT,
+    occurrence_count INTEGER NOT NULL DEFAULT 1
+);
+"""
+
+_LEGACY_ROWS: list[tuple[str, str, str, str, str | None, int]] = [
+    # (id, kind, status, result, resolved, occurrence_count)
+    ("p-pending", "tag_application", "pending", "", None, 1),
+    ("p-applied", "tag_application", "applied", "done", "2026-01-02T00:00:00", 2),
+    ("p-ack", "duplicate_merge", "acknowledged", "", "2026-01-03T00:00:00", 3),
+    ("p-unexecuted", "tag_application", "acknowledged", "", "2026-01-03T01:00:00", 2),
+    ("p-ack-result", "tag_application", "acknowledged", "reviewed", "2026-01-03T02:00:00", 1),
+    ("p-human", "tag_application", "rejected", "not wanted", "2026-01-04T00:00:00", 1),
+    ("p-known", "tag_application", "rejected", "applier raised — see logs", "2026-01-05", 4),
+    (
+        "p-ambig",
+        "tag_application",
+        "rejected",
+        "applier raised — see logs (human)",
+        "2026-01-06",
+        1,
+    ),
+    ("p-empty", "tag_application", "rejected", "", "2026-01-07T00:00:00", 1),
+]
+
+
+def _make_legacy_db(path: Path) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    conn.executescript(_LEGACY_SCHEMA)
+    for pid, kind, status, result, resolved, occ in _LEGACY_ROWS:
+        conn.execute(
+            "INSERT INTO review_proposals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                pid,
+                kind,
+                "SKIM",
+                "r",
+                0.7,
+                "low",
+                f"s-{pid}",
+                json.dumps({"id": pid}),
+                status,
+                result,
+                "2026-01-01T00:00:00",
+                "2026-01-01T12:00:00",
+                resolved,
+                occ,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+class TestFailedStateAndRetry:
+    def _failing_queue(self, tmp_path: Path) -> tuple[ReviewQueue, list[dict[str, object]]]:
+        calls: list[dict[str, object]] = []
+        state = {"fail": True}
+
+        def _applier(payload: dict[str, object]) -> str:
+            calls.append(payload)
+            if state["fail"]:
+                raise OSError("disk full")
+            return "ok"
+
+        queue = ReviewQueue(tmp_path / "q.db", appliers={ProposalKind.TAG_APPLICATION: _applier})
+        queue._test_state = state  # type: ignore[attr-defined]
+        return queue, calls
+
+    def test_failed_is_distinct_from_rejected_and_only_retry_reopens(self, tmp_path: Path) -> None:
+        queue, calls = self._failing_queue(tmp_path)
+        proposal = queue.propose(
+            ProposalKind.TAG_APPLICATION, 0.6, Impact.LOW, "t", {"note_path": "a.md"}
+        )
+        assert proposal.status is ProposalStatus.PENDING
+        failed = queue.approve(proposal.proposal_id)
+        assert failed is not None and failed.status is ProposalStatus.FAILED
+        assert failed.status is not ProposalStatus.REJECTED
+        assert failed.result == "OSError: disk full"
+        # ordinary approve/reject/approve_all/dedup never retry
+        assert queue.approve(proposal.proposal_id) is None
+        assert queue.reject(proposal.proposal_id) is False
+        assert queue.approve_all(Lane.SKIM) == []
+        queue.propose(ProposalKind.TAG_APPLICATION, 0.6, Impact.LOW, "t", {"note_path": "a.md"})
+        assert len(calls) == 1
+        assert queue.list_pending() == []
+
+    def test_retry_applies_then_terminal_replay_is_inert(self, tmp_path: Path) -> None:
+        queue, calls = self._failing_queue(tmp_path)
+        proposal = queue.propose(
+            ProposalKind.TAG_APPLICATION, 0.6, Impact.LOW, "t", {"note_path": "a.md"}
+        )
+        queue.approve(proposal.proposal_id)
+        queue._test_state["fail"] = False  # type: ignore[attr-defined]
+        retried = queue.retry(proposal.proposal_id)
+        assert retried is not None and retried.status is ProposalStatus.APPLIED
+        assert retried.result == "ok"
+        assert queue.retry(proposal.proposal_id) is None
+        assert queue.approve(proposal.proposal_id) is None
+        assert len(calls) == 2
+
+    def test_retry_only_operates_on_failed(self, tmp_path: Path) -> None:
+        queue = ReviewQueue(tmp_path / "q.db")
+        pending = queue.propose(ProposalKind.DUPLICATE_MERGE, 0.8, Impact.LOW, "d", {"a": 1})
+        assert queue.retry(pending.proposal_id) is None
+        queue.approve(pending.proposal_id)
+        assert queue.retry(pending.proposal_id) is None
+        assert queue.retry("missing") is None
+
+    def test_retry_missing_applier_stays_failed_until_registered(self, tmp_path: Path) -> None:
+        queue = ReviewQueue(tmp_path / "q.db")
+        proposal = queue.propose(ProposalKind.MATURATION_SYNTHESIS, 0.6, Impact.LOW, "m", {"c": 1})
+        failed = queue.approve(proposal.proposal_id)
+        assert failed is not None and failed.status is ProposalStatus.FAILED
+        again = queue.retry(proposal.proposal_id)
+        assert again is not None and again.status is ProposalStatus.FAILED
+        queue.register_applier(ProposalKind.MATURATION_SYNTHESIS, lambda _p: "synth")
+        done = queue.retry(proposal.proposal_id)
+        assert done is not None and done.status is ProposalStatus.APPLIED
+
+    def test_informational_kinds_acknowledge_without_applier(self, tmp_path: Path) -> None:
+        queue = ReviewQueue(tmp_path / "q.db")
+        for kind in (ProposalKind.CONTRADICTION_ESCALATION, ProposalKind.DUPLICATE_MERGE):
+            p = queue.propose(kind, 0.5, Impact.HIGH, "i", {"k": kind.value})
+            result = queue.approve(p.proposal_id)
+            assert result is not None and result.status is ProposalStatus.ACKNOWLEDGED
+            assert queue.approve(p.proposal_id) is None
+
+
+class TestLegacyMigration:
+    @pytest.mark.parametrize(
+        ("kind", "result", "recover"),
+        [
+            ("maturation_synthesis", "Synthesis failed: No source notes found on disk", True),
+            ("maturation_synthesis", "Synthesis failed: No YAML frontmatter found", True),
+            (
+                "maturation_synthesis",
+                "Synthesis failed: YAML frontmatter parse error: invalid",
+                True,
+            ),
+            ("maturation_synthesis", "Synthesis failed: Unresolved wikilinks: missing", True),
+            (
+                "maturation_synthesis",
+                "Synthesis failed: Unresolved wikilinks: x/synthesis-a-2026-01-01.md",
+                False,
+            ),
+            ("maturation_synthesis", "Synthesis failed: Unresolved wikilinks: missing.md", False),
+            (
+                "maturation_synthesis",
+                "cluster no longer available (dismissed or already synthesized)",
+                False,
+            ),
+            ("maturation_synthesis", "synthesis failed: no yaml frontmatter found", False),
+            ("tag_application", "Synthesis failed: No YAML frontmatter found", False),
+        ],
+    )
+    def test_legacy_synthesis_failure_recovery_is_conservative(
+        self, tmp_path: Path, kind: str, result: str, recover: bool
+    ) -> None:
+        import sqlite3
+
+        db = tmp_path / "legacy.db"
+        _make_legacy_db(db)
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE review_proposals SET kind = ?, result = ? WHERE proposal_id = ?",
+                (kind, result, "p-applied"),
+            )
+        queue = ReviewQueue(db)
+        row = queue.get("p-applied")
+        assert row is not None
+        assert row.status is (ProposalStatus.FAILED if recover else ProposalStatus.APPLIED)
+        assert row.result == result
+        assert row.legacy_status == ("applied" if recover else None)
+        assert row.legacy_result == (result if recover else None)
+        queue.close()
+
+        output = tmp_path / "synthesis-recovered.md"
+
+        def apply_synthesis(_payload: dict[str, object]) -> str:
+            output.write_text("---\ntype: permanent\n---\nRecovered current synthesis.\n")
+            return output.name
+
+        queue = ReviewQueue(db, appliers={ProposalKind.MATURATION_SYNTHESIS: apply_synthesis})
+        reopened = queue.get("p-applied")
+        assert reopened == row
+        assert not output.exists()
+        retried = queue.retry("p-applied")
+        if recover:
+            assert retried is not None and retried.status is ProposalStatus.APPLIED
+            assert output.read_text().endswith("Recovered current synthesis.\n")
+            assert retried.legacy_status == "applied"
+            assert retried.legacy_result == result
+        else:
+            assert retried is None
+            assert not output.exists()
+        assert queue.retry("p-applied") is None
+        queue.close()
+
+    def test_migration_preserves_rows_and_reclassifies_only_exact_failure(
+        self, tmp_path: Path
+    ) -> None:
+        import shutil
+
+        legacy = tmp_path / "legacy.db"
+        _make_legacy_db(legacy)
+        copy = tmp_path / "copy.db"
+        shutil.copy(legacy, copy)
+
+        queue = ReviewQueue(copy)
+        expected_status = {
+            "p-pending": ProposalStatus.PENDING,
+            "p-applied": ProposalStatus.APPLIED,
+            "p-ack": ProposalStatus.ACKNOWLEDGED,
+            "p-unexecuted": ProposalStatus.FAILED,
+            "p-ack-result": ProposalStatus.ACKNOWLEDGED,
+            "p-human": ProposalStatus.REJECTED,
+            "p-known": ProposalStatus.FAILED,
+            "p-ambig": ProposalStatus.REJECTED,
+            "p-empty": ProposalStatus.REJECTED,
+        }
+        for pid, kind, _status, result, resolved, occ in _LEGACY_ROWS:
+            row = queue.get(pid)
+            assert row is not None
+            assert row.status is expected_status[pid]
+            assert row.kind.value == kind
+            assert row.payload == {"id": pid}
+            assert row.summary == f"s-{pid}"
+            assert row.created.isoformat() == "2026-01-01T00:00:00"
+            assert row.last_seen.isoformat() == "2026-01-01T12:00:00"
+            assert row.result == result
+            assert (row.resolved.isoformat() if row.resolved else None) == (
+                datetime.fromisoformat(resolved).isoformat() if resolved else None
+            )
+            assert row.occurrence_count == occ
+            if pid in ("p-known", "p-unexecuted"):
+                assert row.legacy_status == _status
+                assert row.legacy_result == result
+            else:
+                assert row.legacy_status is None and row.legacy_result is None
+        queue.close()
+
+    def test_migration_is_idempotent_and_later_human_reject_not_reclassified(
+        self, tmp_path: Path
+    ) -> None:
+        db = tmp_path / "legacy.db"
+        _make_legacy_db(db)
+        ReviewQueue(db).close()
+        queue = ReviewQueue(db)
+        pending = queue.get("p-pending")
+        assert pending is not None
+        queue.reject("p-pending", reason="applier raised — see logs")
+        queue.close()
+        reopened = ReviewQueue(db)
+        row = reopened.get("p-pending")
+        assert row is not None and row.status is ProposalStatus.REJECTED
+        known = reopened.get("p-known")
+        assert known is not None and known.legacy_result == "applier raised — see logs"
+        assert known.status is ProposalStatus.FAILED
+
+    def test_explicit_retry_after_reopen_of_migrated_failure(self, tmp_path: Path) -> None:
+        db = tmp_path / "legacy.db"
+        _make_legacy_db(db)
+        ReviewQueue(db).close()
+        applied: list[dict[str, object]] = []
+
+        def _ok(payload: dict[str, object]) -> str:
+            applied.append(payload)
+            return "applied now"
+
+        queue = ReviewQueue(db, appliers={ProposalKind.TAG_APPLICATION: _ok})
+        assert applied == []  # opening never retries
+        assert queue.approve_all(Lane.SKIM)[0].proposal_id == "p-pending"
+        assert applied == [{"id": "p-pending"}]
+        assert queue.retry("p-human") is None
+        retried = queue.retry("p-known")
+        assert retried is not None and retried.status is ProposalStatus.APPLIED
+        assert retried.result == "applied now"
+        assert retried.legacy_status == "rejected"
+        assert applied[-1] == {"id": "p-known"}

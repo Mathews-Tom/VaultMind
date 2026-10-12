@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from vaultmind.errors import VaultMindError
 from vaultmind.pipeline.clustering import NoteCluster, discover_clusters
 
 if TYPE_CHECKING:
@@ -110,7 +111,10 @@ class MaturationPipeline:
         """Synthesize a permanent note from a cluster.
 
         Returns:
-            Path to the synthesized note or error message.
+            Path to the synthesized note.
+
+        Raises:
+            VaultMindError: Synthesis failed; no completion is recorded.
         """
         from vaultmind.pipeline.synthesis import synthesize_cluster
 
@@ -129,7 +133,7 @@ class MaturationPipeline:
             save_state(self._state, self._state_path)
             return result.output_path
 
-        return f"Synthesis failed: {result.error}"
+        raise VaultMindError(f"Synthesis failed: {result.error}")
 
     def mark_run(self) -> None:
         """Record that a digest was delivered."""

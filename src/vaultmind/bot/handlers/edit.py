@@ -155,18 +155,27 @@ async def handle_edit_callback(
     pending_edits: dict[int, dict[str, str]],
 ) -> None:
     """Process edit confirmation/cancellation."""
+    if not _is_authorized(ctx, callback):
+        await callback.answer("\u26d4 Unauthorized")
+        return
+
     data = callback.data or ""
+    actor_id = callback.from_user.id if callback.from_user else None
 
     if data.startswith("edit_cancel:"):
-        user_id = int(data.split(":")[1])
-        pending_edits.pop(user_id, None)
+        if actor_id is None or data.split(":", 1)[1] != str(actor_id):
+            await callback.answer("\u26d4 Not your edit")
+            return
+        pending_edits.pop(actor_id, None)
         await callback.message.edit_text("\u274c Edit discarded.")  # type: ignore[union-attr]
         await callback.answer()
         return
 
     if data.startswith("edit_confirm:"):
-        user_id = int(data.split(":")[1])
-        pending = pending_edits.pop(user_id, None)
+        if actor_id is None or data.split(":", 1)[1] != str(actor_id):
+            await callback.answer("\u26d4 Not your edit")
+            return
+        pending = pending_edits.pop(actor_id, None)
 
         if pending is None:
             await callback.message.edit_text(  # type: ignore[union-attr]

@@ -88,6 +88,18 @@ class ProposalStatus(StrEnum):
     APPLIED = "applied"
     ACKNOWLEDGED = "acknowledged"
     REJECTED = "rejected"
+    FAILED = "failed"
+
+
+#: Kinds with no mutation to execute (suggestions only); the sole kinds that may
+#: ACKNOWLEDGE without a registered applier.
+INFORMATIONAL_KINDS = frozenset(
+    {ProposalKind.CONTRADICTION_ESCALATION, ProposalKind.DUPLICATE_MERGE}
+)
+
+#: Exact result written by the pre-FAILED queue when an applier raised.
+_LEGACY_APPLIER_RAISED = "applier raised — see logs"
+_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +162,9 @@ CREATE TABLE IF NOT EXISTS review_proposals (
     created TEXT NOT NULL,
     last_seen TEXT NOT NULL,
     resolved TEXT,
-    occurrence_count INTEGER NOT NULL DEFAULT 1
+    occurrence_count INTEGER NOT NULL DEFAULT 1,
+    legacy_status TEXT,
+    legacy_result TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_review_proposals_status ON review_proposals(status);
 CREATE INDEX IF NOT EXISTS idx_review_proposals_lane ON review_proposals(lane);
@@ -187,6 +201,8 @@ class ReviewProposal:
     last_seen: datetime
     resolved: datetime | None
     occurrence_count: int
+    legacy_status: str | None = None
+    legacy_result: str | None = None
 
 
 def _row_to_proposal(row: sqlite3.Row) -> ReviewProposal:
@@ -205,6 +221,8 @@ def _row_to_proposal(row: sqlite3.Row) -> ReviewProposal:
         last_seen=datetime.fromisoformat(row["last_seen"]),
         resolved=datetime.fromisoformat(row["resolved"]) if row["resolved"] else None,
         occurrence_count=row["occurrence_count"],
+        legacy_status=row["legacy_status"],
+        legacy_result=row["legacy_result"],
     )
 
 
@@ -240,8 +258,7 @@ class ReviewQueue:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+        self._migrate()
         self._thresholds = thresholds
         self._appliers: dict[ProposalKind, Applier] = dict(appliers or {})
 
@@ -272,10 +289,9 @@ class ReviewQueue:
         """Route a mutation proposal into a lane and store it.
 
         AUTO-lane proposals with a registered applier are applied immediately.
-        A kind with no registered applier is never routed AUTO regardless of
-        confidence/impact or `lane_override` — there is nothing to apply, so
-        it is capped at SKIM (never silently escalated to BLOCK either;
-        these proposals are informational, not risk signals in themselves).
+        Without an applier, AUTO is capped at SKIM for explicit human review.
+        Only informational kinds may be acknowledged; missing mutation operations fail
+        on approval rather than pretending the mutation happened.
         """
         if lane_override is not None:
             lane, reason = lane_override, f"fixed lane for {kind.value}"
@@ -332,9 +348,10 @@ class ReviewQueue:
     # ------------------------------------------------------------------
 
     def approve(self, proposal_id: str) -> ReviewProposal | None:
-        """Approve a pending SKIM/BLOCK proposal — apply it (or acknowledge
-        it, if its kind has no applier). Returns None if not found or not
-        pending."""
+        """Apply a pending proposal, acknowledge explicit information, or record failure.
+
+        Returns None for missing or non-pending proposals; failed operations need retry().
+        """
         proposal = self.get(proposal_id)
         if proposal is None or proposal.status is not ProposalStatus.PENDING:
             return None
@@ -354,9 +371,17 @@ class ReviewQueue:
         self._conn.commit()
         return True
 
+    def retry(self, proposal_id: str) -> ReviewProposal | None:
+        """Explicitly re-run the applier of a FAILED proposal. Returns None if
+        not found or not FAILED. Never invoked automatically."""
+        proposal = self.get(proposal_id)
+        if proposal is None or proposal.status is not ProposalStatus.FAILED:
+            return None
+        return self._apply(proposal)
+
     def approve_all(self, lane: Lane = Lane.SKIM) -> list[ReviewProposal]:
         """Approve every pending proposal in `lane` — the digest/`/review`
-        "one-tap approve-all" action."""
+        "one-tap approve-all" action. FAILED rows are never included."""
         pending = self.list_pending(lane=lane)
         approved = []
         for proposal in pending:
@@ -437,20 +462,103 @@ class ReviewQueue:
         )
         self._conn.commit()
 
+    def _migrate(self) -> None:
+        """Additive, deterministic schema migration gated by `user_version`.
+
+        Adds evidence columns and recovers deterministic pre-FAILED execution
+        failures: the exact applier-raised rejection marker, a known mutation
+        acknowledged without an applier, or a known maturation failure result.
+        Possible successful synthesis paths and ambiguous history stay unchanged.
+        Original fields are preserved; opening never retries an operation.
+        """
+        fresh = (
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_proposals'"
+            ).fetchone()
+            is None
+        )
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if fresh:
+            self._conn.executescript(_SCHEMA)
+        elif version < _SCHEMA_VERSION:
+            columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(review_proposals)")}
+            with self._conn:
+                if "legacy_status" not in columns:
+                    self._conn.execute("ALTER TABLE review_proposals ADD COLUMN legacy_status TEXT")
+                if "legacy_result" not in columns:
+                    self._conn.execute("ALTER TABLE review_proposals ADD COLUMN legacy_result TEXT")
+                self._conn.execute(
+                    "UPDATE review_proposals SET legacy_status = status, legacy_result = result, "
+                    "status = ? WHERE status = ? AND result = ?",
+                    (
+                        ProposalStatus.FAILED.value,
+                        ProposalStatus.REJECTED.value,
+                        _LEGACY_APPLIER_RAISED,
+                    ),
+                )
+                mutation_kinds = tuple(
+                    kind.value for kind in ProposalKind if kind not in INFORMATIONAL_KINDS
+                )
+                placeholders = ", ".join("?" for _ in mutation_kinds)
+                self._conn.execute(
+                    "UPDATE review_proposals SET legacy_status = status, legacy_result = result, "
+                    "status = ? WHERE status = ? AND result = '' "
+                    f"AND kind IN ({placeholders})",
+                    (
+                        ProposalStatus.FAILED.value,
+                        ProposalStatus.ACKNOWLEDGED.value,
+                        *mutation_kinds,
+                    ),
+                )
+                synthesis_failures = (
+                    "Synthesis failed: No source notes found on disk",
+                    "Synthesis failed: No YAML frontmatter found",
+                )
+                synthesis_prefixes = (
+                    "Synthesis failed: YAML frontmatter parse error: ",
+                    "Synthesis failed: Unresolved wikilinks: ",
+                )
+                # Every old successful synthesis returns a path ending in .md,
+                # even when its configurable inbox begins with a failure prefix.
+                self._conn.execute(
+                    "UPDATE review_proposals SET legacy_status = status, legacy_result = result, "
+                    "status = ? WHERE kind = ? AND status = ? AND substr(result, -3) <> '.md' "
+                    "AND (result IN (?, ?) OR substr(result, 1, ?) = ? "
+                    "OR substr(result, 1, ?) = ?)",
+                    (
+                        ProposalStatus.FAILED.value,
+                        ProposalKind.MATURATION_SYNTHESIS.value,
+                        ProposalStatus.APPLIED.value,
+                        *synthesis_failures,
+                        len(synthesis_prefixes[0]),
+                        synthesis_prefixes[0],
+                        len(synthesis_prefixes[1]),
+                        synthesis_prefixes[1],
+                    ),
+                )
+            self._conn.executescript(_SCHEMA)
+        self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        self._conn.commit()
+
     def _apply(self, proposal: ReviewProposal) -> ReviewProposal:
-        """Apply (or acknowledge) a pending proposal and persist the outcome."""
+        """Apply (or acknowledge) a PENDING or FAILED proposal and persist the outcome."""
         applier = self._appliers.get(proposal.kind)
         if applier is None:
-            status, result = ProposalStatus.ACKNOWLEDGED, ""
+            if proposal.kind in INFORMATIONAL_KINDS:
+                status, result = ProposalStatus.ACKNOWLEDGED, ""
+            else:
+                status = ProposalStatus.FAILED
+                result = f"no applier registered for operation {proposal.kind.value}"
         else:
             try:
                 result = applier(proposal.payload)
                 status = ProposalStatus.APPLIED
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "Applier failed for proposal %s (%s)", proposal.proposal_id, proposal.kind
                 )
-                status, result = ProposalStatus.REJECTED, "applier raised — see logs"
+                status = ProposalStatus.FAILED
+                result = f"{type(exc).__name__}: {exc}"
 
         self._conn.execute(
             "UPDATE review_proposals SET status = ?, result = ?, resolved = ? "
@@ -539,6 +647,7 @@ def mint_duplicate_proposals(
 
 __all__ = [
     "DEFAULT_THRESHOLDS",
+    "INFORMATIONAL_KINDS",
     "Applier",
     "AutonomyThresholds",
     "FatigueStats",

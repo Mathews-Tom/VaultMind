@@ -18,6 +18,8 @@
 
 The bot starts with watch mode enabled — vault changes are indexed incrementally in the background.
 
+The configured `allowed_user_ids` rule applies to mutation callbacks as well as commands, including approve, reject, approve-all, retry, delete/edit confirmation and cancellation. An empty list continues to allow all users. Edit confirmation/cancellation additionally requires the payload owner to match the callback actor; another user's pending edit is never consumed.
+
 ## Message Routing
 
 Plain text messages are classified automatically using a heuristic-first router. No command prefix is needed for most interactions.
@@ -131,6 +133,20 @@ Every automated mutation proposal (tag suggestions, duplicate-merge candidates, 
 - **BLOCK** — sends an immediate Telegram inline-keyboard confirmation (approve/reject) and withholds application until answered
 
 Run `vaultmind learn` to see the approval-fatigue percentage — how often a proposal needed a human in the loop.
+
+CLI and bot approvals use the same tag operations: tag application merges frontmatter tags without discarding note text or existing metadata; vocabulary approval updates the existing `~/.vaultmind/data/tag_vocabulary.json` file (`{"approved": [...]}`). Note targets must pass the vault path-security boundary before writing.
+
+`vaultmind auto-tag --approve-skim` processes only pending tag-application and tag-vocabulary proposals. Other proposal kinds remain pending for their owning bot operations. The command reports actual applied, acknowledged and failed counts; a failed tag operation exits with an error rather than claiming approval.
+
+`vaultmind auto-tag --apply` reports unique proposal identities, newly applied operations, previously resolved proposals without a new mutation, failures and pending review. Several notes suggesting the same new vocabulary item do not inflate queue counts. Existing human rejection or completed application remains terminal; a repeated suggestion does not claim a fresh mutation. Operational failures exit nonzero.
+
+Only contradiction escalation and duplicate-merge suggestions are informational: approving them records `acknowledged`, not an executed merge. Mutation kinds require an actual applier. Missing operations and raised operations record `failed` with an error result, never `applied` or human `rejected`. `ReviewQueue.retry(proposal_id)` and the authorized `autonomy_retry:<proposal_id>` callback explicitly retry only failed proposals. Reopening, producer deduplication and approve-all never retry them. Applied, acknowledged and rejected proposals are terminal.
+
+### Queue migration and rollback
+
+Opening a queue upgrades a copied or live database additively: schema version 1 adds `legacy_status` and `legacy_result`. Three deterministic pre-upgrade execution failures become `failed`: old `rejected` rows whose result is exactly `applier raised — see logs`; known mutation kinds recorded as `acknowledged` with an empty result by the old missing-applier path; and `applied` maturation rows matching the old no-source, missing-frontmatter, frontmatter-parse-error or unresolved-wikilink failure messages case-sensitively, provided the result does not end in `.md`. Every successful old synthesis returns a `.md` path, including a configured inbox beginning with a failure prefix, so possible success paths remain unchanged. A failure message ending in `.md`, the old `cluster no longer available (dismissed or already synthesized)` marker, unknown results, informational acknowledgements, nonempty acknowledgements and genuine rejections remain unchanged as ambiguous history. Original status/result remain in the evidence columns; proposal IDs, payloads, results, creation/last-seen/resolution timestamps and occurrence counts remain intact. Opening the database never retries a mutation. Fixture verification does not migrate production data.
+
+Back up the queue before a separately authorized deployment migration. Retain the upgraded database and its evidence if reverting code; the old code cannot decode new `failed` statuses. Use a pre-upgrade backup for an old-code rollback rather than relabeling operational failures as human rejections. Restoring that backup omits decisions made after it, so stop queue writers and preserve both copies before recovery.
 
 ## Proactive Notifications
 

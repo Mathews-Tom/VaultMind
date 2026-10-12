@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from vaultmind.bot.handlers.utils import _is_authorized
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -91,7 +93,17 @@ async def handle_autonomy_callback(
     `SOURCE_INGESTION` proposals create a new vault note to publish an
     event for.
     """
-    from vaultmind.services.review_queue import Lane, ProposalKind, ReviewProposal, ReviewQueue
+    from vaultmind.services.review_queue import (
+        Lane,
+        ProposalKind,
+        ProposalStatus,
+        ReviewProposal,
+        ReviewQueue,
+    )
+
+    if not _is_authorized(ctx, callback):
+        await callback.answer("\u26d4 Unauthorized")
+        return
 
     data = callback.data or ""
     queue = ctx.review_queue
@@ -99,13 +111,25 @@ async def handle_autonomy_callback(
         await callback.answer()
         return
 
+    def _outcome_text(proposal: ReviewProposal) -> str:
+        suffix = f" \u2014 {proposal.result}" if proposal.result else ""
+        if proposal.status is ProposalStatus.APPLIED:
+            return f"\u2705 Applied{suffix}"
+        if proposal.status is ProposalStatus.ACKNOWLEDGED:
+            return f"\u2705 Acknowledged{suffix}"
+        if proposal.status is ProposalStatus.FAILED:
+            return f"\u26a0\ufe0f Failed{suffix}"
+        return f"Status: {proposal.status.value}{suffix}"
+
     async def _finalize_if_ingested(*proposals: ReviewProposal) -> None:
         if event_bus is None:
             return
         from vaultmind.sources.pipeline import finalize_ingested_note
 
         for proposal in proposals:
-            if proposal.kind is ProposalKind.SOURCE_INGESTION:
+            if proposal.kind is ProposalKind.SOURCE_INGESTION and (
+                proposal.status is ProposalStatus.APPLIED
+            ):
                 await finalize_ingested_note(
                     proposal,
                     parser=ctx.parser,
@@ -117,8 +141,9 @@ async def handle_autonomy_callback(
     if data == "autonomy_approve_all_skim":
         approved = queue.approve_all(lane=Lane.SKIM)
         await _finalize_if_ingested(*approved)
+        applied = sum(1 for p in approved if p.status is ProposalStatus.APPLIED)
         await callback.message.edit_text(  # type: ignore[union-attr]
-            f"\u2705 Approved {len(approved)} SKIM item(s)."
+            f"Processed {len(approved)} SKIM item(s): {applied} applied."
         )
         await callback.answer()
         return
@@ -129,9 +154,22 @@ async def handle_autonomy_callback(
         if result is None:
             text = "Already resolved or not found."
         else:
-            await _finalize_if_ingested(result)
-            suffix = f" \u2014 {result.result}" if result.result else ""
-            text = f"\u2705 Approved{suffix}"
+            if result.status is ProposalStatus.APPLIED:
+                await _finalize_if_ingested(result)
+            text = _outcome_text(result)
+        await callback.message.edit_text(text)  # type: ignore[union-attr]
+        await callback.answer()
+        return
+
+    if data.startswith("autonomy_retry:"):
+        proposal_id = data[len("autonomy_retry:") :]
+        result = queue.retry(proposal_id)
+        if result is None:
+            text = "Not failed or not found."
+        else:
+            if result.status is ProposalStatus.APPLIED:
+                await _finalize_if_ingested(result)
+            text = _outcome_text(result)
         await callback.message.edit_text(text)  # type: ignore[union-attr]
         await callback.answer()
         return

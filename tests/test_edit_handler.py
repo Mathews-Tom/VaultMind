@@ -57,9 +57,10 @@ def _fake_message() -> MagicMock:
     return message
 
 
-def _fake_callback(data: str) -> MagicMock:
+def _fake_callback(data: str, user_id: int = 7) -> MagicMock:
     callback = MagicMock()
     callback.data = data
+    callback.from_user = MagicMock(id=user_id)
     callback.message = MagicMock()
     callback.message.edit_text = AsyncMock()
     callback.answer = AsyncMock()
@@ -210,6 +211,45 @@ class TestHandleEditCallbackCancel:
 
         assert path.read_text() == original
         assert 7 not in pending_edits
+
+
+class TestHandleEditCallbackAuthorization:
+    def test_spoofed_owner_payload_leaves_pending_and_note_untouched(self, tmp_path: Path) -> None:
+        path = _write_note(tmp_path, body="Untouched.\n")
+        original = path.read_text()
+        pending_edits: dict[int, dict[str, str]] = {
+            7: {"path": "note.md", "original": "x", "edited": "y", "instruction": "z"}
+        }
+        lineage_store = LineageStore(store_path=tmp_path / "lineage.json")
+        ctx = _make_ctx(tmp_path, lineage_store=lineage_store)
+
+        from vaultmind.bot.handlers.edit import handle_edit_callback
+
+        for data in ("edit_confirm:7", "edit_cancel:7"):
+            asyncio.run(handle_edit_callback(ctx, _fake_callback(data, user_id=8), pending_edits))
+
+        assert 7 in pending_edits
+        assert path.read_text() == original
+        assert lineage_store.get_lineage("note.md") == []
+        ctx.store.index_single_note.assert_not_called()
+
+    def test_unlisted_actor_cannot_consume_own_pending_edit(self, tmp_path: Path) -> None:
+        path = _write_note(tmp_path, body="Untouched.\n")
+        original = path.read_text()
+        pending_edits: dict[int, dict[str, str]] = {
+            8: {"path": "note.md", "original": "x", "edited": "y", "instruction": "z"}
+        }
+        ctx = _make_ctx(tmp_path)
+        ctx.settings.telegram.allowed_user_ids = [7]
+
+        from vaultmind.bot.handlers.edit import handle_edit_callback
+
+        asyncio.run(
+            handle_edit_callback(ctx, _fake_callback("edit_confirm:8", user_id=8), pending_edits)
+        )
+
+        assert 8 in pending_edits
+        assert path.read_text() == original
 
 
 class TestHandleEditCallbackExpired:

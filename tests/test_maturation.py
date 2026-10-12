@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vaultmind.errors import VaultMindError
+from vaultmind.pipeline.clustering import NoteCluster
 from vaultmind.pipeline.maturation import (
     MaturationPipeline,
     MaturationState,
@@ -49,6 +51,23 @@ def pipeline(mat_config: MagicMock, tmp_path: Path) -> MaturationPipeline:
         vault_root=vault_root,
         state_path=tmp_path / "state.json",
     )
+
+
+def test_synthesis_failure_raises_without_recording_completion(
+    pipeline: MaturationPipeline,
+) -> None:
+    cluster = NoteCluster(
+        note_paths=["missing-source.md"],
+        note_titles=["Missing"],
+        top_entity="Missing source",
+        score=0.8,
+        fingerprint="missing-fingerprint",
+    )
+    before = list(pipeline._state.synthesized)
+    with pytest.raises(VaultMindError):
+        pipeline.synthesize(cluster)
+    assert pipeline._state.synthesized == before
+    assert pipeline._state.last_run == ""
 
 
 class TestMaturationState:
