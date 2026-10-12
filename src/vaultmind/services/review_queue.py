@@ -23,9 +23,10 @@ genuinely a confidence spectrum (see call sites for the specific reasoning,
 recorded in `.docs/DEVELOPMENT_PLAN_HISTORY.md`'s M7 entry).
 
 ``ReviewQueue`` itself is a plain synchronous SQLite store (mirrors
-`memory/gaps.py::GapStore`) — it never awaits anything. Callers that need to
-push a Telegram notification on a ``BLOCK``-lane proposal do so themselves,
-by inspecting the returned `ReviewProposal.lane` after `propose()` returns.
+`memory/gaps.py::GapStore`) — it never awaits anything. Network delivery of a
+Telegram approval keyboard for a newly pending ``BLOCK``-lane proposal is done
+by producers via `vaultmind.services.review_delivery.deliver_block`, called
+after `propose()` has committed and outside any SQL transaction.
 """
 
 from __future__ import annotations
@@ -414,6 +415,14 @@ class ReviewQueue:
             ).fetchall()
         return [_row_to_proposal(r) for r in rows]
 
+    def list_failed(self) -> list[ReviewProposal]:
+        """List FAILED proposals, oldest first — the explicit-retry candidates."""
+        rows = self._conn.execute(
+            "SELECT * FROM review_proposals WHERE status = ? ORDER BY created ASC",
+            (ProposalStatus.FAILED.value,),
+        ).fetchall()
+        return [_row_to_proposal(r) for r in rows]
+
     def fatigue_stats(self) -> FatigueStats:
         """Approval-fatigue snapshot across every proposal ever routed."""
         rows = self._conn.execute(
@@ -618,10 +627,10 @@ def mint_duplicate_proposals(
     `DUPLICATE_MERGE` has no registered applier — no note-merge execution
     exists anywhere in VaultMind (`/duplicates`, `scan-duplicates`, and the
     MCP `find_duplicates` tool are all read-only). Every candidate is fixed
-    at `SKIM` (never `BLOCK`): routing merge-band hits to an interrupting
-    Telegram push on every ordinary note edit would page the user for a
-    purely informational signal — a regression against the prior silent-cache
-    UX and directly counter to this milestone's own approval-fatigue goal.
+    at `SKIM` by default: routing merge-band hits to an interrupting Telegram
+    push on every ordinary note edit would page the user for a purely
+    informational signal — directly counter to the approval-fatigue goal. An
+    explicit `[autonomy].force_block` is honored and routes them to `BLOCK`.
     """
     from vaultmind.indexer.duplicate_detector import MatchType
 
@@ -639,7 +648,7 @@ def mint_duplicate_proposals(
                     f"({match.similarity:.0%} similar)"
                 ),
                 payload={"source_path": str(note.path), "match_path": match.match_path},
-                lane_override=Lane.SKIM,
+                lane_override=Lane.BLOCK if queue._thresholds.force_block else Lane.SKIM,
             )
         )
     return proposals

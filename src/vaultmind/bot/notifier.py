@@ -10,6 +10,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from vaultmind.bot.handlers.utils import _split_message
+from vaultmind.services.review_delivery import DeliveryStatus
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -54,10 +55,14 @@ class Notifier:
         text: str,
         keyboard: InlineKeyboardMarkup,
         parse_mode: str | None = "Markdown",
-    ) -> None:
-        """Send a notification with an inline keyboard attached (not split)."""
+    ) -> DeliveryStatus:
+        """Send a notification with an inline keyboard attached (not split).
+
+        Reports the real outcome: DISABLED when no chat is configured, FAILED when
+        Telegram rejects or cannot be reached (logged), SENT otherwise.
+        """
         if not self.enabled:
-            return
+            return DeliveryStatus.DISABLED
         try:
             await self._bot.send_message(
                 chat_id=self._chat_id,
@@ -67,3 +72,5 @@ class Notifier:
             )
         except Exception:
             logger.exception("Failed to send notification with keyboard")
+            return DeliveryStatus.FAILED
+        return DeliveryStatus.SENT

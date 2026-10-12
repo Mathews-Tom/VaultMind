@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1889,9 +1890,1609 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# M13 approval case: real CLI producers -> real queue -> real CommandHandlers and
+# the real registered aiogram router. Offline boundaries are labelled in the receipt.
+# ---------------------------------------------------------------------------
+APPROVAL_INSIDER, APPROVAL_PEER, APPROVAL_OUTSIDER = 7, 8, 99
+APPROVAL_CHAT = 555
+APPROVAL_WORDS = [
+    "harbor",
+    "lantern",
+    "copper",
+    "valve",
+    "winter",
+    "gale",
+    "anchor",
+    "ledger",
+    "signal",
+    "buoy",
+    "keeper",
+    "tide",
+    "chart",
+    "beacon",
+    "rigging",
+    "mast",
+    "cargo",
+    "pilot",
+    "fog",
+    "quay",
+]
+
+
+class ApprovalLLM(ScriptedLLM):
+    """Scripted llm.client boundary (provider boundary only); `reply` is set per phase."""
+
+    provider_name = "scripted-approval-acceptance"
+
+    def __init__(self) -> None:
+        self.reply = "Scripted acceptance reply."
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(
+        self,
+        messages: list[Message],
+        model: str,
+        max_tokens: int = 4096,
+        system: str | None = None,
+    ) -> LLMResponse:
+        from vaultmind.llm.client import LLMResponse
+
+        self.calls.append(
+            {
+                "messages_sha256": digest(
+                    json.dumps([{"role": m.role, "content": m.content} for m in messages]).encode()
+                ),
+                "system_sha256": digest(system.encode()) if system is not None else None,
+                "response_sha256": digest(self.reply.encode()),
+                "model": model,
+                "max_tokens": max_tokens,
+            }
+        )
+        return LLMResponse(text=self.reply, model=model, usage={})
+
+
+def approval_session() -> Any:
+    """aiogram BaseSession that records every request and never touches a network."""
+    from datetime import UTC, datetime
+
+    from aiogram.client.session.base import BaseSession
+    from aiogram.types import Chat
+    from aiogram.types import Message as TgMessage
+
+    class RecordingSession(BaseSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[dict[str, Any]] = []
+            self.fail_sends = False
+            self.counter = 1000
+
+        async def close(self) -> None:
+            return None
+
+        async def make_request(self, bot: Any, method: Any, timeout: int | None = None) -> Any:
+            name = type(method).__name__
+            data = method.model_dump(exclude_none=True)
+            self.calls.append({"method": name, "data": data})
+            if name == "SendMessage":
+                if self.fail_sends:
+                    raise RuntimeError("fake transport: send refused")
+                self.counter += 1
+                return TgMessage(
+                    message_id=self.counter,
+                    date=datetime.now(UTC),
+                    chat=Chat(id=data["chat_id"], type="private"),
+                    text=data["text"],
+                )
+            return True
+
+        async def stream_content(self, *args: Any, **kwargs: Any) -> Any:
+            raise NotImplementedError("fake transport has no file streams")
+            yield b""
+
+    return RecordingSession()
+
+
+def tg_texts(calls: list[dict[str, Any]]) -> list[str]:
+    names = ("EditMessageText", "AnswerCallbackQuery")
+    return [c["data"].get("text", "") for c in calls if c["method"] in names]
+
+
+def tg_keyboards(calls: list[dict[str, Any]]) -> list[list[str]]:
+    return [
+        [b["callback_data"] for row in c["data"]["reply_markup"]["inline_keyboard"] for b in row]
+        for c in calls
+        if c["method"] == "SendMessage" and "reply_markup" in c["data"]
+    ]
+
+
+class TelegramHarness:
+    """Feed real aiogram Updates through the router registered by `register_handlers`."""
+
+    def __init__(self, handlers: Any, session: Any, bot: Any) -> None:
+        from aiogram import Dispatcher, Router
+
+        import vaultmind.bot.telegram as telegram
+
+        self.session, self.bot, self.n = session, bot, 0
+        telegram.router = Router()  # register_handlers decorates the module-level `router`
+        telegram.register_handlers(handlers)
+        self.dp = Dispatcher()
+        self.dp.include_router(telegram.router)
+
+    async def _feed(self, raw: dict[str, Any]) -> list[dict[str, Any]]:
+        from aiogram.types import Update
+
+        self.n += 1
+        mark = len(self.session.calls)
+        update = Update.model_validate({"update_id": self.n, **raw}, context={"bot": self.bot})
+        await self.dp.feed_update(self.bot, update)
+        return self.session.calls[mark:]
+
+    async def callback(self, data: str, actor: int) -> list[dict[str, Any]]:
+        return await self._feed(
+            {
+                "callback_query": {
+                    "id": str(self.n + 1),
+                    "from": {"id": actor, "is_bot": False, "first_name": "t"},
+                    "chat_instance": "acceptance",
+                    "data": data,
+                    "message": {
+                        "message_id": 5,
+                        "date": 1700000000,
+                        "chat": {"id": actor, "type": "private"},
+                        "text": "prompt",
+                    },
+                }
+            }
+        )
+
+    async def command(self, text: str, actor: int) -> list[dict[str, Any]]:
+        return await self._feed(
+            {
+                "message": {
+                    "message_id": self.n + 10,
+                    "date": 1700000000,
+                    "chat": {"id": actor, "type": "private"},
+                    "from": {"id": actor, "is_bot": False, "first_name": "t"},
+                    "text": text,
+                    "entities": [
+                        {"type": "bot_command", "offset": 0, "length": len(text.split()[0])}
+                    ],
+                }
+            }
+        )
+
+
+APPROVAL_MERGE_COSINE = 0.85
+
+
+class ApprovalEmbedder(DeterministicEmbedder):
+    """Provider boundary: fixed synthetic vectors for the dupA/dupB/dupC fixtures (cosine 0.85)."""
+
+    def embed_query(self, text: str) -> list[float]:
+        vector = [0.0] * 1021
+        if "vectora" in text.split():
+            vector[0] = 1.0
+        elif "vectorb" in text.split():
+            vector[0] = APPROVAL_MERGE_COSINE
+            vector[1] = (1 - APPROVAL_MERGE_COSINE**2) ** 0.5
+        else:
+            return super().embed_query(text)
+        return vector
+
+
+def approval_world(
+    root: Path,
+    *,
+    force_block: bool,
+    allowed: list[int],
+    notes: dict[str, str],
+    llm: ApprovalLLM,
+    seed_queue: Any = None,
+    embedder: Any = None,
+    closers: list[Any],
+) -> SimpleNamespace:
+    """Real settings/queue (cli._build_review_queue)/store/parser/handlers over fixture state."""
+    from aiogram import Bot
+
+    import vaultmind.cli as app
+    from vaultmind.bot.commands import CommandHandlers
+    from vaultmind.bot.thinking import ThinkingPartner
+    from vaultmind.config import load_settings
+    from vaultmind.graph.evolution import LineageStore
+    from vaultmind.graph.knowledge_graph import KnowledgeGraph
+    from vaultmind.indexer.bm25 import BM25Index
+    from vaultmind.indexer.store import VaultStore
+    from vaultmind.vault.parser import VaultParser
+
+    vault, data = root / "vault", root / "data"
+    vault.mkdir(parents=True)
+    data.mkdir()
+    for rel, text in notes.items():
+        (vault / rel).write_text(text, encoding="utf-8")
+    config = root / "config.toml"
+    config.write_text(
+        'anthropic_api_key = "OFFLINE-SENTINEL-NOT-CREDENTIAL"\n'
+        f'[vault]\npath = "{vault}"\n'
+        f'[autonomy]\nforce_block = {str(force_block).lower()}\ndb_path = "{data / "review.db"}"\n'
+        f"[telegram]\nallowed_user_ids = [{', '.join(map(str, allowed))}]\n"
+        f'[chroma]\npersist_dir = "{data / "chroma"}"\n'
+        f'[graph]\npersist_path = "{data / "graph.json"}"\n'
+        f'[search]\nbm25_db_path = "{data / "fts.db"}"\n'
+        "[embedding]\ncache_enabled = false\n[llm]\ngraph_context_enabled = false\n",
+        encoding="utf-8",
+    )
+    settings = load_settings(config)
+    if seed_queue is not None:
+        seed_queue(Path(settings.autonomy.db_path))
+    initial_files = {
+        str(path.relative_to(root)): digest(path.read_bytes())
+        for path in [config, *sorted(vault.rglob("*.md"))]
+    }
+    seed_db = Path(settings.autonomy.db_path)
+    input_identity = {
+        "files_sha256": initial_files,
+        "effective_config_sha256": approval_json_digest(settings.model_dump(mode="json")),
+        "seed_queue_db_sha256": digest(seed_db.read_bytes()) if seed_db.exists() else None,
+    }
+    queue = app._build_review_queue(settings)
+    bm25 = BM25Index(data / "fts.db")
+    store = VaultStore(settings.chroma, embedder or DeterministicEmbedder(), bm25=bm25)
+    parser = VaultParser(settings.vault)
+    graph = KnowledgeGraph(settings.graph)
+    lineage = LineageStore(data / "lineage.json")
+    session = approval_session()
+    bot = Bot("123456:OFFLINE-ACCEPTANCE", session=session)
+    thinking = ThinkingPartner(settings.llm, settings.telegram, llm)
+    handlers = CommandHandlers(
+        settings,
+        store,
+        graph,
+        parser,
+        thinking,
+        llm,
+        review_queue=queue,
+        lineage_store=lineage,
+    )
+    closers += [queue.close, bm25.close]
+    return SimpleNamespace(
+        root=root,
+        vault=vault,
+        data=data,
+        config=config,
+        settings=settings,
+        input_identity=input_identity,
+        queue=queue,
+        store=store,
+        parser=parser,
+        graph=graph,
+        lineage=lineage,
+        llm=llm,
+        session=session,
+        bot=bot,
+        handlers=handlers,
+        harness=TelegramHarness(handlers, session, bot),
+    )
+
+
+def approval_json_digest(value: Any) -> str:
+    return digest(json.dumps(value, sort_keys=True, default=str).encode())
+
+
+def approval_observe(world: SimpleNamespace, home_data: Path) -> dict[str, Any]:
+    """Queue rows (raw SQLite), every vault/vocabulary/lineage byte+mtime, pending edits."""
+    import sqlite3
+
+    files: dict[str, Any] = {}
+    paths = sorted(world.vault.rglob("*.md"))
+    paths += [home_data / "tag_vocabulary.json", world.data / "lineage.json"]
+    for path in paths:
+        if path.exists():
+            files[str(path)] = (digest(path.read_bytes()), path.stat().st_mtime_ns)
+    with sqlite3.connect(f"file:{world.settings.autonomy.db_path}?mode=ro", uri=True) as conn:
+        rows = conn.execute("SELECT * FROM review_proposals ORDER BY proposal_id").fetchall()
+    pending = {k: dict(v) for k, v in world.handlers._pending_edits.items()}
+    return {"queue": rows, "files": files, "pending_edits": pending}
+
+
+def approval_git_binding() -> dict[str, Any]:
+    def git(*argv: str) -> str | None:
+        done = subprocess.run(["git", "-C", str(ROOT), *argv], capture_output=True, text=True)
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    refs: dict[str, Any] = {}
+    for ref in ("fix/vm-m13-review-appliers", "origin/main", "main"):
+        commit = git("rev-parse", "--verify", "--quiet", ref)
+        if commit:
+            refs[ref] = {"commit": commit, "merge_base_with_head": git("merge-base", "HEAD", ref)}
+    return {
+        "head": git("rev-parse", "HEAD"),
+        "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "parents": (git("rev-list", "--parents", "-n1", "HEAD") or "").split()[1:],
+        "tree": git("rev-parse", "HEAD^{tree}"),
+        "reference_commits": refs,
+    }
+
+
+def approval_legacy_schema() -> tuple[str, str]:
+    """The newest committed review_proposals schema that predates the legacy_* columns."""
+    path = "src/vaultmind/services/review_queue.py"
+    log = subprocess.check_output(
+        ["git", "-C", str(ROOT), "log", "--format=%H", "--", path], text=True
+    ).split()
+    for commit in log:
+        source = subprocess.check_output(
+            ["git", "-C", str(ROOT), "show", f"{commit}:{path}"], text=True
+        )
+        match = re.search(r'_SCHEMA = """(.*?)"""', source, re.S)
+        if match and "legacy_status" not in match.group(1):
+            return commit, match.group(1)
+    raise RuntimeError("no committed legacy review_proposals schema found in git history")
+
+
+def approval_note(title: str, body: str, **meta: str) -> str:
+    front = "".join(f"{k}: {v}\n" for k, v in meta.items())
+    return f"---\ntitle: {title}\n{front}---\n{body}\n"
+
+
+async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
+    import logging
+    import stat
+
+    home = home.resolve()
+    failures: list[str] = []
+
+    def json_value(value: Any) -> Any:
+        if isinstance(value, bytes):
+            return {"bytes_hex": value.hex()}
+        if isinstance(value, dict):
+            return {key: json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [json_value(item) for item in value]
+        if isinstance(value, set):
+            return [json_value(item) for item in sorted(value, key=repr)]
+        return value
+
+    def ck(name: str, expected: Any, actual: Any) -> None:
+        checks.append({"id": name, "expected": json_value(expected), "actual": json_value(actual)})
+        if expected != actual:
+            failures.append(name)
+
+    config_preloaded = "vaultmind.config" in sys.modules
+    ck("sanitization.config-not-imported-before-temp-home", False, config_preloaded)
+    if config_preloaded:
+        raise RuntimeError("Refusing approval acceptance: configuration predates temporary HOME")
+    import frontmatter
+    from click.testing import CliRunner
+
+    import vaultmind
+    import vaultmind.cli as app
+    import vaultmind.sources.connectors  # noqa: F401  (registers the closed rss/youtube/github set)
+    from vaultmind.bot.handlers.autonomy import build_block_notifier, callback_data
+    from vaultmind.bot.notifier import Notifier
+    from vaultmind.config import VAULTMIND_HOME
+    from vaultmind.contradiction.detector import ContradictionDetector
+    from vaultmind.contradiction.policy import resolve_conflict
+    from vaultmind.indexer.duplicate_detector import DuplicateDetector
+    from vaultmind.memory.gaps import GapStore
+    from vaultmind.pipeline.maturation import MaturationPipeline
+    from vaultmind.services.review_delivery import DeliveryStatus, deliver_block
+    from vaultmind.services.review_queue import (
+        AutonomyThresholds,
+        Impact,
+        Lane,
+        ProposalKind,
+        ProposalStatus,
+        ReviewQueue,
+    )
+    from vaultmind.sources.models import SourceInstance
+    from vaultmind.sources.pipeline import make_applier, run_connector_once
+    from vaultmind.sources.store import SourceStore
+    from vaultmind.vault.events import NoteCreatedEvent, VaultEventBus
+
+    vm_data = VAULTMIND_HOME / "data"
+    configured_home = VAULTMIND_HOME.resolve()
+    ck("sanitization.vaultmind-home-is-temp", str(home / ".vaultmind"), str(configured_home))
+    if configured_home != home / ".vaultmind":
+        raise RuntimeError(
+            "Refusing approval acceptance: application state is outside fixture HOME"
+        )
+    log_records: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            log_records.append(f"{record.levelname} {record.name}: {record.getMessage()}")
+
+    capture = Capture()
+    root_logger = logging.getLogger()
+    old_level = root_logger.level
+    root_logger.addHandler(capture)
+    root_logger.setLevel(logging.INFO)
+    closers: list[Any] = []
+    probes: list[str] = []
+    llm = ApprovalLLM()
+    delivery: dict[str, str] = {}
+    try:
+        # ---- 1. CLI-created BLOCK proposals (tags) ---------------------------------
+        body = "Synthetic harbor inspection text preserved through approval. " * 4
+        vm_data.mkdir(parents=True)
+        (vm_data / "tag_vocabulary.json").write_text(json.dumps({"approved": ["known"]}))
+        seed_vocabulary_sha256 = digest((vm_data / "tag_vocabulary.json").read_bytes())
+        w = approval_world(
+            home / "w",
+            force_block=True,
+            allowed=[APPROVAL_INSIDER, APPROVAL_PEER],
+            notes={"tagged.md": approval_note("Tagged", body, tags="[original]")},
+            llm=llm,
+            closers=closers,
+        )
+        queue, session, harness = w.queue, w.session, w.harness
+        llm.reply = json.dumps({"tags": ["known"], "new_tags": ["approved-new"]})
+        from unittest.mock import patch
+
+        with patch.object(app, "_create_llm_client", return_value=llm):  # offline provider boundary
+            cli = await asyncio.to_thread(
+                CliRunner().invoke, app.cli, ["--config", str(w.config), "auto-tag", "--apply"]
+            )
+        ck("cli.auto-tag-exit-code", 0, cli.exit_code)
+        ck("cli.auto-tag-no-exception", None, repr(cli.exception) if cli.exception else None)
+        pending = {p.kind: p for p in queue.list_pending()}
+        ck(
+            "cli.created-kinds",
+            sorted([ProposalKind.TAG_APPLICATION.value, ProposalKind.TAG_VOCABULARY.value]),
+            sorted(k.value for k in pending),
+        )
+        ck(
+            "cli.created-lanes-forced-block",
+            ["BLOCK", "BLOCK"],
+            sorted(p.lane.name for p in pending.values()),
+        )
+        ck(
+            "cli.delivery-reported-unavailable-not-silent",
+            True,
+            "unavailable" in (cli.output + "\n".join(log_records)).lower(),
+        )
+        p_app, p_voc = pending[ProposalKind.TAG_APPLICATION], pending[ProposalKind.TAG_VOCABULARY]
+        note = w.vault / "tagged.md"
+        ck("cli.nothing-applied-while-pending", ["original"], frontmatter.load(note)["tags"])
+        approve = lambda p: callback_data("approve", p.proposal_id)  # noqa: E731
+        reject = lambda p: callback_data("reject", p.proposal_id)  # noqa: E731
+        retry = lambda p: callback_data("retry", p.proposal_id)  # noqa: E731
+
+        # ---- 2. unauthorized actor: no read/state/byte mutation ---------------------
+        pre = approval_observe(w, vm_data)
+        for label, data in (
+            ("approve", approve(p_app)),
+            ("reject", reject(p_app)),
+            ("retry", retry(p_app)),
+            ("approve-all", "autonomy_approve_all_skim"),
+        ):
+            calls = await harness.callback(data, APPROVAL_OUTSIDER)
+            ck(
+                f"auth.outsider-{label}-answered-unauthorized",
+                True,
+                any("Unauthorized" in t for t in tg_texts(calls)),
+            )
+            ck(
+                f"auth.outsider-{label}-no-message-edit",
+                [],
+                [c for c in calls if c["method"] == "EditMessageText"],
+            )
+        ck(
+            "auth.outsider-autonomy-no-state-or-byte-change",
+            approval_json_digest(pre),
+            approval_json_digest(approval_observe(w, vm_data)),
+        )
+
+        # ---- 3. generic keyboard delivery + approval from the keyboard --------------
+        block_notifier = build_block_notifier(Notifier(w.bot, APPROVAL_CHAT))
+        mark = len(session.calls)
+        for p in (p_app, p_voc):
+            status = await deliver_block(queue.get(p.proposal_id), block_notifier)
+            delivery[f"cli-created:{p.kind.value}"] = status.value
+            ck(f"delivery.cli-created-{p.kind.value}-sent", DeliveryStatus.SENT.value, status.value)
+        keyboards = tg_keyboards(session.calls[mark:])
+        ck("delivery.one-keyboard-per-proposal", 2, len(keyboards))
+        ck(
+            "delivery.keyboard-buttons-are-bounded-approve-reject",
+            sorted([[approve(p), reject(p)] for p in (p_app, p_voc)]),
+            sorted(keyboards),
+        )
+        ck(
+            "delivery.callback-data-within-telegram-limit",
+            True,
+            all(len(c.encode()) <= 64 for k in keyboards for c in k),
+        )
+        ck(
+            "delivery.sending-leaves-pending",
+            ["pending", "pending"],
+            [queue.get(p.proposal_id).status.value for p in (p_app, p_voc)],
+        )
+        mark = len(session.calls)
+        for p in (p_app, p_voc):
+            replay = queue.propose(p.kind, p.confidence, p.impact, p.summary, p.payload)
+            ck(
+                f"delivery.dedup-{p.kind.value}-not-required",
+                DeliveryStatus.NOT_REQUIRED.value,
+                (await deliver_block(replay, block_notifier)).value,
+            )
+            ck(f"delivery.dedup-{p.kind.value}-occurrence", 2, replay.occurrence_count)
+        ck("delivery.dedup-sent-nothing", 0, len(session.calls) - mark)
+
+        for p in (p_app, p_voc):
+            calls = await harness.callback(approve(p), APPROVAL_INSIDER)
+            ck(f"approve.{p.kind.value}-applied", "applied", queue.get(p.proposal_id).status.value)
+            ck(
+                f"approve.{p.kind.value}-reported-applied",
+                True,
+                any("Applied" in t for t in tg_texts(calls)),
+            )
+        post = frontmatter.load(note)
+        ck("approve.frontmatter-tags-merged", ["original", "known"], post["tags"])
+        ck("approve.note-body-preserved", body.strip(), post.content)
+        ck("approve.parser-sees-tags", True, "known" in w.parser.parse_file(note).tags)
+        ck(
+            "approve.vocabulary-file",
+            {"approved": ["approved-new", "known"]},
+            json.loads((vm_data / "tag_vocabulary.json").read_text()),
+        )
+        pre = approval_observe(w, vm_data)
+        for label, fn in (("approve", approve), ("reject", reject), ("retry", retry)):
+            for p in (p_app, p_voc):
+                calls = await harness.callback(fn(p), APPROVAL_INSIDER)
+                ck(
+                    f"replay.{label}-{p.kind.value}-terminal-text",
+                    True,
+                    any("Already resolved" in t or "Not failed" in t for t in tg_texts(calls)),
+                )
+        ck(
+            "replay.terminal-no-file-write-or-state-change",
+            approval_json_digest(pre),
+            approval_json_digest(approval_observe(w, vm_data)),
+        )
+
+        # ---- 4. human reject; disabled/unavailable/failed delivery -------------------
+        def block_proposal(tag: str) -> Any:
+            return queue.propose(
+                ProposalKind.TAG_VOCABULARY, 0.1, Impact.HIGH, f"vocab {tag}", {"tag": tag}
+            )
+
+        rejected = block_proposal("rejected-tag")
+        ck(
+            "reject.proposal-newly-pending-block",
+            ["pending", "BLOCK", 1],
+            [rejected.status.value, rejected.lane.name, rejected.occurrence_count],
+        )
+        await deliver_block(rejected, block_notifier)
+        pre_vocab = (vm_data / "tag_vocabulary.json").read_bytes()
+        calls = await harness.callback(reject(rejected), APPROVAL_PEER)
+        ck("reject.human-rejected-status", "rejected", queue.get(rejected.proposal_id).status.value)
+        ck("reject.vocabulary-untouched", pre_vocab, (vm_data / "tag_vocabulary.json").read_bytes())
+        calls = await harness.callback(approve(rejected), APPROVAL_INSIDER)
+        ck(
+            "reject.later-approve-refused",
+            ["rejected", True],
+            [
+                queue.get(rejected.proposal_id).status.value,
+                any("Already resolved" in t for t in tg_texts(calls)),
+            ],
+        )
+
+        mark = len(session.calls)
+        disabled = await deliver_block(
+            block_proposal("disabled-tag"), build_block_notifier(Notifier(w.bot, 0))
+        )
+        ck(
+            "delivery.disabled-status-no-request",
+            [DeliveryStatus.DISABLED.value, 0],
+            [disabled.value, len(session.calls) - mark],
+        )
+        unavailable = await deliver_block(block_proposal("unavailable-tag"), None)
+        ck("delivery.unavailable-status", DeliveryStatus.UNAVAILABLE.value, unavailable.value)
+        session.fail_sends = True
+        failed_p = block_proposal("failed-tag")
+        mark = len(session.calls)
+        failed = await deliver_block(failed_p, block_notifier)
+        session.fail_sends = False
+        ck(
+            "delivery.transport-failure-status-attempted-once",
+            [DeliveryStatus.FAILED.value, 1],
+            [failed.value, len(session.calls) - mark],
+        )
+        ck(
+            "delivery.failed-delivery-leaves-pending",
+            "pending",
+            queue.get(failed_p.proposal_id).status.value,
+        )
+        delivery.update(disabled=disabled.value, unavailable=unavailable.value, failed=failed.value)
+        skim = queue.propose(
+            ProposalKind.TAG_VOCABULARY,
+            0.6,
+            Impact.MEDIUM,
+            "skim",
+            {"tag": "skim-lane"},
+            lane_override=Lane.SKIM,
+        )
+        ck(
+            "delivery.skim-not-required",
+            DeliveryStatus.NOT_REQUIRED.value,
+            (await deliver_block(skim, block_notifier)).value,
+        )
+        ck(
+            "delivery.terminal-not-required",
+            DeliveryStatus.NOT_REQUIRED.value,
+            (await deliver_block(queue.get(p_app.proposal_id), block_notifier)).value,
+        )
+        for tag in ("disabled-tag", "unavailable-tag", "failed-tag", "skim-lane"):
+            queue.reject(
+                queue.propose(
+                    ProposalKind.TAG_VOCABULARY, 0.1, Impact.HIGH, "x", {"tag": tag}
+                ).proposal_id,
+                "cleanup",
+            )
+
+        # ---- 5. raised real operations: missing note + real filesystem fault ---------
+        def tag_task(path: str, tags: list[str]) -> Any:
+            return queue.propose(
+                ProposalKind.TAG_APPLICATION,
+                0.1,
+                Impact.HIGH,
+                f"tag {path}",
+                {"note_path": path, "tags": tags},
+            )
+
+        missing = tag_task("restorable.md", ["restored"])
+        calls = await harness.callback(approve(missing), APPROVAL_INSIDER)
+        got = queue.get(missing.proposal_id)
+        probes.append("missing-note-real-applier-raises")
+        ck("fault.missing-note-failed-not-applied", "failed", got.status.value)
+        ck(
+            "fault.missing-note-result-recorded-and-not-success",
+            [True, False],
+            [bool(got.result), got.status is ProposalStatus.APPLIED],
+        )
+        ck("fault.missing-note-reported-failed", True, any("Failed" in t for t in tg_texts(calls)))
+        calls = await harness.callback(approve(missing), APPROVAL_INSIDER)
+        ck(
+            "fault.approve-on-failed-never-retries",
+            "failed",
+            queue.get(missing.proposal_id).status.value,
+        )
+        (w.vault / "restorable.md").write_text(approval_note("Restorable", body), encoding="utf-8")
+        pre = approval_observe(w, vm_data)
+        await harness.callback(retry(missing), APPROVAL_OUTSIDER)
+        ck(
+            "fault.outsider-retry-no-change",
+            approval_json_digest(pre),
+            approval_json_digest(approval_observe(w, vm_data)),
+        )
+        await harness.callback(retry(missing), APPROVAL_INSIDER)
+        ck(
+            "fault.explicit-retry-after-restore-applied",
+            ["applied", ["restored"]],
+            [
+                queue.get(missing.proposal_id).status.value,
+                frontmatter.load(w.vault / "restorable.md")["tags"],
+            ],
+        )
+
+        locked = w.vault / "locked.md"
+        locked.write_text(approval_note("Locked", body, tags="[orig]"), encoding="utf-8")
+        before = locked.read_bytes()
+        locked.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        ck("fault.filesystem-permission-actually-enforced", False, os.access(locked, os.W_OK))
+        fault = tag_task("locked.md", ["unlocked"])
+        await harness.callback(approve(fault), APPROVAL_INSIDER)
+        probes.append("filesystem-permission-denied-real-open")
+        got = queue.get(fault.proposal_id)
+        ck("fault.filesystem-failed", ["failed", True], [got.status.value, bool(got.result)])
+        ck("fault.filesystem-bytes-untouched", before, locked.read_bytes())
+        locked.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+        await harness.callback(retry(fault), APPROVAL_INSIDER)
+        ck(
+            "fault.filesystem-explicit-retry-applied",
+            ["applied", ["orig", "unlocked"]],
+            [queue.get(fault.proposal_id).status.value, frontmatter.load(locked)["tags"]],
+        )
+
+        # ---- 6. missing operations + informational kinds (bare queue) ----------------
+        bare_session = approval_session()
+        from aiogram import Bot as TgBot
+
+        bare_bot = TgBot("123456:OFFLINE-ACCEPTANCE", session=bare_session)
+        bare = ReviewQueue(w.data / "bare.db", AutonomyThresholds(force_block=True))
+        closers.append(bare.close)
+        import vaultmind.bot.commands as commands_mod
+
+        bare_handlers = commands_mod.CommandHandlers(
+            w.settings, w.store, w.graph, w.parser, w.handlers._ctx.thinking, llm, review_queue=bare
+        )
+        bare_harness = TelegramHarness(bare_handlers, bare_session, bare_bot)
+        mutation_kinds = [
+            ProposalKind.TAG_APPLICATION,
+            ProposalKind.TAG_VOCABULARY,
+            ProposalKind.CONTRADICTION_RESOLUTION,
+            ProposalKind.MATURATION_SYNTHESIS,
+            ProposalKind.SOURCE_INGESTION,
+        ]
+        for kind in mutation_kinds:
+            p = bare.propose(kind, 0.1, Impact.HIGH, f"bare {kind.value}", {"bare": kind.value})
+            calls = await bare_harness.callback(
+                callback_data("approve", p.proposal_id), APPROVAL_INSIDER
+            )
+            got = bare.get(p.proposal_id)
+            ck(
+                f"missing-operation.{kind.value}-failed",
+                True,
+                got.status is ProposalStatus.FAILED and bool(got.result),
+            )
+            ck(
+                f"missing-operation.{kind.value}-not-reported-applied",
+                True,
+                any("Failed" in t for t in tg_texts(calls))
+                and not any("Applied" in t for t in tg_texts(calls)),
+            )
+            await bare_harness.callback(callback_data("retry", p.proposal_id), APPROVAL_INSIDER)
+            ck(
+                f"missing-operation.{kind.value}-retry-still-failed",
+                "failed",
+                bare.get(p.proposal_id).status.value,
+            )
+        for kind in (ProposalKind.CONTRADICTION_ESCALATION, ProposalKind.DUPLICATE_MERGE):
+            p = bare.propose(kind, 0.1, Impact.HIGH, f"info {kind.value}", {"info": kind.value})
+            calls = await bare_harness.callback(
+                callback_data("approve", p.proposal_id), APPROVAL_INSIDER
+            )
+            ck(
+                f"informational.{kind.value}-acknowledged-explicitly",
+                [True, "acknowledged"],
+                [
+                    any("Acknowledged" in t for t in tg_texts(calls)),
+                    bare.get(p.proposal_id).status.value,
+                ],
+            )
+
+        # ---- 7. truthful mixed approve-all -------------------------------------------
+        (w.vault / "bulk.md").write_text(approval_note("Bulk", body), encoding="utf-8")
+        mixed = {
+            "applied": queue.propose(
+                ProposalKind.TAG_APPLICATION,
+                0.6,
+                Impact.MEDIUM,
+                "bulk ok",
+                {"note_path": "bulk.md", "tags": ["bulk-tag"]},
+                lane_override=Lane.SKIM,
+            ),
+            "raises": queue.propose(
+                ProposalKind.TAG_APPLICATION,
+                0.6,
+                Impact.MEDIUM,
+                "bulk gone",
+                {"note_path": "gone.md", "tags": ["x"]},
+                lane_override=Lane.SKIM,
+            ),
+            "info": queue.propose(
+                ProposalKind.DUPLICATE_MERGE,
+                0.8,
+                Impact.MEDIUM,
+                "bulk dup",
+                {"source_path": "a.md", "match_path": "b.md"},
+                lane_override=Lane.SKIM,
+            ),
+            "no-operation": queue.propose(
+                ProposalKind.SOURCE_INGESTION,
+                0.6,
+                Impact.MEDIUM,
+                "bulk src",
+                {"item_id": "i"},
+                lane_override=Lane.SKIM,
+            ),
+        }
+
+        def reported_counts(calls: list[dict[str, Any]]) -> list[int] | None:
+            match = re.search(
+                r"(\d+) applied, (\d+) acknowledged.*?(\d+) failed",
+                "\n".join(tg_texts(calls)),
+            )
+            return [int(count) for count in match.groups()] if match else None
+
+        pre = approval_observe(w, vm_data)
+        await harness.callback("autonomy_approve_all_skim", APPROVAL_OUTSIDER)
+        ck(
+            "approve-all.outsider-no-change",
+            approval_json_digest(pre),
+            approval_json_digest(approval_observe(w, vm_data)),
+        )
+        calls = await harness.callback("autonomy_approve_all_skim", APPROVAL_INSIDER)
+        ck("approve-all.reported-outcome-counts", [1, 1, 2], reported_counts(calls))
+        ck(
+            "approve-all.per-proposal-states",
+            {
+                "applied": "applied",
+                "raises": "failed",
+                "info": "acknowledged",
+                "no-operation": "failed",
+            },
+            {k: queue.get(v.proposal_id).status.value for k, v in mixed.items()},
+        )
+        ck("approve-all.real-mutation", ["bulk-tag"], frontmatter.load(w.vault / "bulk.md")["tags"])
+        pre = approval_observe(w, vm_data)
+        calls = await harness.callback("autonomy_approve_all_skim", APPROVAL_INSIDER)
+        ck(
+            "approve-all.never-retries-failed",
+            [[0, 0, 0], approval_json_digest(pre)],
+            [reported_counts(calls), approval_json_digest(approval_observe(w, vm_data))],
+        )
+
+        # ---- 8. /edit: owner spoof, auth, confirm/cancel, lineage, index -------------
+        edit_body = "quartz gauge calibration drifted past tolerance " * 4
+        (w.vault / "editme.md").write_text(approval_note("Edit me", edit_body), encoding="utf-8")
+        (w.vault / "deleteme.md").write_text(
+            approval_note("Delete me", "obsolete scaffold manifest listing " * 6), encoding="utf-8"
+        )
+        w.store.index_notes(w.parser.iter_notes(), w.parser)
+        llm.reply = "pressure vessel recertification completed on schedule " * 3
+        calls = await harness.command(
+            "/edit editme.md rewrite about recertification", APPROVAL_PEER
+        )
+        edit_keyboards = tg_keyboards(calls)
+        ck(
+            "edit.keyboard-owner-bound",
+            [[f"edit_confirm:{APPROVAL_PEER}", f"edit_cancel:{APPROVAL_PEER}"]],
+            edit_keyboards,
+        )
+        ck("edit.pending-owned-by-requester", [APPROVAL_PEER], list(w.handlers._pending_edits))
+        edited_before = (w.vault / "editme.md").read_bytes()
+        pre = approval_observe(w, vm_data)
+        for who, data, label in (
+            (APPROVAL_OUTSIDER, f"edit_confirm:{APPROVAL_PEER}", "outsider-confirm"),
+            (APPROVAL_OUTSIDER, f"edit_cancel:{APPROVAL_PEER}", "outsider-cancel"),
+            (APPROVAL_INSIDER, f"edit_confirm:{APPROVAL_PEER}", "spoof-confirm"),
+            (APPROVAL_INSIDER, f"edit_cancel:{APPROVAL_PEER}", "spoof-cancel"),
+        ):
+            calls = await harness.callback(data, who)
+            ck(
+                f"edit.{label}-refused",
+                True,
+                any("Unauthorized" in t or "Not your edit" in t for t in tg_texts(calls)),
+            )
+            ck(
+                f"edit.{label}-no-message-edit",
+                [],
+                [c for c in calls if c["method"] == "EditMessageText"],
+            )
+        ck(
+            "edit.spoof-and-outsider-leave-pending-and-bytes",
+            approval_json_digest(pre),
+            approval_json_digest(approval_observe(w, vm_data)),
+        )
+        calls = await harness.callback(f"edit_confirm:{APPROVAL_PEER}", APPROVAL_PEER)
+        text = (w.vault / "editme.md").read_text(encoding="utf-8")
+        ck(
+            "edit.owner-confirm-new-body-above-callout-prior-preserved",
+            [True, True, True],
+            [llm.reply.strip() in text, "[!superseded]" in text, edit_body.strip() in text],
+        )
+        ck("edit.owner-confirm-consumes-pending", {}, w.handlers._pending_edits)
+        ck(
+            "edit.lineage-recorded-once",
+            ["edited"],
+            [e.event for e in w.lineage.get_lineage("editme.md")],
+        )
+        hits = w.store.search("pressure vessel recertification", n_results=3)
+        ck(
+            "edit.reindexed-chroma-search",
+            "editme.md",
+            hits[0]["metadata"]["note_path"] if hits else None,
+        )
+        pre = approval_observe(w, vm_data)
+        await harness.callback(f"edit_confirm:{APPROVAL_PEER}", APPROVAL_PEER)
+        ck(
+            "edit.replay-confirm-no-write",
+            approval_json_digest(pre),
+            approval_json_digest(approval_observe(w, vm_data)),
+        )
+        await harness.command("/edit editme.md second pass", APPROVAL_PEER)
+        pre_cancel = (w.vault / "editme.md").read_bytes()
+        await harness.callback(f"edit_cancel:{APPROVAL_PEER}", APPROVAL_PEER)
+        ck(
+            "edit.owner-cancel-discards-pending-no-write",
+            [{}, pre_cancel],
+            [w.handlers._pending_edits, (w.vault / "editme.md").read_bytes()],
+        )
+        ck("edit.baseline-bytes-before-confirm-were-original", True, edited_before != pre_cancel)
+
+        # ---- 9. /delete: auth, cancel, soft-delete, lineage, index, replay -----------
+        calls = await harness.command("/delete deleteme.md", APPROVAL_OUTSIDER)
+        ck("delete.outsider-command-silent", [], calls)
+        calls = await harness.command("/delete deleteme.md", APPROVAL_INSIDER)
+        delete_kb = tg_keyboards(calls)
+        ck("delete.keyboard", [["delete_confirm:deleteme.md", "delete_cancel"]], delete_kb)
+        pre = approval_observe(w, vm_data)
+        calls = await harness.callback("delete_confirm:deleteme.md", APPROVAL_OUTSIDER)
+        ck(
+            "delete.outsider-confirm-refused-no-change",
+            [True, approval_json_digest(pre)],
+            [
+                any("Unauthorized" in t for t in tg_texts(calls)),
+                approval_json_digest(approval_observe(w, vm_data)),
+            ],
+        )
+        calls = await harness.callback("delete_cancel", APPROVAL_OUTSIDER)
+        ck(
+            "delete.outsider-cancel-refused-no-change",
+            [True, [], approval_json_digest(pre)],
+            [
+                any("Unauthorized" in t for t in tg_texts(calls)),
+                [c for c in calls if c["method"] == "EditMessageText"],
+                approval_json_digest(approval_observe(w, vm_data)),
+            ],
+        )
+        await harness.callback("delete_cancel", APPROVAL_INSIDER)
+        ck(
+            "delete.cancel-no-change",
+            approval_json_digest(pre),
+            approval_json_digest(approval_observe(w, vm_data)),
+        )
+        original_delete = (w.vault / "deleteme.md").read_text(encoding="utf-8")
+        await harness.callback("delete_confirm:deleteme.md", APPROVAL_INSIDER)
+        marked = (w.vault / "deleteme.md").read_text(encoding="utf-8")
+        ck(
+            "delete.soft-delete-callout-and-original-preserved",
+            [True, True],
+            ["[!superseded]" in marked, original_delete.split("---\n", 2)[2].strip() in marked],
+        )
+        gone = w.store.search("obsolete scaffold manifest listing", n_results=5)
+        ck(
+            "delete.removed-from-vector-index",
+            False,
+            any(h["metadata"]["note_path"] == "deleteme.md" for h in gone),
+        )
+        ck(
+            "delete.lineage-recorded",
+            ["deleted"],
+            [e.event for e in w.lineage.get_lineage("deleteme.md")],
+        )
+        pre = approval_observe(w, vm_data)
+        await harness.callback("delete_confirm:deleteme.md", APPROVAL_INSIDER)
+        ck(
+            "delete.replay-no-write",
+            approval_json_digest(pre),
+            approval_json_digest(approval_observe(w, vm_data)),
+        )
+
+        # ---- 10. legacy schema migration, reopen, no automatic retry -----------------
+        legacy_commit, legacy_schema = approval_legacy_schema()
+        legacy_vault_note = "legacy-fail.md"
+        statuses = ProposalStatus
+        legacy_rows = [
+            (
+                "legacy-pending",
+                ProposalKind.TAG_APPLICATION,
+                "BLOCK",
+                statuses.PENDING,
+                "",
+                {"note_path": "legacy-pending.md", "tags": ["lp"]},
+            ),
+            (
+                "legacy-applied",
+                ProposalKind.TAG_VOCABULARY,
+                "SKIM",
+                statuses.APPLIED,
+                "'legacy-applied' added to vocabulary",
+                {"tag": "legacy-applied"},
+            ),
+            (
+                "legacy-ack",
+                ProposalKind.DUPLICATE_MERGE,
+                "SKIM",
+                statuses.ACKNOWLEDGED,
+                "",
+                {"source_path": "a.md", "match_path": "b.md"},
+            ),
+            (
+                "legacy-human-reject",
+                ProposalKind.TAG_VOCABULARY,
+                "BLOCK",
+                statuses.REJECTED,
+                "not wanted",
+                {"tag": "legacy-human-reject"},
+            ),
+            (
+                "legacy-known-failure",
+                ProposalKind.TAG_APPLICATION,
+                "BLOCK",
+                statuses.REJECTED,
+                "applier raised — see logs",
+                {"note_path": legacy_vault_note, "tags": ["lf"]},
+            ),
+            (
+                "legacy-ambiguous-1",
+                ProposalKind.TAG_VOCABULARY,
+                "BLOCK",
+                statuses.REJECTED,
+                "applier raised",
+                {"tag": "legacy-ambiguous-1"},
+            ),
+            (
+                "legacy-ambiguous-2",
+                ProposalKind.TAG_VOCABULARY,
+                "BLOCK",
+                statuses.REJECTED,
+                "",
+                {"tag": "legacy-ambiguous-2"},
+            ),
+        ]
+        columns = (
+            "proposal_id,kind,lane,lane_reason,confidence,impact,summary,payload,"
+            "status,result,created,last_seen,resolved,occurrence_count"
+        )
+        base_cols = columns.split(",")
+        lid = {row[0]: digest(row[0].encode()) for row in legacy_rows}
+        raw_before: dict[str, dict[str, Any]] = {}
+
+        def seed(db_path: Path) -> None:
+            import sqlite3
+
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(legacy_schema)
+                for i, (pid, kind, lane, status, result, payload) in enumerate(legacy_rows):
+                    resolved = None if status is statuses.PENDING else f"2026-01-02T00:00:0{i}"
+                    conn.execute(
+                        f"INSERT INTO review_proposals ({columns}) VALUES ({','.join('?' * 14)})",
+                        (
+                            lid[pid],
+                            kind.value,
+                            lane,
+                            "legacy fixture",
+                            0.5,
+                            "medium",
+                            f"summary {pid}",
+                            json.dumps(payload, sort_keys=True),
+                            status.value,
+                            result,
+                            f"2026-01-01T00:00:0{i}",
+                            f"2026-01-01T01:00:0{i}",
+                            resolved,
+                            i + 1,
+                        ),
+                    )
+                conn.execute("PRAGMA user_version = 0")
+                conn.row_factory = sqlite3.Row
+                for r in conn.execute("SELECT * FROM review_proposals"):
+                    raw_before[r["proposal_id"]] = dict(r)
+
+        old_vocab = (vm_data / "tag_vocabulary.json").read_bytes()
+        lw = approval_world(
+            home / "legacy",
+            force_block=True,
+            allowed=[APPROVAL_INSIDER],
+            notes={"legacy-pending.md": approval_note("LP", body)},
+            llm=llm,
+            seed_queue=seed,
+            closers=closers,
+        )
+        import sqlite3
+
+        def dump(db: str) -> dict[str, dict[str, Any]]:
+            with sqlite3.connect(db) as conn:
+                conn.row_factory = sqlite3.Row
+                return {
+                    r["proposal_id"]: dict(r)
+                    for r in conn.execute("SELECT * FROM review_proposals")
+                }
+
+        db = str(lw.settings.autonomy.db_path)
+        rows = dump(db)
+        ck("migration.legacy-schema-from-git", True, "legacy_status" not in legacy_schema)
+        ck("migration.raw-legacy-rows-captured-before-open", len(legacy_rows), len(raw_before))
+        for pid, _kind, _lane, _status, result, _payload in legacy_rows:
+            known = pid == "legacy-known-failure"
+            expected_row = dict(raw_before[lid[pid]])
+            if known:
+                expected_row["status"] = "failed"
+            ck(
+                f"migration.{pid}-all-original-columns-exact",
+                expected_row,
+                {c: rows[lid[pid]][c] for c in base_cols},
+            )
+            ck(
+                f"migration.{pid}-legacy-evidence",
+                ["rejected", result] if known else [None, None],
+                [rows[lid[pid]]["legacy_status"], rows[lid[pid]]["legacy_result"]],
+            )
+        lw.queue.close()
+        from vaultmind.config import load_settings
+
+        reopened = app._build_review_queue(load_settings(lw.config))
+        closers.append(reopened.close)
+        ck(
+            "migration.reopen-idempotent",
+            approval_json_digest(rows),
+            approval_json_digest(dump(db)),
+        )
+        ck(
+            "migration.no-automatic-retry-bytes-and-vocab",
+            [old_vocab, False],
+            [
+                (vm_data / "tag_vocabulary.json").read_bytes(),
+                (lw.vault / legacy_vault_note).exists(),
+            ],
+        )
+        ck(
+            "migration.pending-stays-pending-and-listed",
+            [lid["legacy-pending"]],
+            [
+                p.proposal_id
+                for p in reopened.list_pending()
+                if p.kind is ProposalKind.TAG_APPLICATION
+            ],
+        )
+        legacy_handlers = commands_mod.CommandHandlers(
+            lw.settings,
+            lw.store,
+            lw.graph,
+            lw.parser,
+            lw.handlers._ctx.thinking,
+            llm,
+            review_queue=reopened,
+        )
+        legacy_harness = TelegramHarness(legacy_handlers, lw.session, lw.bot)
+        for pid in ("legacy-human-reject", "legacy-ambiguous-1", "legacy-ambiguous-2"):
+            await legacy_harness.callback(callback_data("retry", lid[pid]), APPROVAL_INSIDER)
+            ck(f"migration.{pid}-never-retryable", "rejected", reopened.get(lid[pid]).status.value)
+        (lw.vault / legacy_vault_note).write_text(approval_note("LF", body), encoding="utf-8")
+        await legacy_harness.callback(
+            callback_data("retry", lid["legacy-known-failure"]), APPROVAL_INSIDER
+        )
+        ck(
+            "migration.explicit-retry-of-known-failure-applies",
+            ["applied", ["lf"]],
+            [
+                reopened.get(lid["legacy-known-failure"]).status.value,
+                frontmatter.load(lw.vault / legacy_vault_note)["tags"],
+            ],
+        )
+        await legacy_harness.callback(
+            callback_data("approve", lid["legacy-pending"]), APPROVAL_INSIDER
+        )
+        ck(
+            "migration.legacy-pending-approves-with-real-applier",
+            ["applied", ["lp"]],
+            [
+                reopened.get(lid["legacy-pending"]).status.value,
+                frontmatter.load(lw.vault / "legacy-pending.md")["tags"],
+            ],
+        )
+
+        # ---- 11. existing producers: duplicate/contradiction/maturation/sources -------
+        pw = approval_world(
+            home / "producers",
+            force_block=True,
+            allowed=[APPROVAL_INSIDER],
+            notes={
+                "dupA.md": approval_note(
+                    "Dup A", "vectora " + " ".join(APPROVAL_WORDS), modified='"2026-01-01T00:00:00"'
+                )
+            },
+            llm=llm,
+            embedder=ApprovalEmbedder(),
+            closers=closers,
+        )
+        pq, psession, pharness = pw.queue, pw.session, pw.harness
+        notifier_cb = build_block_notifier(Notifier(pw.bot, APPROVAL_CHAT))
+        pw.store.index_notes([pw.parser.parse_file(pw.vault / "dupA.md")], pw.parser)
+        detector = DuplicateDetector(pw.settings.duplicate_detection, pw.store)
+        text_b = "vectorb " + " ".join(APPROVAL_WORDS)
+        (pw.vault / "dupB.md").write_text(
+            approval_note("Dup B", text_b, modified='"2026-01-01T00:00:00"'), encoding="utf-8"
+        )
+        (pw.vault / "dupC.md").write_text(
+            approval_note("Dup C", text_b, modified='"2026-02-01T00:00:00"'), encoding="utf-8"
+        )
+        note_a, note_b, note_c = (pw.parser.parse_file(pw.vault / f"dup{x}.md") for x in "ABC")
+        a_bytes = (pw.vault / "dupA.md").read_bytes()
+        merge_hits = [m for m in detector.find_duplicates(note_b) if m.match_path == "dupA.md"]
+        detector.clear_results()
+        ck(
+            "producers.real-detector-sees-exactly-one-merge",
+            [["merge"], [0.85]],
+            [[m.match_type.value for m in merge_hits], [m.similarity for m in merge_hits]],
+        )
+
+        bus = VaultEventBus()
+        bus.subscribe(NoteCreatedEvent, app._duplicate_review_subscriber(detector, pq, notifier_cb))  # type: ignore[arg-type]
+        mark = len(psession.calls)
+        await bus.publish(NoteCreatedEvent(path=note_b.path, note=note_b))
+        dups = [p for p in pq.list_pending() if p.kind is ProposalKind.DUPLICATE_MERGE]
+        ck(
+            "producer.duplicate-subscriber-event-path-newly-pending-forced-block",
+            [1, "BLOCK"],
+            [len(dups), dups[0].lane.name if dups else None],
+        )
+        ck(
+            "producer.duplicate-one-generic-keyboard",
+            [
+                [
+                    callback_data("approve", dups[0].proposal_id),
+                    callback_data("reject", dups[0].proposal_id),
+                ]
+            ],
+            tg_keyboards(psession.calls[mark:]),
+        )
+        await bus.publish(NoteCreatedEvent(path=note_b.path, note=note_b))
+        ck(
+            "producer.duplicate-dedup-occurrence-and-silence",
+            [2, 1],
+            [
+                pq.get(dups[0].proposal_id).occurrence_count,
+                len(tg_keyboards(psession.calls[mark:])),
+            ],
+        )
+        await pharness.callback(callback_data("approve", dups[0].proposal_id), APPROVAL_INSIDER)
+        ck(
+            "producer.duplicate-informational-acknowledged-no-mutation",
+            ["acknowledged", a_bytes],
+            [pq.get(dups[0].proposal_id).status.value, (pw.vault / "dupA.md").read_bytes()],
+        )
+        mark = len(psession.calls)
+        await bus.publish(NoteCreatedEvent(path=note_b.path, note=note_b))
+        ck(
+            "producer.duplicate-terminal-replay-no-resend",
+            0,
+            len(tg_keyboards(psession.calls[mark:])),
+        )
+
+        gaps = GapStore(pw.data / "gaps.db")
+        closers.append(gaps._conn.close)
+        contradiction = ContradictionDetector(
+            pw.settings.contradiction,
+            detector,
+            llm,
+            "scripted-model",
+            pw.vault,
+            pw.parser,
+            gap_store=gaps,
+            review_queue=pq,
+            on_block=notifier_cb,
+        )
+        llm.reply = json.dumps(
+            {"materially_conflicts": True, "reasoning": "scripted: valve count disagrees"}
+        )
+        mark = len(psession.calls)
+        await contradiction.on_note_changed(NoteCreatedEvent(path=note_b.path, note=note_b))
+        esc = [p for p in pq.list_pending() if p.kind is ProposalKind.CONTRADICTION_ESCALATION]
+        ck(
+            "producer.contradiction-escalation-newly-pending-block",
+            [1, "BLOCK", "pending"],
+            [len(esc), esc[0].lane.name if esc else None, esc[0].status.value if esc else None],
+        )
+        kbs = tg_keyboards(psession.calls[mark:])
+        ck(
+            "producer.contradiction-escalation-one-generic-keyboard",
+            [
+                [
+                    callback_data("approve", esc[0].proposal_id),
+                    callback_data("reject", esc[0].proposal_id),
+                ]
+            ],
+            kbs,
+        )
+        await contradiction.on_note_changed(NoteCreatedEvent(path=note_b.path, note=note_b))
+        ck(
+            "producer.contradiction-dedup-no-resend",
+            [2, 1],
+            [pq.get(esc[0].proposal_id).occurrence_count, len(tg_keyboards(psession.calls[mark:]))],
+        )
+        await pharness.callback(callback_data("approve", esc[0].proposal_id), APPROVAL_INSIDER)
+        ck(
+            "producer.contradiction-escalation-ack-explicit",
+            ["acknowledged", a_bytes],
+            [pq.get(esc[0].proposal_id).status.value, (pw.vault / "dupA.md").read_bytes()],
+        )
+        mark = len(psession.calls)
+        await contradiction.on_note_changed(NoteCreatedEvent(path=note_b.path, note=note_b))
+        ck(
+            "producer.contradiction-terminal-replay-no-resend",
+            [0, "acknowledged"],
+            [len(tg_keyboards(psession.calls[mark:])), pq.get(esc[0].proposal_id).status.value],
+        )
+
+        match_c = next(m for m in detector.find_duplicates(note_c) if m.match_path == "dupA.md")
+        outcome = resolve_conflict(note_c, note_a)
+        mark = len(psession.calls)
+        await contradiction._apply_resolution(
+            note_c, match_c, outcome
+        )  # private seam: auto_resolve stays false
+        res = [p for p in pq.list_pending() if p.kind is ProposalKind.CONTRADICTION_RESOLUTION]
+        ck(
+            "producer.contradiction-resolution-newly-pending-block-unapplied",
+            [1, "BLOCK", False],
+            [
+                len(res),
+                res[0].lane.name if res else None,
+                bool(frontmatter.load(pw.vault / "dupA.md").get("contradicted_by")),
+            ],
+        )
+        ck(
+            "producer.contradiction-resolution-one-keyboard",
+            1,
+            len(tg_keyboards(psession.calls[mark:])),
+        )
+        await contradiction._apply_resolution(note_c, match_c, outcome)
+        ck(
+            "producer.contradiction-resolution-dedup-silent",
+            [2, 1],
+            [pq.get(res[0].proposal_id).occurrence_count, len(tg_keyboards(psession.calls[mark:]))],
+        )
+        await pharness.callback(callback_data("approve", res[0].proposal_id), APPROVAL_INSIDER)
+        marked_a = frontmatter.load(pw.vault / "dupA.md")
+        ck(
+            "producer.contradiction-resolution-approved-real-marking",
+            ["applied", ["dupC.md"], True],
+            [
+                pq.get(res[0].proposal_id).status.value,
+                marked_a.get("contradicted_by"),
+                " ".join(APPROVAL_WORDS) in marked_a.content,
+            ],
+        )
+
+        mat_text = "mycelium network nutrient exchange between forest trees " * 3
+        for i in range(3):
+            (pw.vault / f"mat{i}.md").write_text(
+                approval_note(f"Mat {i}", mat_text + f"variant{i}", type="fleeting"),
+                encoding="utf-8",
+            )
+        pw.store.index_notes(pw.parser.iter_notes(), pw.parser)
+        files_before_job = sorted(str(p) for p in pw.vault.rglob("*.md"))
+
+        def pipeline_for(world: SimpleNamespace) -> Any:
+            return MaturationPipeline(
+                world.settings.maturation,
+                world.store._collection,
+                world.graph,
+                llm,
+                world.vault,
+                state_path=world.data / "maturation_state.json",
+            )
+
+        pipeline = pipeline_for(pw)
+        clusters = pipeline.discover()
+        ck("producer.maturation-real-cluster-discovered", True, len(clusters) >= 1)
+        job = app._maturation_review_job(pipeline, pq, notifier_cb)
+        mark = len(psession.calls)
+        await job()
+        mats = [p for p in pq.list_pending() if p.kind is ProposalKind.MATURATION_SYNTHESIS]
+        ck(
+            "producer.maturation-forced-block-pending-one-keyboard-each",
+            [len(clusters), ["BLOCK"] * len(clusters), len(clusters)],
+            [len(mats), [p.lane.name for p in mats], len(tg_keyboards(psession.calls[mark:]))],
+        )
+        ck(
+            "producer.maturation-no-synthesis-before-approval",
+            files_before_job,
+            sorted(str(p) for p in pw.vault.rglob("*.md")),
+        )
+        await job()
+        ck(
+            "producer.maturation-dedup-silent",
+            len(clusters),
+            len(tg_keyboards(psession.calls[mark:])),
+        )
+        fingerprint = mats[0].payload["fingerprint"]
+        pipeline.dismiss(fingerprint)
+        calls = await pharness.callback(
+            callback_data("approve", mats[0].proposal_id), APPROVAL_INSIDER
+        )
+        got = pq.get(mats[0].proposal_id)
+        probes.append("maturation-stale-cluster-real-applier")
+        ck(
+            "producer.maturation-stale-cluster-failed-honestly",
+            [True, True],
+            [got.status is ProposalStatus.FAILED, bool(got.result)],
+        )
+        ck(
+            "producer.maturation-stale-not-reported-applied",
+            False,
+            any("Applied" in t for t in tg_texts(calls)),
+        )
+        dw = approval_world(
+            home / "default-maturation",
+            force_block=False,
+            allowed=[APPROVAL_INSIDER],
+            notes={
+                f"mat{i}.md": approval_note(f"Mat {i}", mat_text + f"variant{i}", type="fleeting")
+                for i in range(3)
+            },
+            llm=llm,
+            closers=closers,
+        )
+        dw.store.index_notes(dw.parser.iter_notes(), dw.parser)
+        dpipe = pipeline_for(dw)
+        djob = app._maturation_review_job(
+            dpipe, dw.queue, build_block_notifier(Notifier(dw.bot, APPROVAL_CHAT))
+        )
+        await djob()
+        dmats = dw.queue.list_pending()
+        ck(
+            "producer.maturation-default-stays-skim-no-keyboard",
+            [True, {"SKIM"}, 0],
+            [bool(dmats), {p.lane.name for p in dmats}, len(tg_keyboards(dw.session.calls))],
+        )
+        llm.reply = "malformed scripted synthesis: not a valid permanent note"
+        pre_files = sorted(str(p) for p in dw.vault.rglob("*.md"))
+        await dw.harness.callback(callback_data("approve", dmats[0].proposal_id), APPROVAL_INSIDER)
+        got = dw.queue.get(dmats[0].proposal_id)
+        probes.append("maturation-malformed-synthesis-real-pipeline")
+        ck(
+            "producer.maturation-malformed-synthesis-failed-not-applied",
+            [True, False],
+            [got.status is ProposalStatus.FAILED, "applied" in got.status.value],
+        )
+        ck(
+            "producer.maturation-malformed-synthesis-wrote-no-note",
+            pre_files,
+            sorted(str(p) for p in dw.vault.rglob("*.md")),
+        )
+
+        feed = pw.data / "feed.xml"
+        feed.write_text(
+            '<?xml version="1.0"?><rss version="2.0"><channel><title>Fixture</title>'
+            "<item><guid>fixture-1</guid><title>Fixture item</title><link>https://example.invalid/1</link>"
+            "<description>Local fixture feed body for acceptance.</description>"
+            "<pubDate>Mon, 05 Jan 2026 10:00:00 +0000</pubDate></item></channel></rss>",
+            encoding="utf-8",
+        )
+        source_feed_sha256 = digest(feed.read_bytes())
+        instance = SourceInstance(name="fixture-feed", kind="rss", target=str(feed), enabled=True)
+        pq.register_applier(
+            ProposalKind.SOURCE_INGESTION,
+            make_applier(vault_root=pw.vault, llm_client=llm, model="scripted-model"),
+        )
+        source_store = SourceStore(pw.data / "sources.db")
+        closers.append(source_store.close)
+        mark = len(psession.calls)
+        run = await run_connector_once(
+            instance,
+            source_store=source_store,
+            review_queue=pq,
+            parser=pw.parser,
+            store=pw.store,
+            vault_root=pw.vault,
+            event_bus=VaultEventBus(),
+            on_block=notifier_cb,
+        )
+        srcs = [p for p in pq.list_pending() if p.kind is ProposalKind.SOURCE_INGESTION]
+        ck("producer.source-run-real-rss-local-file-fetched", 1, run.items_fetched)
+        ck(
+            "producer.source-newly-pending-block-one-keyboard",
+            [1, "BLOCK", 1],
+            [
+                len(srcs),
+                srcs[0].lane.name if srcs else None,
+                len(tg_keyboards(psession.calls[mark:])),
+            ],
+        )
+        ck(
+            "producer.source-no-note-written-before-approval",
+            False,
+            (pw.vault / "00-inbox" / "sources").exists(),
+        )
+        second_store = SourceStore(pw.data / "sources-second.db")
+        closers.append(second_store.close)
+        await run_connector_once(
+            instance,
+            source_store=second_store,
+            review_queue=pq,
+            parser=pw.parser,
+            store=pw.store,
+            vault_root=pw.vault,
+            event_bus=VaultEventBus(),
+            on_block=notifier_cb,
+        )
+        ck(
+            "producer.source-dedup-silent",
+            [2, 1, False],
+            [
+                pq.get(srcs[0].proposal_id).occurrence_count,
+                len(tg_keyboards(psession.calls[mark:])),
+                (pw.vault / "00-inbox" / "sources").exists(),
+            ],
+        )
+    finally:
+        root_logger.removeHandler(capture)
+        root_logger.setLevel(old_level)
+        for close in reversed(closers):
+            close()
+
+    ck(
+        "probes.all-fault-probes-executed",
+        [
+            "filesystem-permission-denied-real-open",
+            "maturation-malformed-synthesis-real-pipeline",
+            "maturation-stale-cluster-real-applier",
+            "missing-note-real-applier-raises",
+        ],
+        sorted(probes),
+    )
+    worlds = (w, lw, pw, dw)
+    initial_worlds = {str(world.root.relative_to(home)): world.input_identity for world in worlds}
+    corpus = {
+        "initial_worlds": initial_worlds,
+        "seed_vocabulary_sha256": seed_vocabulary_sha256,
+        "source_feed_sha256": source_feed_sha256,
+        "source_instance": asdict(instance),
+        "legacy_rows_sha256": approval_json_digest(raw_before),
+        "scripted_llm_calls": llm.calls,
+    }
+    final_files = {
+        str(path.relative_to(home)): digest(path.read_bytes())
+        for world in worlds
+        for path in sorted(world.vault.rglob("*.md"))
+    }
+    receipt = {
+        "import_origin": os.path.realpath(vaultmind.__file__),
+        "interpreter": {"executable": sys.executable, "version": sys.version},
+        "git": approval_git_binding(),
+        "cli": {
+            "argv": ["--config", "<w>/config.toml", "auto-tag", "--apply"],
+            "exit_code": cli.exit_code,
+            "raw_output": cli.output,
+        },
+        "raw_log": log_records,
+        "configuration_files_sha256": {
+            name: identity["files_sha256"]["config.toml"]
+            for name, identity in initial_worlds.items()
+        },
+        "config_sha256": approval_json_digest(
+            {name: identity["effective_config_sha256"] for name, identity in initial_worlds.items()}
+        ),
+        "corpus_inputs": corpus,
+        "corpus_sha256": approval_json_digest(corpus),
+        "final_corpus_files_sha256": final_files,
+        "legacy_schema": {
+            "commit": legacy_commit,
+            "sha256": digest(legacy_schema.encode()),
+            "label_to_proposal_id": lid,
+        },
+        "duplicate_fixture_vectors": {
+            "cosine": APPROVAL_MERGE_COSINE,
+            "vectors_sha256": approval_json_digest(
+                {token: ApprovalEmbedder().embed_query(token) for token in ("vectora", "vectorb")}
+            ),
+            "boundary": "scripted provider-boundary embedding vectors, not model quality",
+        },
+        "delivery_statuses": delivery,
+        "fault_probes_executed": sorted(probes),
+        "scripted_llm_calls": len(llm.calls),
+        "source_run": {
+            "items_fetched": run.items_fetched,
+            "items_ingested": run.items_ingested,
+            "error": run.error,
+        },
+        "failed_checks": failures,
+        "fixture_limits": (
+            "Fixture-only offline proof. Source write/index/finalization (M15) is NOT exercised or "
+            "claimed: SOURCE_INGESTION is only proven pending/unapplied with one keyboard. "
+            "Contradiction resolution is driven via ContradictionDetector._apply_resolution "
+            "because [contradiction].auto_resolve stays false. No native model, provider, "
+            "embedding-quality or real Telegram qualification."
+        ),
+    }
+    if failures:
+        checks_fail = AssertionError(
+            f"approval acceptance failed {len(failures)} check(s): {failures}"
+        )
+        checks_fail.receipt = receipt  # type: ignore[attr-defined]
+        raise checks_fail
+    return receipt
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", required=True, choices=["retrieval", "mcp"])
+    parser.add_argument("--case", required=True, choices=["retrieval", "mcp", "approval"])
     parser.add_argument("--offline", required=True, action="store_true")
     parser.add_argument("--receipt-out", type=Path)
     args = parser.parse_args()
@@ -1935,6 +3536,24 @@ def main() -> int:
                 "gethostbyaddr, non-AF_UNIX connect/sendto; expected zero non-probe attempts",
             },
         )
+    if args.case == "approval":
+        receipt.update(
+            transport=(
+                "in-process: real click CLI (auto-tag), real ReviewQueue/appliers, real "
+                "CommandHandlers behind the router registered by bot.telegram.register_handlers; "
+                "real aiogram Update/Dispatcher/Notifier over a recording fake BaseSession"
+            ),
+            boundary_substitutions=[
+                "scripted llm.client at cli._create_llm_client and handler/detector/pipeline "
+                "clients (provider boundary only)",
+                "deterministic token embeddings (no hosted embedding)",
+                "recording aiogram BaseSession: no Telegram API call is made",
+                "local RSS file as the connector fetch target (no network)",
+                "temporary HOME/VAULTMIND_HOME and explicit fixture TOML per world",
+            ],
+            limitations="Fixture-only offline proof; not native model/provider/Telegram "
+            "qualification; source finalization (M15) not claimed.",
+        )
     attempts: list[str] = []
 
     def forbid_network(event: str, arguments: tuple[Any, ...]) -> None:
@@ -1947,17 +3566,28 @@ def main() -> int:
     sys.addaudithook(forbid_network)
     old_cwd = Path.cwd()
     try:
-        prefix = "vm-m11-retrieval-" if args.case == "retrieval" else "vm-m12-mcp-"
+        prefix = {
+            "retrieval": "vm-m11-retrieval-",
+            "mcp": "vm-m12-mcp-",
+            "approval": "vm-m13-approval-",
+        }[args.case]
         with tempfile.TemporaryDirectory(prefix=prefix) as directory:
             home = Path(directory)
             for key in list(os.environ):
                 if key.startswith("VAULTMIND_"):
                     del os.environ[key]
+            if args.case == "approval":
+                secret = ("OPENAI", "ANTHROPIC", "GEMINI", "VOYAGE", "TELEGRAM")
+                for key in list(os.environ):
+                    if key.upper().startswith(secret) or "API_KEY" in key:
+                        del os.environ[key]
             os.environ["HOME"] = str(home)
             os.environ["ANONYMIZED_TELEMETRY"] = "False"
             os.chdir(home)
             if args.case == "retrieval":
                 case = retrieval(home, receipt["checks"])
+            elif args.case == "approval":
+                case = approval_case(home, receipt["checks"])
             else:
                 case = mcp_case(home, receipt["checks"])
             receipt.update(asyncio.run(case))
@@ -1966,6 +3596,7 @@ def main() -> int:
         receipt["result"] = "pass"
     except Exception as exc:
         receipt.update(result="fail", failure=f"{type(exc).__name__}: {exc}")
+        receipt.update(getattr(exc, "receipt", {}))
         raise
     finally:
         os.chdir(old_cwd)

@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from vaultmind.pipeline.distill import distill_conversation, mint_gap_for_unresolved
+from vaultmind.services.review_delivery import deliver_block
 from vaultmind.services.review_queue import Impact, ProposalKind, ProposalStatus
 from vaultmind.sources import (
     connectors as _connectors,  # noqa: F401 - registers connectors as import side effect
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 
     from vaultmind.indexer.store import VaultStore
     from vaultmind.llm.client import LLMClient
+    from vaultmind.services.review_delivery import BlockNotifier
     from vaultmind.services.review_queue import Applier, ReviewProposal, ReviewQueue
     from vaultmind.sources.store import SourceStore
     from vaultmind.vault.events import VaultEventBus
@@ -271,6 +273,7 @@ async def run_connector_once(
     store: VaultStore,
     vault_root: Path,
     event_bus: VaultEventBus,
+    on_block: BlockNotifier | None = None,
 ) -> RunResult:
     """Fetch, propose, and finalize every new item for one connector
     instance, then advance its durable cursor and record a run summary.
@@ -297,6 +300,7 @@ async def run_connector_once(
         for item in fetch_result.items:
             try:
                 proposal = propose_ingestion(review_queue, item, instance)
+                await deliver_block(proposal, on_block)
                 await finalize_ingested_note(
                     proposal,
                     parser=parser,

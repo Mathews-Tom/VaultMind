@@ -245,7 +245,7 @@ Set `capture_all = true` in `[routing]` config to restore old behavior (all text
 | `/bookmark <title>`             | Save thinking session or last Q&A to vault                      |
 | `/suggest <note>`               | Find notes worth linking (composite scoring)                    |
 | `/duplicates <note>`            | Find duplicate/similar notes                                    |
-| `/review`                       | Weekly review with graph insights + pending SKIM-lane approvals |
+| `/review`                       | Weekly review, pending SKIM/BLOCK decisions, and failed-operation recovery |
 | `/evolve`                       | Belief evolution signals (confidence drift, stale claims)       |
 | `/mature`                       | Zettelkasten maturation — clusters ready for synthesis          |
 | `/decide <decision>`            | Record a decision (creates pending episode)                     |
@@ -259,6 +259,8 @@ Set `capture_all = true` in `[routing]` config to restore old behavior (all text
 | `/gaps`                         | List open knowledge gaps by age                                 |
 | Send voice message              | Transcribe via Whisper and route as capture or question         |
 | Send photo                      | Describe via vision model and capture as note with image embed  |
+
+`/review` lists pending SKIM items for approve-all, pending BLOCK items for an individual decision, and failed operations for explicit retry. Review output uses plain text and bounded message chunks; each item's actions accompany its own text, including when long summaries require multiple messages. Inspect partial side effects before retrying a failed mutation. Listing the queue does not apply or retry operations.
 
 ## MCP Integration
 
