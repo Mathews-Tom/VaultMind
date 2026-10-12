@@ -34,7 +34,7 @@ review lanes, background source connectors, and non-destructive edit lineage.
 - **Contradiction detection** — new notes landing in the duplicate-detector's merge band are checked by an eval-gated LLM surface; conflicts resolve by temporal-then-authority-then-escalate policy and never edit or delete the losing note
 - **Graduated autonomy** — every automated mutation proposal (tags, merges, contradiction resolutions, maturation synthesis) routes through one AUTO/SKIM/BLOCK review queue with an approval-fatigue metric in `vaultmind learn`
 - **Source connectors** — scheduled `rss`, `youtube-channel`, and `github-activity` connectors ingest with durable cursors, run every item through distillation and the review queue, never bypassing governance
-- **Non-destructive edits** — bot-initiated `/delete`/`/edit` write a dated `> [!superseded]` callout and a lineage edge instead of deleting text, preserving full edit history in the note
+- **Non-destructive edits** — bot-initiated `/delete`/`/edit` preserve full body history and lineage; vector, keyword and hybrid indexing excludes soft-deleted notes and indexes only the latest edit, including full reindex and watcher updates
 - **OKF export** — `vaultmind export-okf` exports permanent/concept notes as a conformant [OKF](https://github.com/Mathews-Tom/Kosha) bundle for governed serving from Kosha
 - **Note modes** — learning vs. operational mode with activation-based decay scoring
 - **Secure by default** — path traversal protection, input sanitization, injection detection on all vault operations

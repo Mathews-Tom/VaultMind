@@ -35,6 +35,16 @@ class _VaultEventHandler(FileSystemEventHandler):
         self.vault_root = vault_root
         self.excluded = set(excluded_folders)
         self.on_change = on_change
+        # Event loop that must run ``on_change``; set by ``VaultWatcher.start``.
+        # watchdog delivers events on its observer thread, where asyncio-based
+        # callbacks (``IncrementalWatchHandler.handle_change``) cannot run.
+        self.loop: asyncio.AbstractEventLoop | None = None
+
+    def _emit(self, path: Path, event_type: str) -> None:
+        if self.loop is None:
+            self.on_change(path, event_type)
+        else:
+            self.loop.call_soon_threadsafe(self.on_change, path, event_type)
 
     def _should_process(self, path: str) -> bool:
         p = Path(path)
@@ -49,17 +59,17 @@ class _VaultEventHandler(FileSystemEventHandler):
     def on_created(self, event: FileCreatedEvent) -> None:  # type: ignore[override]
         if not event.is_directory and self._should_process(event.src_path):
             logger.info("Note created: %s", event.src_path)
-            self.on_change(Path(event.src_path), "created")
+            self._emit(Path(event.src_path), "created")
 
     def on_modified(self, event: FileModifiedEvent) -> None:  # type: ignore[override]
         if not event.is_directory and self._should_process(event.src_path):
             logger.debug("Note modified: %s", event.src_path)
-            self.on_change(Path(event.src_path), "modified")
+            self._emit(Path(event.src_path), "modified")
 
     def on_deleted(self, event: FileDeletedEvent) -> None:  # type: ignore[override]
         if not event.is_directory and self._should_process(event.src_path):
             logger.info("Note deleted: %s", event.src_path)
-            self.on_change(Path(event.src_path), "deleted")
+            self._emit(Path(event.src_path), "deleted")
 
 
 class VaultWatcher:
@@ -86,7 +96,16 @@ class VaultWatcher:
         self._observer: Observer | None = None  # type: ignore[valid-type]
 
     def start(self) -> None:
-        """Start watching the vault directory (non-blocking)."""
+        """Start watching the vault directory (non-blocking).
+
+        When called from a running event loop (as both CLI entry points do), change
+        callbacks are marshalled onto that loop instead of running on the watchdog
+        observer thread.
+        """
+        try:
+            self.handler.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.handler.loop = None
         self._observer = Observer()
         self._observer.schedule(  # type: ignore[no-untyped-call]
             self.handler, str(self.config.path), recursive=True

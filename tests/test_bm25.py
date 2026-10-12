@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import sqlite3
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -121,3 +122,104 @@ class TestEmptyQuery:
     def test_search_on_empty_index(self, bm25: BM25Index) -> None:
         results = bm25.search("anything")
         assert results == []
+
+
+def _rows(note_path: str, *texts: str) -> list[tuple[str, str, str, str]]:
+    return [(f"{note_path}::{i}", note_path, "Title", text) for i, text in enumerate(texts)]
+
+
+def _chunk_ids(bm25: BM25Index, query: str) -> list[str]:
+    return sorted(str(hit["chunk_id"]) for hit in bm25.search(query, n_results=50))
+
+
+class TestReplaceNote:
+    def test_replaces_every_row_of_the_note_and_leaves_other_notes(self, bm25: BM25Index) -> None:
+        bm25.upsert_batch(_rows("a.md", "alpha stale", "alpha stale tail") + _rows("b.md", "beta"))
+
+        bm25.replace_note("a.md", _rows("a.md", "alpha fresh"))
+
+        assert bm25.count == 2
+        assert _chunk_ids(bm25, "stale") == []
+        assert _chunk_ids(bm25, "fresh") == ["a.md::0"]
+        assert _chunk_ids(bm25, "beta") == ["b.md::0"]
+
+    def test_empty_rows_retire_the_note(self, bm25: BM25Index) -> None:
+        bm25.upsert_batch(_rows("a.md", "alpha") + _rows("b.md", "beta"))
+
+        bm25.replace_note("a.md", [])
+
+        assert _chunk_ids(bm25, "alpha") == []
+        assert _chunk_ids(bm25, "beta") == ["b.md::0"]
+
+    def test_failed_insert_rolls_back_to_previous_rows(self, bm25: BM25Index) -> None:
+        bm25.upsert_batch(_rows("a.md", "alpha original"))
+        unbindable = cast("str", object())
+
+        with pytest.raises(sqlite3.Error):
+            bm25.replace_note(
+                "a.md",
+                [
+                    ("a.md::0", "a.md", "Title", "alpha replacement"),
+                    ("a.md::1", "a.md", "Title", unbindable),
+                ],
+            )
+
+        assert _chunk_ids(bm25, "original") == ["a.md::0"]
+        assert _chunk_ids(bm25, "replacement") == []
+        # The connection is still usable: no transaction was left open.
+        bm25.upsert("c.md::0", "c.md", "C", "later write")
+        assert bm25.count == 2
+
+    def test_foreign_or_duplicate_rows_are_rejected_without_changes(self, bm25: BM25Index) -> None:
+        bm25.upsert_batch(_rows("a.md", "alpha original"))
+
+        with pytest.raises(ValueError):
+            bm25.replace_note("a.md", _rows("b.md", "beta"))
+        with pytest.raises(ValueError):
+            bm25.replace_note("a.md", _rows("a.md", "alpha one") + _rows("a.md", "alpha two"))
+
+        assert _chunk_ids(bm25, "original") == ["a.md::0"]
+        assert bm25.count == 1
+
+
+class TestReplaceAll:
+    def test_snapshot_drops_rows_absent_from_it(self, bm25: BM25Index) -> None:
+        bm25.upsert_batch(_rows("a.md", "alpha", "alpha tail") + _rows("gone.md", "ghost"))
+
+        bm25.replace_all(_rows("a.md", "alpha fresh"))
+
+        assert bm25.count == 1
+        assert _chunk_ids(bm25, "ghost") == []
+        assert _chunk_ids(bm25, "tail") == []
+        assert _chunk_ids(bm25, "fresh") == ["a.md::0"]
+
+    def test_empty_snapshot_clears_the_index(self, bm25: BM25Index) -> None:
+        bm25.upsert_batch(_rows("a.md", "alpha") + _rows("b.md", "beta"))
+
+        bm25.replace_all([])
+
+        assert bm25.count == 0
+        assert bm25.search("alpha") == []
+
+    def test_failed_insert_keeps_the_previous_index(self, bm25: BM25Index) -> None:
+        bm25.upsert_batch(_rows("a.md", "alpha original") + _rows("b.md", "beta original"))
+        unbindable = cast("str", object())
+
+        with pytest.raises(sqlite3.Error):
+            bm25.replace_all(
+                [
+                    ("c.md::0", "c.md", "Title", "gamma replacement"),
+                    ("d.md::0", "d.md", "Title", unbindable),
+                ]
+            )
+
+        assert _chunk_ids(bm25, "original") == ["a.md::0", "b.md::0"]
+        assert _chunk_ids(bm25, "replacement") == []
+
+    def test_duplicate_chunk_ids_are_rejected_without_changes(self, bm25: BM25Index) -> None:
+        bm25.upsert_batch(_rows("a.md", "alpha original"))
+
+        with pytest.raises(ValueError):
+            bm25.replace_all(_rows("b.md", "beta one") + _rows("b.md", "beta two"))
+
+        assert _chunk_ids(bm25, "original") == ["a.md::0"]

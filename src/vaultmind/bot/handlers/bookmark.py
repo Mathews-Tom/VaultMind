@@ -138,8 +138,17 @@ async def handle_bookmark(
     filepath.write_text(note_content, encoding="utf-8")
     logger.info("Bookmarked note: %s", filepath)
 
-    note = ctx.parser.parse_file(filepath)
-    ctx.store.index_single_note(note, ctx.parser)
+    try:
+        note = ctx.parser.parse_file(filepath)
+        ctx.store.index_single_note(note, ctx.parser)
+    except Exception as exc:
+        logger.exception("Failed to index bookmarked note")
+        await message.answer(
+            f"Bookmark saved to `{filepath.relative_to(ctx.vault_root)}`, "
+            f"but indexing failed: {exc}",
+            parse_mode="Markdown",
+        )
+        return
 
     relative_path = f"{INBOX_FOLDER}/{filename}"
     await message.answer(

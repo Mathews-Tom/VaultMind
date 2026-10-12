@@ -8,7 +8,7 @@ import pytest
 
 from vaultmind.config import VaultConfig
 from vaultmind.vault.models import NoteType
-from vaultmind.vault.parser import VaultParser
+from vaultmind.vault.parser import VaultParseError, VaultParser
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -161,3 +161,116 @@ def test_chunk_note_propagates_authority_to_chunks(parser: VaultParser, tmp_vaul
     assert len(chunks) >= 1
     assert all(c.authority == 4 for c in chunks)
     assert chunks[0].to_chroma_metadata()["authority"] == 4
+
+
+class TestIterNotesParseFailures:
+    def test_strict_snapshot_aborts_and_names_every_failing_path(
+        self, parser: VaultParser, tmp_vault: Path
+    ) -> None:
+        (tmp_vault / "00-inbox" / "broken-one.md").write_text("---\ntitle: [unclosed\n---\n\nx\n")
+        (tmp_vault / "02-projects" / "broken-two.md").write_bytes(b"---\ntitle: \xff\xfe\n---\n\nx")
+
+        with pytest.raises(VaultParseError) as raised:
+            parser.iter_notes(strict=True)
+
+        failed = {str(path) for path, _ in raised.value.failures}
+        assert failed == {"00-inbox/broken-one.md", "02-projects/broken-two.md"}
+
+    def test_ordinary_iteration_returns_valid_notes_and_logs_rejected_paths(
+        self, parser: VaultParser, tmp_vault: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        (tmp_vault / "00-inbox" / "broken-one.md").write_text("---\ntitle: [unclosed\n---\n\nx\n")
+        (tmp_vault / "02-projects" / "broken-two.md").write_bytes(b"\xff\xfe not utf8")
+        valid = {note.path.name for note in parser.iter_notes()}
+
+        with caplog.at_level("ERROR", logger="vaultmind.vault.parser"):
+            notes = parser.iter_notes()
+
+        assert {note.path.name for note in notes} == valid
+        assert "broken-one.md" not in valid
+        assert "broken-two.md" not in valid
+        assert "test-project.md" in valid
+        logged = " ".join(record.getMessage() for record in caplog.records)
+        assert "broken-one.md" in logged
+        assert "broken-two.md" in logged
+
+    def test_directories_dangling_links_and_excluded_folders_are_not_failures(
+        self, parser: VaultParser, tmp_vault: Path
+    ) -> None:
+        (tmp_vault / "00-inbox" / "folder.md").mkdir()
+        (tmp_vault / "00-inbox" / "dangling.md").symlink_to(tmp_vault / "missing-target.md")
+        (tmp_vault / ".obsidian" / "broken.md").write_text("---\ntitle: [unclosed\n---\n\nx\n")
+
+        notes = parser.iter_notes()
+
+        assert len(notes) == 2
+
+
+LEGACY_EDITED = (
+    "---\n"
+    "tags: [kept]\n"
+    "entities: [Entity]\n"
+    "superseded_at:\n"
+    "- '2026-03-01T10:00:00+00:00'\n"
+    "---\n\n"
+    "## Current\n"
+    "live claim saltreed #livetag with [[Link]].\n\n"
+    "> [!superseded] Edited via bot — 2026-03-01\n"
+    "> Instruction: revise\n\n"
+    "## Retired\n"
+    "retired claim tidewrack #retiredtag with [[RetiredLink]] and many many more words.\n"
+)
+
+
+class TestChunksAreDerivedFromCurrentEvidence:
+    def test_retired_inline_tags_headings_and_links_do_not_reach_chunk_metadata(
+        self, parser: VaultParser, tmp_vault: Path
+    ) -> None:
+        path = tmp_vault / "02-projects" / "edited.md"
+        path.write_text(LEGACY_EDITED, encoding="utf-8")
+        note = parser.parse_file(path)
+
+        chunks = parser.chunk_note(note)
+
+        assert set(note.tags) == {"kept", "livetag"}
+        assert [chunk.heading for chunk in chunks] == ["## Current"]
+        for chunk in chunks:
+            assert "retiredtag" not in chunk.tags
+            assert "retiredtag" not in str(chunk.to_chroma_metadata()["tags"])
+            assert "retiredtag" not in chunk.content
+            assert "tidewrack" not in chunk.content
+        assert "retiredtag" in note.content
+
+    def test_importance_is_scored_on_the_current_text_only(
+        self, parser: VaultParser, tmp_vault: Path
+    ) -> None:
+        edited = tmp_vault / "02-projects" / "edited.md"
+        edited.write_text(LEGACY_EDITED, encoding="utf-8")
+        twin = tmp_vault / "02-projects" / "twin.md"
+        twin.write_text(
+            "---\ntags: [kept]\nentities: [Entity]\n---\n\n"
+            "## Current\nlive claim saltreed #livetag with [[Link]].\n",
+            encoding="utf-8",
+        )
+
+        edited_chunks = parser.chunk_note(parser.parse_file(edited))
+        twin_chunks = parser.chunk_note(parser.parse_file(twin))
+
+        assert edited_chunks[0].importance_score == twin_chunks[0].importance_score
+
+    def test_bot_deleted_note_produces_no_chunks(
+        self, parser: VaultParser, tmp_vault: Path
+    ) -> None:
+        path = tmp_vault / "02-projects" / "deleted.md"
+        path.write_text(
+            "---\nsuperseded_at:\n- bot:delete\n---\n\n"
+            "> [!superseded] Deleted via bot — 2026-03-05\n"
+            "> Requested via Telegram `/delete` — content preserved below.\n\n"
+            "## Original\nretired claim tidewrack #retiredtag\n",
+            encoding="utf-8",
+        )
+        note = parser.parse_file(path)
+
+        assert parser.chunk_note(note) == []
+        assert "tidewrack" in note.content
+        assert "retiredtag" not in note.tags

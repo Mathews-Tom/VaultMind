@@ -17,15 +17,34 @@ resolution. M9's bot-initiated destructive-edit marking (`bot/handlers/
 delete.py`, `bot/handlers/edit.py`) calls `write_superseded_block()`
 directly with a dated `superseded` callout and, for edits, `new_content` —
 the same primitive, reused rather than reimplemented.
+
+M14: a destructive bot mutation passes `boundary="delete"|"edit"` so the block
+is preceded by an explicit, id-paired boundary that
+`vaultmind.vault.projection` uses to keep the preserved history out of
+retrieval. The writer verifies, before touching the file, that what it is
+about to write round-trips through that projection.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Literal
 
 import frontmatter
+
+from vaultmind.vault.projection import (
+    BOUNDARY_KEY,
+    DELETE_MARKER,
+    SUPERSEDED_KEY,
+    AmbiguousHistoryError,
+    RetiredNoteError,
+    boundary_record,
+    is_generated_stamp,
+    marker_line,
+    new_boundary_id,
+    project,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,6 +52,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CALLOUT_TYPE = "warning"
+
+
+def _quoted(rationale: str) -> str:
+    """Render every rationale line inside the callout (a bare newline would end it)."""
+    lines = rationale.replace("\r\n", "\n").split("\n")
+    return "\n".join(f"> {line}" if line else ">" for line in lines)
+
+
+def _as_list(value: object) -> list[object]:
+    if isinstance(value, list):
+        return list(value)
+    if value is None:
+        return []
+    return [value]
 
 
 def write_superseded_block(
@@ -46,6 +79,7 @@ def write_superseded_block(
     dated: bool = False,
     timestamp: datetime | None = None,
     new_content: str | None = None,
+    boundary: Literal["delete", "edit"] | None = None,
 ) -> bool:
     """Write a non-destructive supersede marker to `path`.
 
@@ -57,18 +91,37 @@ def write_superseded_block(
     preserved prior body) so a bot-applied edit's new text becomes what
     search/recall see as primary while the prior text stays intact
     underneath. Returns `True` if the file was written.
+
+    `boundary` marks the write as a retirement of note content: `"delete"`
+    retires the whole note, `"edit"` retires everything below `new_content`.
+    It requires `frontmatter_key == "superseded_at"` (`frontmatter_value`
+    `bot:delete` for a delete, the UTC ISO stamp of `timestamp` for an edit)
+    and records an id-paired boundary marker the current-content projection
+    relies on. The existing history is validated first, even for a repeat of
+    an already-written marker: the note is left untouched and an error is
+    raised when it is ambiguous (`AmbiguousHistoryError`), when an edit
+    targets a note already retired by a bot delete (`RetiredNoteError`), or
+    when the result would not project to the intended current content.
     """
     with open(path, encoding="utf-8") as f:
         post = frontmatter.load(f)
 
-    existing = post.metadata.get(frontmatter_key, [])
-    if isinstance(existing, str):
-        existing = [existing]
-    elif not isinstance(existing, list):
-        existing = []
+    before = project(post.metadata, post.content) if boundary is not None else None
 
+    existing = _as_list(post.metadata.get(frontmatter_key))
     if frontmatter_value in existing:
         return False
+
+    if boundary is not None:
+        _require_boundary_arguments(
+            boundary,
+            frontmatter_key=frontmatter_key,
+            frontmatter_value=frontmatter_value,
+            new_content=new_content,
+            timestamp=timestamp,
+        )
+        if boundary == "edit" and before is not None and before.deleted:
+            raise RetiredNoteError(f"{path} was deleted via bot; its content is retired")
 
     post.metadata[frontmatter_key] = [*existing, frontmatter_value]
 
@@ -77,15 +130,69 @@ def write_superseded_block(
         ts = timestamp or datetime.now(UTC)
         date_suffix = f" — {ts.date().isoformat()}"
 
-    callout = f"> [!{callout_type}] {title}{date_suffix}\n> {rationale}\n\n"
+    marker = ""
+    if boundary is not None:
+        boundary_id = new_boundary_id()
+        post.metadata[BOUNDARY_KEY] = [
+            *_as_list(post.metadata.get(BOUNDARY_KEY)),
+            boundary_record(boundary_id, frontmatter_value),
+        ]
+        marker = f"{marker_line(boundary_id)}\n"
+
+    callout = f"> [!{callout_type}] {title}{date_suffix}\n{_quoted(rationale)}\n\n"
     prefix = f"{new_content.rstrip()}\n\n" if new_content is not None else ""
-    post.content = prefix + callout + post.content
+    post.content = prefix + marker + callout + post.content
+
+    text = frontmatter.dumps(post)
+    if boundary is not None:
+        _verify_round_trip(text, None if new_content is None else new_content.strip())
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write(frontmatter.dumps(post))
+        f.write(text)
 
     logger.info("Marked %s: %s+=%s", path, frontmatter_key, frontmatter_value)
     return True
+
+
+def _require_boundary_arguments(
+    boundary: Literal["delete", "edit"],
+    *,
+    frontmatter_key: str,
+    frontmatter_value: str,
+    new_content: str | None,
+    timestamp: datetime | None,
+) -> None:
+    if frontmatter_key != SUPERSEDED_KEY:
+        raise ValueError(f"boundary writes require frontmatter_key={SUPERSEDED_KEY!r}")
+    if boundary == "delete":
+        if frontmatter_value != DELETE_MARKER or new_content is not None:
+            raise ValueError(
+                f"a delete boundary requires frontmatter_value={DELETE_MARKER!r} and no new_content"
+            )
+        return
+    if new_content is None:
+        raise ValueError("an edit boundary requires new_content")
+    if timestamp is None or timestamp.utcoffset() != timedelta(0):
+        raise ValueError("an edit boundary requires a UTC timestamp")
+    if frontmatter_value != timestamp.isoformat() or not is_generated_stamp(frontmatter_value):
+        raise ValueError("an edit boundary requires frontmatter_value == timestamp.isoformat()")
+
+
+def _verify_round_trip(text: str, expected_current: str | None) -> None:
+    """Refuse to write a file the projection would not read back as intended.
+
+    `expected_current` is the stripped new text of an edit, or `None` for a delete.
+    """
+    written = frontmatter.loads(text)
+    projected = project(written.metadata, written.content)
+    if expected_current is None:
+        intended = projected.deleted
+    else:
+        intended = not projected.deleted and projected.current == expected_current
+    if not intended:
+        raise AmbiguousHistoryError(
+            "refusing to write: the supersede block would not project to its intended content"
+        )
 
 
 def mark_contradicted(

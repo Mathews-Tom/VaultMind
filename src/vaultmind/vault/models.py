@@ -10,6 +10,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field
 
+from vaultmind.vault.projection import project
+
 
 class NoteType(StrEnum):
     """Note types following Zettelkasten conventions."""
@@ -71,12 +73,20 @@ class Note(BaseModel):
         return str(self.path)
 
     def body_without_frontmatter(self) -> str:
-        """Return content body without YAML frontmatter."""
-        if self.content.startswith("---"):
-            parts = self.content.split("---", 2)
-            if len(parts) >= 3:
-                return parts[2].strip()
+        """Return the already parsed body, including authored rules and preserved history."""
         return self.content
+
+    def current_content(self) -> str:
+        """Return the body that counts as current evidence for retrieval.
+
+        `content` is already the parsed, frontmatter-free body, so it is
+        projected directly (the same body the writer verifies). Preserved
+        history under bot supersede boundaries (and bot-deleted notes
+        entirely) is excluded; `content` still returns the complete body.
+        Raises `AmbiguousHistoryError` (a `ValueError`) when bot supersede
+        metadata and body do not reconcile.
+        """
+        return project(self.frontmatter, self.content).current
 
 
 class NoteChunk(BaseModel):

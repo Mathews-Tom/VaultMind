@@ -208,6 +208,12 @@ File watcher behavior for incremental indexing.
 | `reextract_graph`              | bool | `false` | Re-extract graph entities on file change (LLM call per note) |
 | `batch_graph_interval_seconds` | int  | `300`   | Batch window for graph re-extraction when enabled            |
 
+Watcher hash state tracks successful indexing, not merely observed file bytes. A parse, projection, embedding or index-write failure is logged and does not publish a successful note event or mark that content indexed. A subsequent filesystem event retries unchanged failed content. Bot-generated history is projected before either vector or keyword indexing; author-written callouts alone do not retire text.
+
+`vaultmind --config <explicit.toml> index` reconciles the complete parsed snapshot against the configured Chroma collection and BM25 database. Missing files and an empty snapshot remove derived rows, never canonical files or lineage. Verify the vault/index/database paths before running against user data; fixture validation does not authorize a production reindex. Ambiguous legacy history aborts indexing without rewriting the note. Embedding preparation failure preserves last-good searchable rows; a later cross-index write failure is explicit and can leave partial derived state requiring a subsequent authorized index operation.
+
+Full-index reconciliation uses `VaultParser.iter_notes(strict=True)`: malformed YAML or unreadable/non-UTF8 notes abort the snapshot before derived state changes. Ordinary iteration remains skip-and-log for non-reconciling commands such as `stats`, tag analysis, graph building and digest generation. The standalone `watch`, `mcp-serve`, research and source-run mutation assemblies use the same configured BM25 factory as `index` and the bot when hybrid search is enabled.
+
 ## `[duplicate_detection]`
 
 Semantic duplicate detection thresholds.
@@ -385,6 +391,8 @@ Research pipeline settings (`vaultmind research` command).
 | `max_results`      | int    | `5`        | Max YouTube results per query      |
 | `output_folder`    | string | `research` | Vault subfolder for research notes |
 | `youtube_language` | string | `en`       | Preferred transcript language      |
+
+Research saves the source notes and summary before indexing. Indexing aborts at the first failed note; earlier successful notes stay indexed, later notes are not attempted, and every saved file remains on disk. The CLI exits nonzero with the failed path, typed index-stage details, already-indexed paths, unattempted paths and all saved paths. It does not print completion or close the matching knowledge gap. The embedding cache, configured keyword index and gap store close on failure as well as success. Recovery is an explicit authorized indexing operation; no automatic retry is performed.
 
 ## `[distill]`
 
