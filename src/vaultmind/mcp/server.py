@@ -549,6 +549,10 @@ def _one_line_description(note: Note, max_len: int = 160) -> str:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
+        if stripped[0] in "-*_":
+            rule = stripped.replace(" ", "").replace("\t", "")
+            if len(rule) >= 3 and rule.count(rule[0]) == len(rule):
+                continue
         return stripped[:max_len]
     return ""
 
