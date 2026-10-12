@@ -69,6 +69,8 @@ Set `capture_all = true` in `[routing]` config to bypass routing and capture all
 | `/suggest`    | `/suggest my-note.md`      | Find notes worth linking. Uses composite scoring: semantic similarity + shared graph entities + graph distance |
 | `/duplicates` | `/duplicates my-note.md`   | Find duplicate or merge-candidate notes. Bands: duplicate (>= 92%), merge (80-92%)                             |
 
+Note lookup tries a relative path, a `.md` suffix, matching filenames and then one semantic result. Symlink loops, unreadable candidates and overlong path components do not prevent a valid later lookup strategy. Paths escaping the vault remain explicit containment errors; unexpected filesystem stat errors are not suppressed.
+
 ### Thinking Partner
 
 | Command              | Usage                                | Description                                                                                |

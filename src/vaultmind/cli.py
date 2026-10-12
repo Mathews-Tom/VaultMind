@@ -37,12 +37,14 @@ if TYPE_CHECKING:
 console = Console()
 
 
-def _setup_logging(verbose: bool) -> None:
+def _setup_logging(verbose: bool, *, stderr: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
         format="%(message)s",
-        handlers=[RichHandler(console=console, rich_tracebacks=True)],
+        handlers=[
+            RichHandler(console=Console(stderr=True) if stderr else console, rich_tracebacks=True)
+        ],
     )
 
 
@@ -166,7 +168,7 @@ def _duplicate_review_subscriber(
 @click.pass_context
 def cli(ctx: click.Context, verbose: bool, config: str | None) -> None:
     """VaultMind — AI-powered personal knowledge management."""
-    _setup_logging(verbose)
+    _setup_logging(verbose, stderr=ctx.invoked_subcommand == "mcp-serve")
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = Path(config) if config else None
 
@@ -1746,9 +1748,10 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
     enforcer = ProfileEnforcer(policy, settings.vault.path)
     audit_log = AuditLogger(VAULTMIND_HOME / "data" / "mcp_audit.jsonl")
 
-    console.print(f"  Profile: {profile_name} ({policy.description})")
-    console.print(f"  Write: {'enabled' if policy.write_enabled else 'disabled'}")
-    console.print(f"  Folder scope: {', '.join(policy.folder_scope)}")
+    diagnostics = Console(stderr=True)
+    diagnostics.print(f"  Profile: {profile_name} ({policy.description})")
+    diagnostics.print(f"  Write: {'enabled' if policy.write_enabled else 'disabled'}")
+    diagnostics.print(f"  Folder scope: {', '.join(policy.folder_scope)}")
 
     is_openai = settings.embedding.provider == "openai"
     api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
@@ -1767,7 +1770,7 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
         audit_logger=audit_log,
     )
 
-    console.print("[green]✓[/green] MCP server starting...")
+    diagnostics.print("[green]✓[/green] MCP server starting...")
 
     from mcp.server.stdio import stdio_server
 

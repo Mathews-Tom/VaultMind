@@ -13,6 +13,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from vaultmind.errors import VaultMindError
+from vaultmind.vault.security import (
+    PathResolutionError,
+    PathTraversalError,
+    validate_vault_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,27 +74,28 @@ class ProfileEnforcer:
             raise ProfileError(f"Write operations disabled for profile '{self._policy.name}'")
 
     def check_path(self, target_path: Path) -> None:
-        """Raise ProfileError if path is outside folder scope.
+        """Raise ProfileError if path escapes the vault or is outside folder scope.
 
         Validates at call time (not startup) to avoid chicken-and-egg
-        with vaultmind init. Resolves symlinks before checking.
+        with vaultmind init. Resolves symlinks before checking. Vault
+        containment applies to every profile; the first-folder scope
+        restriction applies only to non-wildcard profiles.
         """
-        if self._policy.allows_all_folders:
-            return
-
-        resolved_root = self._vault_root.resolve()
-        resolved_target = (resolved_root / target_path).resolve()
-
-        # Path traversal check
         try:
-            resolved_target.relative_to(resolved_root)
-        except ValueError:
+            resolved_target = validate_vault_path(str(target_path), self._vault_root)
+        except PathTraversalError:
             raise ProfileError(
                 f"Path traversal blocked: '{target_path}' escapes vault root"
             ) from None
+        except PathResolutionError as exc:
+            raise ProfileError(str(exc)) from None
+        resolved_root = self._vault_root.resolve()
+        rel = resolved_target.relative_to(resolved_root)
+
+        if self._policy.allows_all_folders:
+            return
 
         # Folder scope check
-        rel = resolved_target.relative_to(resolved_root)
         first_folder = rel.parts[0] if rel.parts else ""
 
         if first_folder not in self._policy.folder_scope:

@@ -176,3 +176,24 @@ class TestHandleDeleteRequestMessage:
 
         text = message.answer.call_args[0][0]
         assert "superseded" in text.lower()
+
+
+class TestHandleDeleteCallbackUnresolvablePath:
+    def test_confirm_on_symlink_loop_is_rejected_without_mutation(self, tmp_path: Path) -> None:
+        note = _write_note(tmp_path, body="Untouched.\n")
+        original = note.read_text()
+        (tmp_path / "loop-a.md").symlink_to(tmp_path / "loop-b.md")
+        (tmp_path / "loop-b.md").symlink_to(tmp_path / "loop-a.md")
+        lineage_store = LineageStore(store_path=tmp_path / "lineage.json")
+        ctx = _make_ctx(tmp_path, lineage_store=lineage_store)
+        callback = _fake_callback("delete_confirm:loop-a.md")
+
+        from vaultmind.bot.handlers.delete import handle_delete_callback
+
+        asyncio.run(handle_delete_callback(ctx, callback))
+
+        callback.message.edit_text.assert_awaited_once()
+        callback.answer.assert_awaited_once()
+        ctx.store.delete_note.assert_not_called()
+        assert lineage_store.get_lineage("loop-a.md") == []
+        assert note.read_text() == original

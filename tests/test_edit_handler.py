@@ -224,3 +224,27 @@ class TestHandleEditCallbackExpired:
 
         text = callback.message.edit_text.call_args[0][0]
         assert "expired" in text.lower()
+
+
+class TestHandleEditCallbackUnresolvablePath:
+    def test_confirm_on_symlink_loop_is_rejected_without_mutation(self, tmp_path: Path) -> None:
+        note = _write_note(tmp_path, body="Untouched.\n")
+        original = note.read_text()
+        (tmp_path / "loop-a.md").symlink_to(tmp_path / "loop-b.md")
+        (tmp_path / "loop-b.md").symlink_to(tmp_path / "loop-a.md")
+        pending_edits: dict[int, dict[str, str]] = {
+            7: {"path": "loop-a.md", "original": "x", "edited": "y", "instruction": "z"}
+        }
+        lineage_store = LineageStore(store_path=tmp_path / "lineage.json")
+        ctx = _make_ctx(tmp_path, lineage_store=lineage_store)
+        callback = _fake_callback("edit_confirm:7")
+
+        from vaultmind.bot.handlers.edit import handle_edit_callback
+
+        asyncio.run(handle_edit_callback(ctx, callback, pending_edits))
+
+        callback.message.edit_text.assert_awaited_once()
+        callback.answer.assert_awaited_once()
+        ctx.store.index_single_note.assert_not_called()
+        assert lineage_store.get_lineage("loop-a.md") == []
+        assert note.read_text() == original

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
+from vaultmind.mcp.auth import ProfileEnforcer
 from vaultmind.mcp.profiles import DEFAULT_PROFILES, load_profile
 from vaultmind.mcp.server import _dispatch_tool
 
@@ -41,6 +42,10 @@ def _make_fake_graph() -> MagicMock:
     return MagicMock()
 
 
+def _full_enforcer(vault_root: Path) -> ProfileEnforcer:
+    return ProfileEnforcer(load_profile("full"), vault_root)
+
+
 def _call_capture_note(
     vault_root: Path,
     args: dict,
@@ -55,6 +60,7 @@ def _call_capture_note(
         store,
         graph,
         parser,
+        enforcer=_full_enforcer(vault_root),
     )
 
 
@@ -119,6 +125,7 @@ class TestCaptureNoteCreatesFile:
             store,
             graph,
             parser,
+            enforcer=_full_enforcer(tmp_path),
         )
 
         store.index_single_note.assert_called_once()

@@ -21,7 +21,11 @@ from vaultmind.contradiction.marking import write_superseded_block
 from vaultmind.graph.evolution import LineageStore
 from vaultmind.llm.client import LLMError
 from vaultmind.llm.client import Message as LLMMessage
-from vaultmind.vault.security import PathTraversalError, validate_vault_path
+from vaultmind.vault.security import (
+    PathResolutionError,
+    PathTraversalError,
+    validate_vault_path,
+)
 
 if TYPE_CHECKING:
     from aiogram.types import CallbackQuery, Message
@@ -174,7 +178,7 @@ async def handle_edit_callback(
 
         try:
             filepath = validate_vault_path(pending["path"], ctx.vault_root)
-        except PathTraversalError:
+        except (PathTraversalError, PathResolutionError):
             await callback.message.edit_text(  # type: ignore[union-attr]
                 "Path not allowed.",
             )
