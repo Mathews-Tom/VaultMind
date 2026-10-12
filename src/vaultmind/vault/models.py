@@ -83,12 +83,14 @@ class Note(BaseModel):
     def current_content(self) -> str:
         """Return the body that counts as current evidence for retrieval.
 
-        Preserved history under bot supersede boundaries (and bot-deleted
-        notes entirely) is excluded; `content` and `body_without_frontmatter()`
-        still return the complete body. Raises `AmbiguousHistoryError`
-        (a `ValueError`) when bot supersede metadata and body do not reconcile.
+        `content` is already the parsed, frontmatter-free body, so it is
+        projected directly (the same body the writer verifies). Preserved
+        history under bot supersede boundaries (and bot-deleted notes
+        entirely) is excluded; `content` still returns the complete body.
+        Raises `AmbiguousHistoryError` (a `ValueError`) when bot supersede
+        metadata and body do not reconcile.
         """
-        return project(self.frontmatter, self.body_without_frontmatter()).current
+        return project(self.frontmatter, self.content).current
 
 
 class NoteChunk(BaseModel):

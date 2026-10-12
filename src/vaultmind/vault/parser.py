@@ -28,9 +28,9 @@ TAG_PATTERN = re.compile(r"(?:^|\s)#([a-zA-Z][a-zA-Z0-9_/-]*)", re.MULTILINE)
 class VaultParseError(Exception):
     """One or more vault files could not be parsed.
 
-    Raised by `VaultParser.iter_notes()` so a caller that reconciles derived
-    state against the returned snapshot never treats an unreadable note as
-    an absent one.
+    Raised by `VaultParser.iter_notes(strict=True)` so a caller that reconciles
+    derived state against the returned snapshot never treats an unreadable note
+    as an absent one.
     """
 
     def __init__(self, failures: list[tuple[Path, Exception]]) -> None:
@@ -47,14 +47,17 @@ class VaultParser:
         self.config = config
         self.vault_root = config.path
 
-    def iter_notes(self) -> list[Note]:
+    def iter_notes(self, *, strict: bool = False) -> list[Note]:
         """Parse every markdown file in the vault into Notes.
 
-        A file that cannot be parsed is a failure, not an absent note: every
-        file is attempted, then all failures are raised together as
-        `VaultParseError`, so the returned list is always the complete
-        snapshot and a caller reconciling derived state against it can never
-        mistake an unreadable note for a deleted one.
+        By default a file that cannot be parsed is logged and skipped, so
+        non-reconciling consumers (stats, suggestions, exports, digests) keep
+        working on the readable notes.
+
+        With ``strict=True`` every file is still attempted, then all failures are
+        raised together as `VaultParseError`: a caller reconciling derived state
+        against a full snapshot must use this mode so it can never mistake an
+        unreadable note for a deleted one.
         """
         notes: list[Note] = []
         failures: list[tuple[Path, Exception]] = []
@@ -73,7 +76,7 @@ class VaultParser:
                     continue
                 logger.exception("Failed to parse %s", md_file)
                 failures.append((rel, exc))
-        if failures:
+        if failures and strict:
             raise VaultParseError(failures)
         logger.info("Parsed %d notes from vault", len(notes))
         return notes

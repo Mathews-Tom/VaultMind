@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import functools
 import hashlib
 import importlib.metadata
@@ -117,10 +118,42 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def import_binding() -> dict[str, Any]:
+    """Observe where `vaultmind` is imported from and whether it equals the tracked source."""
+    import importlib.util
+
+    spec = importlib.util.find_spec("vaultmind")
+    if spec is None or spec.origin is None:
+        raise RuntimeError("vaultmind is not importable")
+    package = Path(spec.origin).resolve().parent
+    source = (ROOT / "src" / "vaultmind").resolve()
+    mismatched = sorted(
+        str(path.relative_to(source))
+        for path in source.rglob("*.py")
+        if not (package / path.relative_to(source)).is_file()
+        or digest((package / path.relative_to(source)).read_bytes()) != digest(path.read_bytes())
+    )
+    extra = sorted(
+        str(path.relative_to(package))
+        for path in package.rglob("*.py")
+        if not (source / path.relative_to(package)).is_file()
+    )
+    return {
+        "origin": str(package / "__init__.py"),
+        "editable_source": package == source,
+        "mismatched_files": mismatched,
+        "extra_installed_files": extra,
+        "identical_to_tracked_source": not mismatched and not extra,
+    }
+
+
 def artifact_identity() -> dict[str, Any]:
     files = sorted((ROOT / "src" / "vaultmind").rglob("*.py")) + [Path(__file__).resolve()]
     hashes = {str(p.relative_to(ROOT)): digest(p.read_bytes()) for p in files}
     head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+    tree = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD^{tree}"], text=True
+    ).strip()
     changes = subprocess.check_output(
         ["git", "-C", str(ROOT), "status", "--porcelain"], text=True
     ).splitlines()
@@ -128,6 +161,8 @@ def artifact_identity() -> dict[str, Any]:
         "plan_id": "VM-REMEDIATION-2026-10-11-R1",
         "revision": "R1-A+R1-B",
         "head": head,
+        "tree": tree,
+        "import_binding": import_binding(),
         "working_tree_dirty": bool(changes),
         "working_tree_changes": changes,
         "code_sha256": digest(json.dumps(hashes, sort_keys=True).encode()),
@@ -187,7 +222,7 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     check(
         "installed-code-origin",
         True,
-        Path(vaultmind.__file__).resolve().is_relative_to(ROOT / "src"),
+        import_binding()["identical_to_tracked_source"],
     )
     corpus_hashes: dict[str, str] = {}
     settings = fixture_config(home, "live", False)
@@ -199,7 +234,7 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     bm25 = BM25Index(Path(settings.search.bm25_db_path))
     embedder = cast("Embedder", DeterministicEmbedder())
     store = VaultStore(settings.chroma, embedder, bm25=bm25)
-    notes = parser.iter_notes()
+    notes = parser.iter_notes(strict=True)
     store.index_notes(notes, parser)
     exact = parser.chunk_note(parser.parse_file(settings.vault.path / ALPHA))[0].content
     bm25.upsert("lexical::0", "lexical.md", "Lexical", "kestrelquartz field memo")
@@ -881,6 +916,7 @@ async def mcp_stdio_session(
     cli_args: list[str],
     calls: list[tuple[str, dict[str, Any]]],
     deadline: float = 180.0,
+    launcher: str = MCP_LAUNCHER,
 ) -> dict[str, Any]:
     """Spawn the registered CLI and drive initialize/list_tools/call_tool over SDK stdio."""
     import anyio
@@ -893,7 +929,7 @@ async def mcp_stdio_session(
     # scan can mask exactly that call's own strings without any substring exemption.
     params = StdioServerParameters(
         command=sys.executable,
-        args=["-I", "-c", MCP_LAUNCHER, str(state), *cli_args],
+        args=["-I", "-c", launcher, str(state), *cli_args],
         env={"HOME": str(root), "ANONYMIZED_TELEMETRY": "False", "COLUMNS": "2000"},
         cwd=str(root),
     )
@@ -2767,7 +2803,7 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
         (w.vault / "deleteme.md").write_text(
             approval_note("Delete me", "obsolete scaffold manifest listing " * 6), encoding="utf-8"
         )
-        w.store.index_notes(w.parser.iter_notes(), w.parser)
+        w.store.index_notes(w.parser.iter_notes(strict=True), w.parser)
         llm.reply = "pressure vessel recertification completed on schedule " * 3
         calls = await harness.command(
             "/edit editme.md rewrite about recertification", APPROVAL_PEER
@@ -3281,7 +3317,7 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
                 approval_note(f"Mat {i}", mat_text + f"variant{i}", type="fleeting"),
                 encoding="utf-8",
             )
-        pw.store.index_notes(pw.parser.iter_notes(), pw.parser)
+        pw.store.index_notes(pw.parser.iter_notes(strict=True), pw.parser)
         files_before_job = sorted(str(p) for p in pw.vault.rglob("*.md"))
 
         def pipeline_for(world: SimpleNamespace) -> Any:
@@ -3345,7 +3381,7 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
             llm=llm,
             closers=closers,
         )
-        dw.store.index_notes(dw.parser.iter_notes(), dw.parser)
+        dw.store.index_notes(dw.parser.iter_notes(strict=True), dw.parser)
         dpipe = pipeline_for(dw)
         djob = app._maturation_review_job(
             dpipe, dw.queue, build_block_notifier(Notifier(dw.bot, APPROVAL_CHAT))
@@ -3541,6 +3577,7 @@ LINEAGE_SURFACES = (
     "vector_search",
     "hybrid_search",
     "keyword_search",
+    "keyword_matched_ids",
 )
 LINEAGE_ABSENT: dict[str, list[str]] = {surface: [] for surface in LINEAGE_SURFACES}
 LINEAGE_FOUND = dict.fromkeys(LINEAGE_SURFACES, True)
@@ -3678,6 +3715,23 @@ async def lineage_edit(
     return texts, lineage_replies(await world.harness.callback(confirm, LINEAGE_ACTOR))
 
 
+def lineage_config_text(vault: Path, data: Path, stability: bool, ttl: int, extra: str) -> str:
+    """Explicit absolute-path TOML shared by the bot, CLI and MCP assemblies of every world."""
+    return (
+        f'openai_api_key = "{LINEAGE_OFFLINE_KEY}"\n'
+        f'anthropic_api_key = "{LINEAGE_OFFLINE_KEY}"\n'
+        f'[vault]\npath = "{vault}"\n'
+        f'[chroma]\npersist_dir = "{data / "chroma"}"\ncollection_name = "lineage_chunks"\n'
+        f'[graph]\npersist_path = "{data / "graph.json"}"\n'
+        f'[search]\nhybrid_enabled = true\nbm25_db_path = "{data / "bm25.db"}"\n'
+        "cache_enabled = false\n"
+        f"[watch]\ndebounce_ms = 60\nhash_stability_check = {str(stability).lower()}\n"
+        "reextract_graph = false\n"
+        f"[telegram]\nallowed_user_ids = [{LINEAGE_ACTOR}]\nthinking_session_ttl = {ttl}\n"
+        "[embedding]\ncache_enabled = false\n[llm]\ngraph_context_enabled = false\n" + extra
+    )
+
+
 def lineage_world(
     home: Path,
     name: str,
@@ -3688,6 +3742,7 @@ def lineage_world(
     stability: bool = True,
     ttl: int = 3600,
     extra_toml: str = "",
+    cli_seed: bool = False,
 ) -> SimpleNamespace:
     """Explicit temporary TOML + real parser/Chroma/SQLite BM25/handlers over isolated files."""
     from aiogram import Bot
@@ -3710,21 +3765,20 @@ def lineage_world(
         (vault / rel).write_text(text, encoding="utf-8")
     config = root / "config.toml"
     config.write_text(
-        f'openai_api_key = "{LINEAGE_OFFLINE_KEY}"\n'
-        f'anthropic_api_key = "{LINEAGE_OFFLINE_KEY}"\n'
-        f'[vault]\npath = "{vault}"\n'
-        f'[chroma]\npersist_dir = "{data / "chroma"}"\ncollection_name = "lineage_chunks"\n'
-        f'[graph]\npersist_path = "{data / "graph.json"}"\n'
-        f'[search]\nhybrid_enabled = true\nbm25_db_path = "{data / "bm25.db"}"\n'
-        "cache_enabled = false\n"
-        f"[watch]\ndebounce_ms = 60\nhash_stability_check = {str(stability).lower()}\n"
-        "reextract_graph = false\n"
-        f"[telegram]\nallowed_user_ids = [{LINEAGE_ACTOR}]\nthinking_session_ttl = {ttl}\n"
-        "[embedding]\ncache_enabled = false\n[llm]\ngraph_context_enabled = false\n" + extra_toml,
-        encoding="utf-8",
+        lineage_config_text(vault, data, stability, ttl, extra_toml), encoding="utf-8"
     )
     settings = load_settings(config)
     embedder = LineageEmbedder()
+    indexes_before = {
+        "chroma": settings.chroma.persist_dir.exists(),
+        "keyword": (data / "bm25.db").exists(),
+    }
+    seed_result = None
+    if cli_seed:
+        # The installed command creates the indexes before any verifier handle opens them.
+        seed_result = lineage_cli_run(SimpleNamespace(config=config, embedder=embedder), ["index"])
+        if seed_result.exit_code:
+            raise RuntimeError(f"Command-built seed failed: {seed_result.output}")
     bm25 = BM25Index(data / "bm25.db")
     fault = LineageKeywordFault(bm25)
     store = VaultStore(settings.chroma, cast("Embedder", embedder), bm25=bm25)
@@ -3751,6 +3805,8 @@ def lineage_world(
         data=data,
         config=config,
         settings=settings,
+        indexes_before=indexes_before,
+        cli_seed_result=seed_result,
         embedder=embedder,
         bm25=bm25,
         fault=fault,
@@ -3805,6 +3861,34 @@ def lineage_state(world: SimpleNamespace) -> dict[str, dict[str, str]]:
     return {"vector": lineage_vector_rows(world), "keyword": lineage_keyword_rows(world)}
 
 
+def lineage_keyword_note_rows(world: SimpleNamespace, rel: str) -> dict[str, str]:
+    """Keyword-index rows of one note, read-only and parameterized."""
+    con = sqlite3.connect(f"file:{world.data / 'bm25.db'}?mode=ro", uri=True)
+    try:
+        return {
+            str(row[0]): str(row[1])
+            for row in con.execute(
+                "SELECT chunk_id, content FROM fts_chunks WHERE note_path = ?", (rel,)
+            )
+        }
+    finally:
+        con.close()
+
+
+def lineage_keyword_matched(world: SimpleNamespace, token: str) -> list[str]:
+    """Chunk ids the FTS5 MATCH operator itself selects for `token` (read-only, parameterized)."""
+    con = sqlite3.connect(f"file:{world.data / 'bm25.db'}?mode=ro", uri=True)
+    try:
+        return sorted(
+            str(row[0])
+            for row in con.execute(
+                "SELECT chunk_id FROM fts_chunks WHERE fts_chunks MATCH ?", (f'"{token}"',)
+            )
+        )
+    finally:
+        con.close()
+
+
 def lineage_exposure(world: SimpleNamespace, token: str) -> dict[str, list[str]]:
     """Every retrieval surface (stored rows, vector, hybrid, keyword) that carries `token`."""
     state = lineage_state(world)
@@ -3817,6 +3901,7 @@ def lineage_exposure(world: SimpleNamespace, token: str) -> dict[str, list[str]]
         "vector_search": sorted(h["chunk_id"] for h in vector if token in h["content"]),
         "hybrid_search": sorted(h["chunk_id"] for h in hybrid if token in h["content"]),
         "keyword_search": sorted(str(h["chunk_id"]) for h in keyword),
+        "keyword_matched_ids": lineage_keyword_matched(world, token),
     }
 
 
@@ -3839,7 +3924,7 @@ def lineage_expected_ids(world: SimpleNamespace, rel: str) -> dict[str, list[str
 
 
 def lineage_index_full(world: SimpleNamespace) -> int:
-    return int(world.store.index_notes(world.parser.iter_notes(), world.parser))
+    return int(world.store.index_notes(world.parser.iter_notes(strict=True), world.parser))
 
 
 def lineage_seed_stale(world: SimpleNamespace, rel: str, texts: list[str]) -> list[str]:
@@ -3872,23 +3957,93 @@ def lineage_seed_stale(world: SimpleNamespace, rel: str, texts: list[str]) -> li
     return [c.chunk_id for c in chunks]
 
 
-async def lineage_cli_index(world: SimpleNamespace, embedder: LineageEmbedder | None = None) -> Any:
-    """Real `vaultmind index` command; only the embedding provider boundary is replaced."""
+def lineage_entry_point() -> Any:
+    """The registered `vaultmind` console script, resolved from installed distribution metadata."""
+    matches = [
+        ep
+        for ep in importlib.metadata.entry_points(group="console_scripts")
+        if ep.name == "vaultmind"
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(f"expected exactly one registered vaultmind console script: {matches}")
+    return matches[0]
+
+
+def lineage_entry_identity() -> dict[str, Any]:
+    entry = lineage_entry_point()
+    dist = importlib.metadata.distribution("vaultmind")
+    return {
+        "name": entry.name,
+        "group": entry.group,
+        "value": entry.value,
+        "dist_version": dist.version,
+        "direct_url": dist.read_text("direct_url.json"),
+    }
+
+
+def lineage_keyword_instances() -> list[Any]:
+    import gc
+
+    from vaultmind.indexer.bm25 import BM25Index
+
+    return [obj for obj in gc.get_objects() if isinstance(obj, BM25Index)]
+
+
+def lineage_connection_open(index: Any) -> bool:
+    try:
+        index._con.execute("SELECT 1").fetchall()
+    except sqlite3.ProgrammingError:
+        return False
+    return True
+
+
+def lineage_cli_run(world: SimpleNamespace, args: list[str], embedder: Any = None) -> Any:
+    """Run the registered `vaultmind --config <explicit TOML> <args>` Click group (blocking).
+
+    Only the external Embedder factory is substituted. The command itself creates the
+    configured Chroma store and SQLite keyword index (nothing here builds, patches or injects
+    BM25, VaultStore, the watcher or the handler). ``leaked`` lists keyword-index connections
+    the command created and left open.
+    """
     from unittest.mock import patch
 
     from click.testing import CliRunner
 
-    import vaultmind.cli as app
     import vaultmind.indexer as indexer
 
     use = embedder or world.embedder
-    with (
-        patch.object(indexer, "Embedder", lambda *args, **kwargs: use),
-        patch.object(app, "_create_bm25_index", lambda settings: world.bm25),
-    ):
-        return await asyncio.to_thread(
-            CliRunner().invoke, app.cli, ["--config", str(world.config), "index"]
-        )
+    known = lineage_keyword_instances()
+    cli = lineage_entry_point().load()
+    with patch.object(indexer, "Embedder", lambda *args, **kwargs: use):
+        result = CliRunner().invoke(cli, ["--config", str(world.config), *args])
+    leaked = [
+        str(index._con.execute("PRAGMA database_list").fetchone()[2])
+        for index in lineage_keyword_instances()
+        if not any(index is old for old in known) and lineage_connection_open(index)
+    ]
+    return SimpleNamespace(
+        exit_code=result.exit_code,
+        output=result.output,
+        exception=result.exception,
+        leaked=leaked,
+    )
+
+
+async def lineage_cli_index(world: SimpleNamespace, embedder: LineageEmbedder | None = None) -> Any:
+    """Installed `vaultmind index`; only the embedding provider boundary is replaced."""
+    return await asyncio.to_thread(lineage_cli_run, world, ["index"], embedder)
+
+
+@contextlib.contextmanager
+def lineage_readonly_keyword(world: SimpleNamespace) -> Any:
+    """Real keyword-index write fault for a command that opens its own handle: read-only file."""
+    db = world.data / "bm25.db"
+    mode = db.stat().st_mode & 0o777
+    db.chmod(0o444)
+    try:
+        yield
+    finally:
+        db.chmod(mode)
 
 
 async def lineage_until(predicate: Any, timeout: float = 25.0) -> bool:
@@ -3900,8 +4055,15 @@ async def lineage_until(predicate: Any, timeout: float = 25.0) -> bool:
     return bool(predicate())
 
 
-class LineageWatch:
-    """Real VaultWatcher (watchdog observer thread) wired like `vaultmind watch`."""
+class LineageDirectWatch:
+    """Verifier-assembled watcher rig (direct VaultWatcher + IncrementalWatchHandler).
+
+    NOT the shipped `vaultmind watch` assembly: this rig builds the handler/watcher by hand
+    over the verifier-wired world store (which already carries its own BM25 index) so that
+    failure injection, event publication and the tracked hash are observable. It proves the
+    handler's own error semantics only; the standalone command is exercised separately by
+    `LineageCliWatch`.
+    """
 
     def __init__(self, world: SimpleNamespace) -> None:
         from vaultmind.vault.events import (
@@ -3954,6 +4116,190 @@ class LineageWatch:
 
     def stop(self) -> None:
         self.watcher.stop()
+
+
+LINEAGE_CANARY = "cli-watch-canary.md"
+LT_CANARY = "ketchcanaryclaim"
+
+
+class LineageCliWatch:
+    """The installed `vaultmind watch` command running against a world's explicit TOML.
+
+    The command assembles its own Chroma store, SQLite keyword index, parser, event bus,
+    IncrementalWatchHandler and VaultWatcher; only the external Embedder factory is
+    substituted. It runs in a worker thread so its own `asyncio.run` owns the loop that
+    watchdog events are marshalled onto. Readiness and every outcome are observed through
+    the configured indexes (read-only SQLite and Chroma queries), never through a hook in
+    the command. Stopping cancels the command's main task, which is what SIGINT does to
+    `asyncio.run`; the command's own `finally` then stops the watcher and closes its indexes.
+    """
+
+    def __init__(self, world: SimpleNamespace) -> None:
+        self.world = world
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.main_task: asyncio.Task[Any] | None = None
+        self.future: asyncio.Future[Any] | None = None
+        self.canary = world.vault / LINEAGE_CANARY
+        self.revision = 0
+
+    def _loop(self) -> asyncio.AbstractEventLoop | None:
+        return self.loop if self.loop is not None and self.loop.is_running() else None
+
+    def _run(self) -> Any:
+        # Read-only profiling observes the product loop/task; no event-loop or callback replacement.
+        def observe(frame: Any, event: str, arg: Any) -> None:
+            if (
+                event == "call"
+                and frame.f_code.co_name == "_run_watch"
+                and frame.f_globals.get("__name__") == "vaultmind.cli"
+            ):
+                self.loop = asyncio.get_running_loop()
+                self.main_task = asyncio.current_task()
+
+        previous = sys.getprofile()
+        sys.setprofile(observe)
+        try:
+            return lineage_cli_run(self.world, ["watch"])
+        finally:
+            sys.setprofile(previous)
+
+    async def start(self) -> bool:
+        self.future = asyncio.ensure_future(asyncio.to_thread(self._run))
+        future = self.future
+        return await lineage_until(lambda: self._loop() is not None or future.done(), 30.0) and (
+            self._loop() is not None
+        )
+
+    async def beat(self, timeout: float = 3.0) -> bool:
+        """Rewrite the canary note and wait until the command's index shows that revision."""
+        self.revision += 1
+        marker = f"{LT_CANARY} revision {self.revision}"
+        self.canary.write_text(lineage_note("Watch Canary", f"{marker}."), encoding="utf-8")
+        return await lineage_until(
+            lambda: any(
+                marker in text
+                for text in lineage_keyword_note_rows(self.world, LINEAGE_CANARY).values()
+            ),
+            timeout,
+        )
+
+    async def ready(self) -> bool:
+        """Observer-live barrier: a real filesystem event must reach the configured indexes."""
+        for _ in range(8):
+            if await self.beat():
+                return True
+        return False
+
+    async def stop(self) -> SimpleNamespace:
+        """Bounded graceful cancellation of the command; returns its outcome."""
+        assert self.future is not None
+        loop = self._loop()
+        if loop is not None:
+
+            def cancel() -> None:
+                if self.main_task is not None:
+                    self.main_task.cancel()
+
+            loop.call_soon_threadsafe(cancel)
+        done, _ = await asyncio.wait({self.future}, timeout=20.0)
+        result = self.future.result() if done else None
+        return SimpleNamespace(stopped=bool(done), result=result)
+
+
+def lineage_launcher() -> str:
+    """MCP_LAUNCHER (network guard, installed entry point, env audit) + the Embedder factory."""
+    marker = "code = 0\ntry:\n"
+    if MCP_LAUNCHER.count(marker) != 1:
+        raise RuntimeError("launcher template changed: embedder substitution point not found")
+    substitution = (
+        "import hashlib\nimport re\n\n"
+        + inspect.getsource(DeterministicEmbedder)
+        + "\n\nimport vaultmind.indexer as _indexer\n\n"
+        "_indexer.Embedder = lambda *args, **kwargs: DeterministicEmbedder()\n"
+        'emit(kind="embedder-substitution", factory="DeterministicEmbedder")\n\n'
+    )
+    return MCP_LAUNCHER.replace(marker, substitution + marker)
+
+
+async def lineage_launch(root: Path, state_name: str, cli_args: list[str]) -> SimpleNamespace:
+    """Run one registered `vaultmind` command in an isolated child (non-MCP commands)."""
+    state = root / state_name
+    state.mkdir()
+    done = await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, "-I", "-c", lineage_launcher(), str(state), *cli_args],
+        env={"HOME": str(root), "ANONYMIZED_TELEMETRY": "False", "COLUMNS": "2000"},
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        timeout=240,
+        check=False,
+    )
+    return SimpleNamespace(
+        code=done.returncode, stdout=done.stdout, stderr=done.stderr, state=state
+    )
+
+
+def lineage_launcher_checks(ck: Any, prefix: str, root: Path, state: Path) -> dict[str, Any]:
+    """Identity, isolation and network-guard checks over one child's launcher log."""
+    import vaultmind
+
+    events = [
+        json.loads(line)
+        for line in (state / "launcher.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    by_kind: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        by_kind.setdefault(event["kind"], []).append(event)
+    entry = by_kind["entrypoint"][0]
+    ck(
+        prefix + "origin.registered-entry-point",
+        [["vaultmind.cli:cli"], "vaultmind", "console_scripts", "click.core.Group"],
+        [
+            [e["matches"] for e in by_kind["entrypoint-lookup"]][0],
+            entry["name"],
+            entry["group"],
+            entry["cli_type"],
+        ],
+    )
+    ck(
+        prefix + "origin.same-interpreter-and-package-as-verifier",
+        [sys.executable, os.path.realpath(vaultmind.__file__)],
+        [entry["executable"], entry["module_file"]],
+    )
+    environment = by_kind["environment"][0]
+    ck(
+        prefix + "environment.home-and-no-inherited-credentials",
+        [str(root), []],
+        [environment["home"], environment["forbidden"]],
+    )
+    ck(
+        prefix + "network.guard-blocked-self-test-and-no-outbound-attempt",
+        {"probe": ["blocked"], "outbound": []},
+        {
+            "probe": [e["result"] for e in by_kind["probe"]],
+            "outbound": [e for e in by_kind.get("network", []) if not e["probe"]],
+        },
+    )
+    ck(
+        prefix + "boundary.only-embedder-factory-substituted",
+        ["DeterministicEmbedder"],
+        [e["factory"] for e in by_kind.get("embedder-substitution", [])],
+    )
+    ck(
+        prefix + "lifecycle.clean-exit",
+        [[0, True]],
+        [[e["code"], e["tee_joined"]] for e in by_kind.get("exit", [])],
+    )
+    return {
+        "entry_point": {
+            key: entry[key]
+            for key in ("name", "group", "value", "dist_version", "direct_url", "module_file")
+        },
+        "executable": entry["executable"],
+        "python": entry["python"],
+        "launcher_events": events,
+    }
 
 
 def lineage_hash(path: Path) -> str:
@@ -4080,7 +4426,7 @@ async def lineage_delete_scenario(env: SimpleNamespace) -> None:
     )
 
     lineage_seed_stale(w, "del.md", stale)
-    rig = LineageWatch(w)
+    rig = LineageDirectWatch(w)
     try:
         await asyncio.sleep(1.0)
         path.write_bytes(marked)
@@ -4226,7 +4572,7 @@ async def lineage_edit_scenario(env: SimpleNamespace) -> None:
     current_ok("full-cli")
 
     lineage_seed_stale(w, "edit.md", stale)
-    rig = LineageWatch(w)
+    rig = LineageDirectWatch(w)
     try:
         await asyncio.sleep(1.0)
         path.write_bytes(after_second)
@@ -4612,7 +4958,8 @@ async def lineage_failure_scenario(env: SimpleNamespace) -> None:
         ["IndexUpdateError", "index_notes", IndexStage.KEYWORD_REPLACE.value],
         [shape["type"], shape.get("operation"), shape.get("stage")],
     )
-    cli = await lineage_cli_index(w)
+    with lineage_readonly_keyword(w):
+        cli = await lineage_cli_index(w)
     ck("fault.cross-index-full-cli-exits-nonzero", True, cli.exit_code != 0)
     ck(
         "fault.cross-index-full-cli-prints-no-success",
@@ -4689,7 +5036,7 @@ async def lineage_watch_scenario(env: SimpleNamespace, stability: bool) -> None:
     )
     env.worlds.append(w)
     path = w.vault / "w.md"
-    rig = LineageWatch(w)
+    rig = LineageDirectWatch(w)
     try:
         await asyncio.sleep(1.0)
         baseline = path.read_bytes()
@@ -5073,7 +5420,7 @@ async def lineage_grammar_scenario(env: SimpleNamespace) -> None:
     )
     ck("grammar.ambiguous-cli-leaves-index-unchanged", good, lineage_state(w))
 
-    rig = LineageWatch(w)
+    rig = LineageDirectWatch(w)
     try:
         await asyncio.sleep(1.0)
         for rel in ambiguous:
@@ -5188,7 +5535,11 @@ async def lineage_consumer_scenario(env: SimpleNamespace) -> None:
     from youtube_transcript_api import YouTubeTranscriptApi
 
     from vaultmind.mcp.server import _dispatch_tool
-    from vaultmind.research.pipeline import ResearchConfig, run_research_pipeline
+    from vaultmind.research.pipeline import (
+        ResearchConfig,
+        ResearchIndexError,
+        run_research_pipeline,
+    )
     from vaultmind.research.searcher import SearchResult
 
     ck = env.ck
@@ -5358,7 +5709,8 @@ async def lineage_consumer_scenario(env: SimpleNamespace) -> None:
                 raised = exc
         w.fault.disarm()
         written = sorted((w.vault / "research").rglob(f"*{mode}*.md"))
-        outcome = type(raised).__name__ if raised else "completed"
+        index_error = raised.__cause__ if isinstance(raised, ResearchIndexError) else raised
+        outcome = type(index_error).__name__ if index_error else "completed"
         if mode == "control":
             summary_rel = str(result.summary_path.relative_to(w.vault)) if result else ""
             ck(
@@ -5372,19 +5724,37 @@ async def lineage_consumer_scenario(env: SimpleNamespace) -> None:
                 ["IndexUpdateError", None, True],
                 [outcome, result, bool(written)],
             )
+            saved_paths = sorted((w.vault / "research" / f"lineage-{mode}").rglob("*.md"))
+            ck(
+                "consumer.research-fault-reports-all-saved-and-unattempted-paths",
+                [
+                    True,
+                    [str(path) for path in saved_paths],
+                    [],
+                    [str(path) for path in saved_paths if path.name == "summary.md"],
+                ],
+                [
+                    isinstance(raised, ResearchIndexError),
+                    sorted(str(path) for path in getattr(raised, "saved_paths", ())),
+                    [str(path) for path in getattr(raised, "indexed_paths", ())],
+                    sorted(str(path) for path in getattr(raised, "unattempted_paths", ())),
+                ],
+            )
 
     for mode in ("control", "fault"):
-        if mode == "fault":
-            w.fault.arm("*")
-        cli = await lineage_cli_index(w)
-        w.fault.disarm()
+        with lineage_readonly_keyword(w) if mode == "fault" else contextlib.nullcontext():
+            cli = await lineage_cli_index(w)
         if mode == "control":
             ck("consumer.cli-index-control-exit-code", 0, cli.exit_code)
         else:
             ck(
                 "consumer.cli-index-fault-nonzero-without-success",
                 [True, False, True],
-                [cli.exit_code != 0, bool(LINEAGE_SUCCESS.search(cli.output)), cause in cli.output],
+                [
+                    cli.exit_code != 0,
+                    bool(LINEAGE_SUCCESS.search(cli.output)),
+                    "readonly database" in cli.output + repr(cli.exception),
+                ],
             )
 
     tw = lineage_world(
@@ -5503,6 +5873,373 @@ async def lineage_consumer_scenario(env: SimpleNamespace) -> None:
         thinking_log.removeHandler(handler)
 
 
+CW_OLD = "ketchoriginalauth"
+CW_NEW = "ketchrevisedauth"
+CW_LDEL = "ketchlegacydel"
+CW_LO = "ketchlegacyorig"
+CW_LN = "ketchlegacynew"
+CW_GONE = "ketchremovedfile"
+CW_BDEL = "ketchbotdeleted"
+CW_FRESH = "ketchfreshfile"
+
+
+async def lineage_cli_watch_scenario(env: SimpleNamespace) -> None:
+    """Acceptance 6: installed `index` then `watch` commands reconcile BOTH configured indexes.
+
+    The commands build their own Chroma store and SQLite keyword index from explicit absolute
+    TOML; only the Embedder factory is substituted. Every retirement below is performed by the
+    command's own watcher/handler/store on real filesystem events, observed read-only.
+    """
+    from datetime import UTC, datetime
+
+    ck = env.ck
+    moment = datetime(2026, 10, 12, 12, 0, 0, 111111, tzinfo=UTC)
+    notes = {
+        "auth.md": lineage_note("Authored Subject", f"Authored baseline {CW_OLD}."),
+        "ldel.md": lineage_note("Legacy Delete", f"Legacy delete subject {CW_LDEL}."),
+        "ledit.md": lineage_note("Legacy Edit", f"Legacy edit original {CW_LO}."),
+        "gone.md": lineage_note("Removed Subject", f"Soon removed {CW_GONE}."),
+        "bdel.md": lineage_note("Bot Delete", f"Bot delete subject {CW_BDEL}."),
+        "keep.md": lineage_note("Watch Keeper", f"Control record {LT_KEEP}."),
+    }
+    w = lineage_world(
+        env.home,
+        "cli-watch",
+        notes,
+        env.llm,
+        env.closers,
+        extra_toml="[duplicate_detection]\nenabled = false\n",
+        cli_seed=True,
+    )
+    env.worlds.append(w)
+    ck(
+        "cli-watch.configured-index-files-absent-before-command-seed",
+        {"chroma": False, "keyword": False},
+        w.indexes_before,
+    )
+    cli = w.cli_seed_result
+    ck("cli-watch.baseline-index-exit-code", 0, cli.exit_code)
+    ck("cli-watch.baseline-index-closes-its-keyword-connection", [], cli.leaked)
+    ck(
+        "cli-watch.baseline-every-note-indexed-by-the-command",
+        {rel: lineage_expected_ids(w, rel) for rel in notes},
+        {rel: lineage_ids(w, rel) for rel in notes},
+    )
+    claims = (CW_OLD, CW_LDEL, CW_LO, CW_GONE, CW_BDEL, LT_KEEP)
+    ck(
+        "cli-watch.baseline-claims-retrievable-on-every-surface",
+        [LINEAGE_FOUND] * len(claims),
+        [lineage_found(w, claim) for claim in claims],
+    )
+
+    batches = w.embedder.batches
+    rig = LineageCliWatch(w)
+    outcome = SimpleNamespace(stopped=False, result=None)
+    try:
+        started = await rig.start()
+        ck("cli-watch.command-runs-its-own-event-loop", True, started)
+        ck("cli-watch.observer-live-via-real-filesystem-event", True, await rig.ready())
+        ck("cli-watch.command-embeds-through-external-factory", True, w.embedder.batches > batches)
+
+        async def settles(*, gone: tuple[str, ...], present: tuple[str, ...]) -> bool:
+            return await lineage_until(
+                lambda: (
+                    all(lineage_exposure(w, t) == LINEAGE_ABSENT for t in gone)
+                    and all(lineage_found(w, t) == LINEAGE_FOUND for t in present)
+                )
+            )
+
+        paths = {rel: w.vault / rel for rel in notes}
+        paths["auth.md"].write_text(
+            lineage_note("Authored Subject", f"Authored revision {CW_NEW}."), encoding="utf-8"
+        )
+        settled = await settles(gone=(CW_OLD,), present=(CW_NEW,))
+        ck(
+            "cli-watch.authored-edit-replaces-both-indexes",
+            [True, LINEAGE_ABSENT, LINEAGE_FOUND, lineage_expected_ids(w, "auth.md")],
+            [
+                settled,
+                lineage_exposure(w, CW_OLD),
+                lineage_found(w, CW_NEW),
+                lineage_ids(w, "auth.md"),
+            ],
+        )
+
+        lineage_legacy_delete(paths["ldel.md"], moment)
+        settled = await settles(gone=(CW_LDEL,), present=(LT_KEEP,))
+        ck(
+            "cli-watch.legacy-bot-delete-retired-from-vector-keyword-hybrid",
+            [True, LINEAGE_ABSENT, {"vector": [], "keyword": []}, True],
+            [
+                settled,
+                lineage_exposure(w, CW_LDEL),
+                lineage_ids(w, "ldel.md"),
+                CW_LDEL in paths["ldel.md"].read_text(encoding="utf-8"),
+            ],
+        )
+
+        lineage_legacy_edit(paths["ledit.md"], f"Legacy edit current {CW_LN}.", "rewrite", moment)
+        settled = await settles(gone=(CW_LO,), present=(CW_LN,))
+        ck(
+            "cli-watch.legacy-bot-edit-indexes-only-current-text",
+            [True, LINEAGE_ABSENT, LINEAGE_FOUND, lineage_expected_ids(w, "ledit.md"), True],
+            [
+                settled,
+                lineage_exposure(w, CW_LO),
+                lineage_found(w, CW_LN),
+                lineage_ids(w, "ledit.md"),
+                CW_LO in paths["ledit.md"].read_text(encoding="utf-8"),
+            ],
+        )
+
+        paths["gone.md"].unlink()
+        settled = await settles(gone=(CW_GONE,), present=())
+        ck(
+            "cli-watch.removed-file-retired-from-vector-keyword-hybrid",
+            [True, LINEAGE_ABSENT, {"vector": [], "keyword": []}],
+            [settled, lineage_exposure(w, CW_GONE), lineage_ids(w, "gone.md")],
+        )
+
+        (w.vault / "fresh.md").write_text(
+            lineage_note("Fresh Subject", f"Fresh file {CW_FRESH}."), encoding="utf-8"
+        )
+        settled = await settles(gone=(), present=(CW_FRESH,))
+        ck(
+            "cli-watch.new-file-indexed-into-both-indexes",
+            [True, lineage_expected_ids(w, "fresh.md")],
+            [settled, lineage_ids(w, "fresh.md")],
+        )
+
+        replies = await lineage_delete(w, "bdel.md")
+        marked = paths["bdel.md"].read_bytes()
+        beat = await rig.beat()
+        ck(
+            "cli-watch.bot-delete-stays-retired-while-watching",
+            [False, True, LINEAGE_ABSENT, {"vector": [], "keyword": []}, ["deleted"], True],
+            [
+                lineage_failure_in(replies),
+                beat,
+                lineage_exposure(w, CW_BDEL),
+                lineage_ids(w, "bdel.md"),
+                lineage_edges(w, "bdel.md"),
+                CW_BDEL.encode() in marked,
+            ],
+        )
+        ck(
+            "cli-watch.bot-delete-leaves-file-bytes-unchanged-by-the-watcher",
+            digest(marked),
+            digest(paths["bdel.md"].read_bytes()),
+        )
+
+        rig.canary.unlink()
+        retired = await lineage_until(
+            lambda: lineage_ids(w, LINEAGE_CANARY) == {"vector": [], "keyword": []}
+        )
+        ck("cli-watch.deleted-event-retires-canary-rows", True, retired)
+        ck(
+            "cli-watch.control-note-untouched",
+            [lineage_expected_ids(w, "keep.md"), LINEAGE_FOUND],
+            [lineage_ids(w, "keep.md"), lineage_found(w, LT_KEEP)],
+        )
+    finally:
+        outcome = await rig.stop()
+
+    result = outcome.result or SimpleNamespace(
+        exit_code=None, output="", exception=None, leaked=None
+    )
+    ck("cli-watch.graceful-cancellation-within-bound", True, outcome.stopped)
+    ck(
+        "cli-watch.command-exits-zero-without-exception",
+        [0, None],
+        [result.exit_code, repr(result.exception) if result.exception else None],
+    )
+    ck("cli-watch.command-reported-watching", True, "Watching" in result.output)
+    ck("cli-watch.command-closes-its-keyword-connection", [], result.leaked)
+    retired_rels = ("ldel.md", "gone.md", "bdel.md", LINEAGE_CANARY)
+    ck(
+        "cli-watch.final-ids-equal-current-projection",
+        {
+            "auth.md": lineage_expected_ids(w, "auth.md"),
+            "ledit.md": lineage_expected_ids(w, "ledit.md"),
+            "fresh.md": lineage_expected_ids(w, "fresh.md"),
+            "keep.md": lineage_expected_ids(w, "keep.md"),
+            "retired": {"vector": [], "keyword": []},
+        },
+        {
+            "auth.md": lineage_ids(w, "auth.md"),
+            "ledit.md": lineage_ids(w, "ledit.md"),
+            "fresh.md": lineage_ids(w, "fresh.md"),
+            "keep.md": lineage_ids(w, "keep.md"),
+            "retired": {
+                kind: [k for rel in retired_rels for k in lineage_ids(w, rel)[kind]]
+                for kind in ("vector", "keyword")
+            },
+        },
+    )
+    env.owning["cli_watch"] = {
+        "entry_point": lineage_entry_identity(),
+        "config_sha256": digest(w.config.read_bytes()),
+        "canary_revisions": rig.revision,
+        "command_output": result.output,
+    }
+
+
+MS_OLD = "harborovwoldclaim"
+MS_NEW = "harborovwnewclaim"
+MS_RET = "harborretireclaim"
+MS_CAP = "harborcaptureclaim"
+
+
+async def lineage_mcp_serve_scenario(env: SimpleNamespace) -> None:
+    """Acceptance 7: registered MCP mutation consumers over the real `mcp-serve` assembly.
+
+    Installed `index` seeds the configured vector and keyword indexes in a child; the installed
+    `mcp-serve` then runs in an isolated child behind the SDK stdio client with only the
+    Embedder factory substituted, and `vault_write` (overwrite and retire) and `capture_note`
+    mutate through the assembly's own store. Old keyword rows must not survive.
+    """
+    from datetime import UTC, datetime
+
+    from vaultmind.config import load_settings
+    from vaultmind.indexer.bm25 import BM25Index
+    from vaultmind.indexer.store import VaultStore
+    from vaultmind.vault.parser import VaultParser
+
+    ck = env.ck
+    root = (env.home / "mcp-serve").resolve()
+    vault, data, scratch = root / "vault", root / "data", root / "scratch"
+    for directory in (vault, data, scratch):
+        directory.mkdir(parents=True)
+    notes = {
+        "ow.md": lineage_note("Serve Overwrite", f"Overwrite baseline {MS_OLD}."),
+        "ret.md": lineage_note("Serve Retire", f"Retire baseline {MS_RET}."),
+        "keep.md": lineage_note("Serve Keeper", f"Control record {LT_KEEP}."),
+    }
+    for rel, text in notes.items():
+        (vault / rel).write_text(text, encoding="utf-8")
+    config = root / "config.toml"
+    config.write_text(lineage_config_text(vault, data, True, 3600, ""), encoding="utf-8")
+    settings = load_settings(config)
+    # An already-generated legacy bot deletion of ret.md, produced by the base-commit writer.
+    moment = datetime(2026, 10, 12, 12, 0, 0, 222222, tzinfo=UTC)
+    (scratch / "ret.md").write_text(notes["ret.md"], encoding="utf-8")
+    lineage_legacy_delete(scratch / "ret.md", moment)
+    retired_text = (scratch / "ret.md").read_text(encoding="utf-8")
+    keyword_db_before = (data / "bm25.db").exists()
+
+    seed = await lineage_launch(root, "launcher-state-index", ["--config", str(config), "index"])
+    ck("mcp-serve.seed-index-exit-code", 0, seed.code)
+    seed_identity = lineage_launcher_checks(ck, "mcp-serve.seed.", root, seed.state)
+    indexed = re.search(r"Indexed (\d+) chunks from (\d+) notes", re.sub(r"\s+", " ", seed.stdout))
+    view = SimpleNamespace(data=data, vault=vault)
+    baseline = {rel: lineage_keyword_note_rows(view, rel) for rel in notes}
+    ck(
+        "mcp-serve.seed-keyword-index-created-and-filled-by-installed-command",
+        [False, 3, True, True, True],
+        [
+            keyword_db_before,
+            indexed and int(indexed.group(2)),
+            all(baseline.values()),
+            any(MS_OLD in text for text in baseline["ow.md"].values()),
+            any(MS_RET in text for text in baseline["ret.md"].values()),
+        ],
+    )
+
+    calls = [
+        (
+            "vault_write",
+            {
+                "path": "ow.md",
+                "content": lineage_note("Serve Overwrite", f"Overwrite replacement {MS_NEW}."),
+            },
+        ),
+        ("vault_write", {"path": "ret.md", "content": retired_text}),
+        ("capture_note", {"content": f"MCP captured claim {MS_CAP}.", "title": "Serve Capture"}),
+        ("vault_search", {"query": MS_OLD, "n_results": 20}),
+        ("vault_search", {"query": MS_RET, "n_results": 20}),
+        ("vault_search", {"query": LT_KEEP, "n_results": 20}),
+    ]
+    run = await mcp_stdio_session(
+        root,
+        ["--config", str(config), "mcp-serve", "--profile", "full"],
+        calls,
+        launcher=lineage_launcher(),
+    )
+    session_identity = lineage_launcher_checks(ck, "mcp-serve.session.", root, run["state"])
+    payloads = [json.loads(result.content[0].text) for result in run["results"]]
+    stderr = (run["state"] / "stderr.txt").read_text(encoding="utf-8")
+    ck(
+        "mcp-serve.session-protocol-clean",
+        [[], [False] * len(calls), False],
+        [run["errors"], [bool(r.isError) for r in run["results"]], "Traceback" in stderr],
+    )
+    ck(
+        "mcp-serve.mutation-tools-report-saved-and-indexed",
+        [
+            {"status": "ok", "path": "ow.md"},
+            {"status": "ok", "path": "ret.md"},
+            ["ok", "Serve Capture"],
+        ],
+        [payloads[0], payloads[1], [payloads[2].get("status"), payloads[2].get("title")]],
+    )
+
+    bm25 = BM25Index(data / "bm25.db")
+    env.closers.append(bm25.close)
+    parser = VaultParser(settings.vault)
+    store = VaultStore(settings.chroma, cast("Embedder", DeterministicEmbedder()), bm25=bm25)
+    after = SimpleNamespace(
+        settings=settings, data=data, vault=vault, store=store, bm25=bm25, parser=parser
+    )
+    captured = payloads[2]["path"]
+    ck(
+        "mcp-serve.overwrite-replaces-old-vector-keyword-and-hybrid-evidence",
+        [LINEAGE_ABSENT, LINEAGE_FOUND, lineage_expected_ids(after, "ow.md")],
+        [
+            lineage_exposure(after, MS_OLD),
+            lineage_found(after, MS_NEW),
+            lineage_ids(after, "ow.md"),
+        ],
+    )
+    ck(
+        "mcp-serve.retire-removes-vector-keyword-and-hybrid-evidence-keeps-file",
+        [LINEAGE_ABSENT, {"vector": [], "keyword": []}, retired_text, ""],
+        [
+            lineage_exposure(after, MS_RET),
+            lineage_ids(after, "ret.md"),
+            (vault / "ret.md").read_text(encoding="utf-8"),
+            parser.parse_file(vault / "ret.md").current_content().strip(),
+        ],
+    )
+    ck(
+        "mcp-serve.capture-indexed-and-control-untouched",
+        [LINEAGE_FOUND, lineage_expected_ids(after, captured), LINEAGE_FOUND],
+        [
+            lineage_found(after, MS_CAP),
+            lineage_ids(after, captured),
+            lineage_found(after, LT_KEEP),
+        ],
+    )
+    searches = [payload["results"] for payload in payloads[3:]]
+    ck(
+        "mcp-serve.vault-search-never-returns-retired-or-overwritten-text",
+        [False, False, True],
+        [
+            any(MS_OLD in hit["content"] for hit in searches[0]),
+            any(MS_RET in hit["content"] for hit in searches[1]),
+            any(LT_KEEP in hit["content"] for hit in searches[2]),
+        ],
+    )
+    env.owning["mcp_serve"] = {
+        "config_sha256": digest(config.read_bytes()),
+        "initial_files_sha256": {rel: digest(text.encode()) for rel, text in notes.items()},
+        "final_files_sha256": lineage_vault_digests(after),
+        "seed": seed_identity,
+        "session": session_identity,
+        "tool_results": payloads,
+        "seed_output": seed.stdout,
+    }
+
+
 LINEAGE_SCENARIOS = (
     ("delete", lineage_delete_scenario),
     ("edit", lineage_edit_scenario),
@@ -5510,6 +6247,8 @@ LINEAGE_SCENARIOS = (
     ("failure", lineage_failure_scenario),
     ("grammar", lineage_grammar_scenario),
     ("consumers", lineage_consumer_scenario),
+    ("cli-watch", lineage_cli_watch_scenario),
+    ("mcp-serve", lineage_mcp_serve_scenario),
 )
 
 
@@ -5542,7 +6281,7 @@ async def lineage_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, An
     ck(
         "sanitization.code-imported-from-worktree",
         True,
-        Path(vaultmind.__file__).resolve().is_relative_to(ROOT / "src"),
+        import_binding()["identical_to_tracked_source"],
     )
     if VAULTMIND_HOME.resolve() != home / ".vaultmind":
         raise RuntimeError("Refusing lineage acceptance: application state is outside fixture HOME")
@@ -5557,7 +6296,7 @@ async def lineage_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, An
     old_level = root_logger.level
     root_logger.addHandler(capture)
     root_logger.setLevel(logging.INFO)
-    env = SimpleNamespace(ck=ck, home=home, llm=LineageLLM(), closers=[], worlds=[])
+    env = SimpleNamespace(ck=ck, home=home, llm=LineageLLM(), closers=[], worlds=[], owning={})
     completed: list[str] = []
     try:
         for name, scenario in LINEAGE_SCENARIOS:
@@ -5622,17 +6361,24 @@ async def lineage_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, An
         },
         "raw_log": log_records,
         "scenarios_completed": completed,
+        "owning_surfaces": env.owning,
         "scripted_llm_calls": len(env.llm.calls),
         "failed_checks": failures,
         "fixture_limits": (
             "Fixture-only offline proof over synthetic temporary vaults and explicit TOML. Real "
             "parser, Chroma, SQLite BM25, hybrid search, Telegram handlers over the aiogram "
-            "dispatcher, lineage store, watchdog VaultWatcher/IncrementalWatchHandler and click "
-            "CLI run. Only the LLM, embedding provider, Telegram transport, article fetch, "
-            "YouTube search/transcript and Telegram file boundaries are replaced; faults are "
-            "injected at the SQLite keyword-index and embedder boundaries. Legacy bytes come "
-            "from executing the base commit's marker writer. No M18 campaign, no native model, "
-            "provider, embedding-quality or Telegram qualification."
+            "dispatcher and lineage store run. The installed `vaultmind` console script runs "
+            "`index` and `watch` in-process and `index`/`mcp-serve` in isolated children "
+            "(MCP over the SDK stdio client); each command builds its own configured Chroma "
+            "store and SQLite keyword index. The direct-watcher scenarios use a verifier-"
+            "assembled VaultWatcher/IncrementalWatchHandler over a verifier-wired store and "
+            "prove only the handler's own error semantics. Only the LLM, embedding provider, "
+            "Telegram transport, article fetch, YouTube search/transcript and Telegram file "
+            "boundaries are replaced; faults are injected at the SQLite keyword-index (direct "
+            "store: instance wrapper; installed commands: read-only index file) and embedder "
+            "boundaries. Legacy bytes come from executing the base commit's marker writer. No "
+            "M18 campaign, no native model, provider, embedding-quality or Telegram "
+            "qualification."
         ),
     }
     if failures:
@@ -5715,17 +6461,26 @@ def main() -> int:
             transport=(
                 "in-process: real VaultParser/Chroma/SQLite BM25/hybrid VaultStore, real "
                 "CommandHandlers behind bot.telegram.register_handlers over aiogram "
-                "Update/Dispatcher, real LineageStore, real watchdog VaultWatcher + "
-                "IncrementalWatchHandler, real click `vaultmind index` CLI"
+                "Update/Dispatcher, real LineageStore; installed `vaultmind` console script "
+                "(Click group from installed metadata) running `index` and `watch` in-process "
+                "(watch on its own asyncio.run loop in a worker thread, real watchdog events, "
+                "cancelled gracefully) and `index`/`mcp-serve` in isolated children (MCP over "
+                "the SDK stdio client); verifier-assembled direct VaultWatcher + "
+                "IncrementalWatchHandler scenarios are labelled direct-watcher and prove only "
+                "handler error semantics"
             ),
             boundary_substitutions=[
-                "synthetic token embeddings at the embedding provider boundary "
-                "(vaultmind.indexer.Embedder replaced only for the CLI; switchable outage)",
+                "synthetic token embeddings at the external embedding Embedder factory "
+                "(vaultmind.indexer.Embedder replaced only for installed commands; switchable "
+                "outage in-process)",
                 "scripted llm.client (generating and confirming bot edits, distill, vision)",
                 "recording aiogram BaseSession plus synthetic GetFile/stream bytes (no Telegram)",
                 "urllib.request.urlopen, yt-dlp search and transcript API replaced for consumers",
-                "fault injection at SQLite keyword-index write methods and the embedder only",
-                "temporary HOME/VAULTMIND_HOME and explicit fixture TOML per world",
+                "fault injection at SQLite keyword-index write methods (direct stores) or a "
+                "read-only index file (installed commands), and the embedder only",
+                "temporary HOME/VAULTMIND_HOME and explicit absolute fixture TOML per world",
+                "isolated children run behind a launcher-side network audit hook with a "
+                "blocked-lookup self-test",
             ],
             limitations="Fixture-only offline proof; not native model/provider/Telegram "
             "qualification; no M18 campaign; sources finalization (M15) not claimed.",

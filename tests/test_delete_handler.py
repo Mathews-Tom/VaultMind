@@ -162,7 +162,7 @@ class TestHandleDeleteCallbackSupersede:
         ctx = _make_ctx(env)
 
         _confirm(ctx)
-        env.store.index_notes(env.parser.iter_notes(), env.parser)
+        env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
 
         assert env.surfaces(TOKEN) == set()
         assert env.surfaces(OTHER_TOKEN) == ALL_SURFACES

@@ -562,32 +562,35 @@ def index(ctx: click.Context) -> None:
         sys.exit(1)
 
     cache = _create_embedding_cache(settings)
-    bm25 = _create_bm25_index(settings)
-    parser = VaultParser(settings.vault)
-    embedder = Embedder(settings.embedding, api_key, cache=cache)
-    store = VaultStore(settings.chroma, embedder, bm25=bm25)
-
+    bm25 = None
     try:
-        with console.status("Parsing vault..."):
-            notes = parser.iter_notes()
+        bm25 = _create_bm25_index(settings)
+        parser = VaultParser(settings.vault)
+        embedder = Embedder(settings.embedding, api_key, cache=cache)
+        store = VaultStore(settings.chroma, embedder, bm25=bm25)
 
-        with console.status(f"Indexing {len(notes)} notes..."):
-            count = store.index_notes(notes, parser)
-    except Exception as exc:
-        raise click.ClickException(f"Indexing failed: {exc}") from exc
+        try:
+            with console.status("Parsing vault..."):
+                notes = parser.iter_notes(strict=True)
 
-    console.print(f"[green]✓[/green] Indexed {count} chunks from {len(notes)} notes")
+            with console.status(f"Indexing {len(notes)} notes..."):
+                count = store.index_notes(notes, parser)
+        except Exception as exc:
+            raise click.ClickException(f"Indexing failed: {exc}") from exc
 
-    if cache is not None:
-        from vaultmind.indexer.embedding_cache import EmbeddingCache
+        console.print(f"[green]✓[/green] Indexed {count} chunks from {len(notes)} notes")
 
-        assert isinstance(cache, EmbeddingCache)
-        cs = cache.stats()
-        console.print(
-            f"  Embedding cache: {cs['total_entries']} entries, "
-            f"{cs['total_size_bytes'] / 1024:.1f} KB"
-        )
-        cache.close()
+        if cache is not None:
+            cs = cache.stats()
+            console.print(
+                f"  Embedding cache: {cs['total_entries']} entries, "
+                f"{cs['total_size_bytes'] / 1024:.1f} KB"
+            )
+    finally:
+        if bm25 is not None:
+            bm25.close()
+        if cache is not None:
+            cache.close()
 
 
 @cli.command()
@@ -1096,88 +1099,93 @@ def watch(ctx: click.Context, with_graph: bool) -> None:
         sys.exit(1)
 
     cache = _create_embedding_cache(settings)
-    parser = VaultParser(settings.vault)
-    embedder = Embedder(settings.embedding, embed_key, cache=cache)
-    store = VaultStore(settings.chroma, embedder)
-
-    event_bus = VaultEventBus()
-
-    # Duplicate detection and note suggestions
-    from vaultmind.indexer.duplicate_detector import DuplicateDetector
-    from vaultmind.indexer.note_suggester import NoteSuggester
-    from vaultmind.vault.events import NoteCreatedEvent, NoteModifiedEvent
-
-    if settings.duplicate_detection.enabled:
-        detector = DuplicateDetector(settings.duplicate_detection, store)
-        if settings.autonomy.enabled:
-            dup_subscriber = _duplicate_review_subscriber(detector, _build_review_queue(settings))
-            event_bus.subscribe(NoteCreatedEvent, dup_subscriber)  # type: ignore[arg-type]
-            event_bus.subscribe(NoteModifiedEvent, dup_subscriber)  # type: ignore[arg-type]
-        else:
-            event_bus.subscribe(NoteCreatedEvent, detector.on_note_changed)  # type: ignore[arg-type]
-            event_bus.subscribe(NoteModifiedEvent, detector.on_note_changed)  # type: ignore[arg-type]
-
-    # Optional graph re-extraction
-    graph = None
-    extractor = None
-    watch_config = settings.watch
-    if with_graph:
-        from vaultmind.config import WatchConfig
-        from vaultmind.graph import EntityExtractor, KnowledgeGraph
-
-        _require_llm_key(settings)
-        graph = KnowledgeGraph(settings.graph)
-        extraction_model = settings.graph.extraction_model or settings.llm.thinking_model
-        llm_client = _create_llm_client(settings)
-        extractor = EntityExtractor(settings.graph, llm_client, model=extraction_model)
-        # Force reextract_graph on since user explicitly opted in via --graph
-        watch_config = WatchConfig(
-            debounce_ms=settings.watch.debounce_ms,
-            hash_stability_check=settings.watch.hash_stability_check,
-            reextract_graph=True,
-            batch_graph_interval_seconds=settings.watch.batch_graph_interval_seconds,
-        )
-
-    # Note suggestions (graph available only if --graph was used)
-    if settings.note_suggestions.enabled:
-        watch_suggester = NoteSuggester(settings.note_suggestions, store, graph=graph)
-        event_bus.subscribe(NoteCreatedEvent, watch_suggester.on_note_changed)  # type: ignore[arg-type]
-        event_bus.subscribe(NoteModifiedEvent, watch_suggester.on_note_changed)  # type: ignore[arg-type]
-
-    handler = IncrementalWatchHandler(
-        config=watch_config,
-        parser=parser,
-        store=store,
-        event_bus=event_bus,
-        graph=graph,
-        extractor=extractor,
-    )
-    watcher = VaultWatcher(config=settings.vault, on_change=handler.handle_change)
-
-    console.print(f"[green]✓[/green] Watching {settings.vault.path}")
-    console.print(f"  Debounce: {watch_config.debounce_ms}ms")
-    console.print(f"  Hash stability: {watch_config.hash_stability_check}")
-    console.print(f"  Graph re-extraction: {watch_config.reextract_graph}")
-
-    async def _run_watch() -> None:
-        watcher.start()
-        try:
-            while True:
-                await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            pass
-        finally:
-            watcher.stop()
-            if cache is not None:
-                cache.close()
-
+    bm25 = None
     try:
-        asyncio.run(_run_watch())
-    except KeyboardInterrupt:
-        watcher.stop()
+        bm25 = _create_bm25_index(settings)
+        parser = VaultParser(settings.vault)
+        embedder = Embedder(settings.embedding, embed_key, cache=cache)
+        store = VaultStore(settings.chroma, embedder, bm25=bm25)
+
+        event_bus = VaultEventBus()
+
+        # Duplicate detection and note suggestions
+        from vaultmind.indexer.duplicate_detector import DuplicateDetector
+        from vaultmind.indexer.note_suggester import NoteSuggester
+        from vaultmind.vault.events import NoteCreatedEvent, NoteModifiedEvent
+
+        if settings.duplicate_detection.enabled:
+            detector = DuplicateDetector(settings.duplicate_detection, store)
+            if settings.autonomy.enabled:
+                dup_subscriber = _duplicate_review_subscriber(
+                    detector, _build_review_queue(settings)
+                )
+                event_bus.subscribe(NoteCreatedEvent, dup_subscriber)  # type: ignore[arg-type]
+                event_bus.subscribe(NoteModifiedEvent, dup_subscriber)  # type: ignore[arg-type]
+            else:
+                event_bus.subscribe(NoteCreatedEvent, detector.on_note_changed)  # type: ignore[arg-type]
+                event_bus.subscribe(NoteModifiedEvent, detector.on_note_changed)  # type: ignore[arg-type]
+
+        # Optional graph re-extraction
+        graph = None
+        extractor = None
+        watch_config = settings.watch
+        if with_graph:
+            from vaultmind.config import WatchConfig
+            from vaultmind.graph import EntityExtractor, KnowledgeGraph
+
+            _require_llm_key(settings)
+            graph = KnowledgeGraph(settings.graph)
+            extraction_model = settings.graph.extraction_model or settings.llm.thinking_model
+            llm_client = _create_llm_client(settings)
+            extractor = EntityExtractor(settings.graph, llm_client, model=extraction_model)
+            # Force reextract_graph on since user explicitly opted in via --graph
+            watch_config = WatchConfig(
+                debounce_ms=settings.watch.debounce_ms,
+                hash_stability_check=settings.watch.hash_stability_check,
+                reextract_graph=True,
+                batch_graph_interval_seconds=settings.watch.batch_graph_interval_seconds,
+            )
+
+        # Note suggestions (graph available only if --graph was used)
+        if settings.note_suggestions.enabled:
+            watch_suggester = NoteSuggester(settings.note_suggestions, store, graph=graph)
+            event_bus.subscribe(NoteCreatedEvent, watch_suggester.on_note_changed)  # type: ignore[arg-type]
+            event_bus.subscribe(NoteModifiedEvent, watch_suggester.on_note_changed)  # type: ignore[arg-type]
+
+        handler = IncrementalWatchHandler(
+            config=watch_config,
+            parser=parser,
+            store=store,
+            event_bus=event_bus,
+            graph=graph,
+            extractor=extractor,
+        )
+        watcher = VaultWatcher(config=settings.vault, on_change=handler.handle_change)
+
+        console.print(f"[green]✓[/green] Watching {settings.vault.path}")
+        console.print(f"  Debounce: {watch_config.debounce_ms}ms")
+        console.print(f"  Hash stability: {watch_config.hash_stability_check}")
+        console.print(f"  Graph re-extraction: {watch_config.reextract_graph}")
+
+        async def _run_watch() -> None:
+            try:
+                watcher.start()
+                while True:
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                watcher.stop()
+
+        try:
+            asyncio.run(_run_watch())
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Watcher stopped.[/yellow]")
+    finally:
+        if bm25 is not None:
+            bm25.close()
         if cache is not None:
             cache.close()
-        console.print("\n[yellow]Watcher stopped.[/yellow]")
 
 
 @cli.command("auto-tag")
@@ -1534,65 +1542,74 @@ def research(ctx: click.Context, query: str, max_results: int | None) -> None:
         )
         sys.exit(1)
 
-    cache = _create_embedding_cache(settings)
-    parser = VaultParser(settings.vault)
-    embedder = Embedder(settings.embedding, embed_key, cache=cache)
-    store = VaultStore(settings.chroma, embedder)
-    llm_client = _create_llm_client(settings)
-
-    pipeline_config = PipelineConfig(
-        max_results=max_results or settings.research.max_results,
-        output_folder=settings.research.output_folder,
-        youtube_language=settings.research.youtube_language,
-    )
-
-    model = settings.llm.thinking_model
-
     from vaultmind.memory.gaps import GapStore
+    from vaultmind.research.pipeline import ResearchIndexError
 
+    cache = _create_embedding_cache(settings)
+    bm25 = None
     gap_store: GapStore | None = None
-    if settings.gaps.enabled:
-        gap_db = (
-            Path(settings.gaps.db_path)
-            if settings.gaps.db_path
-            else VAULTMIND_HOME / "data" / "gaps.db"
+    try:
+        bm25 = _create_bm25_index(settings)
+        parser = VaultParser(settings.vault)
+        embedder = Embedder(settings.embedding, embed_key, cache=cache)
+        store = VaultStore(settings.chroma, embedder, bm25=bm25)
+        llm_client = _create_llm_client(settings)
+
+        pipeline_config = PipelineConfig(
+            max_results=max_results or settings.research.max_results,
+            output_folder=settings.research.output_folder,
+            youtube_language=settings.research.youtube_language,
         )
-        gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
 
-    async def _run() -> None:
-        with console.status(f"Researching: {query}..."):
-            result = await run_research_pipeline(
-                query=query,
-                vault_root=settings.vault.path,
-                llm_client=llm_client,
-                store=store,
-                parser=parser,
-                config=pipeline_config,
-                model=model,
+        model = settings.llm.thinking_model
+
+        if settings.gaps.enabled:
+            gap_db = (
+                Path(settings.gaps.db_path)
+                if settings.gaps.db_path
+                else VAULTMIND_HOME / "data" / "gaps.db"
             )
+            gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
 
-        console.print(f"\n[green]✓[/green] Research complete: {query}")
-        console.print(f"  Sources created: {len(result.sources_created)}")
-        for p in result.sources_created:
-            console.print(f"    {p.relative_to(settings.vault.path)}")
-        if result.summary_path.exists():
-            console.print(f"  Summary: {result.summary_path.relative_to(settings.vault.path)}")
-        console.print(f"\n[bold]Summary:[/bold] {result.analysis_summary}")
-
-        if gap_store is not None and result.summary_path.exists():
-            resolution_ref = str(result.summary_path.relative_to(settings.vault.path))
-            closed = gap_store.close_from_research(query, resolution_ref)
-            if closed is not None:
-                console.print(
-                    f"[green]✓[/green] Closed gap {closed.gap_id[:8]} -> {resolution_ref}"
+        async def _run() -> None:
+            with console.status(f"Researching: {query}..."):
+                result = await run_research_pipeline(
+                    query=query,
+                    vault_root=settings.vault.path,
+                    llm_client=llm_client,
+                    store=store,
+                    parser=parser,
+                    config=pipeline_config,
+                    model=model,
                 )
 
-    asyncio.run(_run())
+            console.print(f"\n[green]✓[/green] Research complete: {query}")
+            console.print(f"  Sources created: {len(result.sources_created)}")
+            for p in result.sources_created:
+                console.print(f"    {p.relative_to(settings.vault.path)}")
+            if result.summary_path.exists():
+                console.print(f"  Summary: {result.summary_path.relative_to(settings.vault.path)}")
+            console.print(f"\n[bold]Summary:[/bold] {result.analysis_summary}")
 
-    if cache is not None:
-        cache.close()
-    if gap_store is not None:
-        gap_store.close()
+            if gap_store is not None and result.summary_path.exists():
+                resolution_ref = str(result.summary_path.relative_to(settings.vault.path))
+                closed = gap_store.close_from_research(query, resolution_ref)
+                if closed is not None:
+                    console.print(
+                        f"[green]✓[/green] Closed gap {closed.gap_id[:8]} -> {resolution_ref}"
+                    )
+
+        try:
+            asyncio.run(_run())
+        except ResearchIndexError as exc:
+            raise click.ClickException(str(exc)) from exc
+    finally:
+        if gap_store is not None:
+            gap_store.close()
+        if bm25 is not None:
+            bm25.close()
+        if cache is not None:
+            cache.close()
 
 
 @cli.command()
@@ -1770,25 +1787,33 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
     is_openai = settings.embedding.provider == "openai"
     api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
     cache = _create_embedding_cache(settings)
-    parser = VaultParser(settings.vault)
-    embedder = Embedder(settings.embedding, api_key, cache=cache)
-    store = VaultStore(settings.chroma, embedder)
-    graph = KnowledgeGraph(settings.graph)
+    bm25 = None
+    try:
+        bm25 = _create_bm25_index(settings)
+        parser = VaultParser(settings.vault)
+        embedder = Embedder(settings.embedding, api_key, cache=cache)
+        store = VaultStore(settings.chroma, embedder, bm25=bm25)
+        graph = KnowledgeGraph(settings.graph)
 
-    server = create_mcp_server(
-        settings.vault.path,
-        store,
-        graph,
-        parser,
-        enforcer=enforcer,
-        audit_logger=audit_log,
-    )
+        server = create_mcp_server(
+            settings.vault.path,
+            store,
+            graph,
+            parser,
+            enforcer=enforcer,
+            audit_logger=audit_log,
+        )
 
-    diagnostics.print("[green]✓[/green] MCP server starting...")
+        diagnostics.print("[green]✓[/green] MCP server starting...")
 
-    from mcp.server.stdio import stdio_server
+        from mcp.server.stdio import stdio_server
 
-    asyncio.run(_run_mcp(server, stdio_server))
+        asyncio.run(_run_mcp(server, stdio_server))
+    finally:
+        if bm25 is not None:
+            bm25.close()
+        if cache is not None:
+            cache.close()
 
 
 async def _run_mcp(server: object, stdio_server: object) -> None:
@@ -2301,83 +2326,92 @@ def source_run(ctx: click.Context, name: str) -> None:
         sys.exit(1)
 
     cache = _create_embedding_cache(settings)
-    parser = VaultParser(settings.vault)
-    embedder = Embedder(settings.embedding, embed_key, cache=cache)
-    store = VaultStore(settings.chroma, embedder)
-    llm_client = _create_llm_client(settings)
-
-    event_bus = VaultEventBus()
-    detector: DuplicateDetector | None = None
-    if settings.duplicate_detection.enabled:
-        detector = DuplicateDetector(settings.duplicate_detection, store)
-
-    review_queue = _build_review_queue(settings)
-    distill_model = settings.distill.model or settings.llm.thinking_model
-
+    bm25 = None
     gap_store: GapStore | None = None
-    if settings.gaps.enabled:
-        gap_db = (
-            Path(settings.gaps.db_path)
-            if settings.gaps.db_path
-            else VAULTMIND_HOME / "data" / "gaps.db"
-        )
-        gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
+    review_queue = None
+    source_store = None
+    try:
+        bm25 = _create_bm25_index(settings)
+        parser = VaultParser(settings.vault)
+        embedder = Embedder(settings.embedding, embed_key, cache=cache)
+        store = VaultStore(settings.chroma, embedder, bm25=bm25)
+        llm_client = _create_llm_client(settings)
 
-    review_queue.register_applier(
-        ProposalKind.SOURCE_INGESTION,
-        make_applier(
-            vault_root=settings.vault.path,
-            llm_client=llm_client,
-            model=distill_model,
-            gap_store=gap_store,
-        ),
-    )
+        event_bus = VaultEventBus()
+        detector: DuplicateDetector | None = None
+        if settings.duplicate_detection.enabled:
+            detector = DuplicateDetector(settings.duplicate_detection, store)
 
-    if detector is not None:
-        dup_subscriber = _duplicate_review_subscriber(detector, review_queue)
-        event_bus.subscribe(NoteCreatedEvent, dup_subscriber)  # type: ignore[arg-type]
-        event_bus.subscribe(NoteModifiedEvent, dup_subscriber)  # type: ignore[arg-type]
+        review_queue = _build_review_queue(settings)
+        distill_model = settings.distill.model or settings.llm.thinking_model
 
-    if settings.contradiction.enabled and detector is not None:
-        from vaultmind.contradiction.detector import ContradictionDetector
-
-        contradiction_model = settings.contradiction.detection_model or settings.llm.fast_model
-        contradiction_detector = ContradictionDetector(
-            settings.contradiction,
-            detector,
-            llm_client,
-            contradiction_model,
-            settings.vault.path,
-            parser,
-            ranking_config=settings.ranking,
-            gap_store=gap_store,
-            review_queue=review_queue,
-        )
-        on_changed = contradiction_detector.on_note_changed
-        event_bus.subscribe(NoteCreatedEvent, on_changed)  # type: ignore[arg-type]
-        event_bus.subscribe(NoteModifiedEvent, on_changed)  # type: ignore[arg-type]
-
-    source_store = SourceStore(_sources_db_path(settings))
-
-    with console.status(f"Running connector '{name}'..."):
-        result = asyncio.run(
-            run_connector_once(
-                instance,
-                source_store=source_store,
-                review_queue=review_queue,
-                parser=parser,
-                store=store,
-                vault_root=settings.vault.path,
-                event_bus=event_bus,
+        if settings.gaps.enabled:
+            gap_db = (
+                Path(settings.gaps.db_path)
+                if settings.gaps.db_path
+                else VAULTMIND_HOME / "data" / "gaps.db"
             )
+            gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
+
+        review_queue.register_applier(
+            ProposalKind.SOURCE_INGESTION,
+            make_applier(
+                vault_root=settings.vault.path,
+                llm_client=llm_client,
+                model=distill_model,
+                gap_store=gap_store,
+            ),
         )
 
-    if cache is not None:
-        cache.close()
-    if gap_store is not None:
-        gap_store.close()
-    source_store.close()
-    review_queue.close()
+        if detector is not None:
+            dup_subscriber = _duplicate_review_subscriber(detector, review_queue)
+            event_bus.subscribe(NoteCreatedEvent, dup_subscriber)  # type: ignore[arg-type]
+            event_bus.subscribe(NoteModifiedEvent, dup_subscriber)  # type: ignore[arg-type]
+
+        if settings.contradiction.enabled and detector is not None:
+            from vaultmind.contradiction.detector import ContradictionDetector
+
+            contradiction_model = settings.contradiction.detection_model or settings.llm.fast_model
+            contradiction_detector = ContradictionDetector(
+                settings.contradiction,
+                detector,
+                llm_client,
+                contradiction_model,
+                settings.vault.path,
+                parser,
+                ranking_config=settings.ranking,
+                gap_store=gap_store,
+                review_queue=review_queue,
+            )
+            on_changed = contradiction_detector.on_note_changed
+            event_bus.subscribe(NoteCreatedEvent, on_changed)  # type: ignore[arg-type]
+            event_bus.subscribe(NoteModifiedEvent, on_changed)  # type: ignore[arg-type]
+
+        source_store = SourceStore(_sources_db_path(settings))
+
+        with console.status(f"Running connector '{name}'..."):
+            result = asyncio.run(
+                run_connector_once(
+                    instance,
+                    source_store=source_store,
+                    review_queue=review_queue,
+                    parser=parser,
+                    store=store,
+                    vault_root=settings.vault.path,
+                    event_bus=event_bus,
+                )
+            )
+    finally:
+        if source_store is not None:
+            source_store.close()
+        if review_queue is not None:
+            review_queue.close()
+        if gap_store is not None:
+            gap_store.close()
+        if bm25 is not None:
+            bm25.close()
+        if cache is not None:
+            cache.close()
 
     if result.error:
         console.print(f"[red]✗[/red] Connector '{name}' failed: {result.error}")

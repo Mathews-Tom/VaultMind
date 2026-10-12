@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from vaultmind.errors import VaultMindError
 from vaultmind.research.analyzer import analyze_sources
 from vaultmind.research.searcher import search_youtube
 from vaultmind.vault.security import validate_vault_path
@@ -39,6 +40,29 @@ class PipelineResult:
     sources_created: list[Path] = field(default_factory=list)
     summary_path: Path = field(default_factory=lambda: Path())
     analysis_summary: str = ""
+
+
+class ResearchIndexError(VaultMindError):
+    """Saved research notes are preserved, but indexing aborted before completion."""
+
+    def __init__(
+        self,
+        saved_paths: list[Path],
+        indexed_paths: list[Path],
+        failed_path: Path,
+        cause: Exception,
+    ) -> None:
+        self.saved_paths = tuple(saved_paths)
+        self.indexed_paths = tuple(indexed_paths)
+        self.failed_path = failed_path
+        self.unattempted_paths = tuple(saved_paths[len(indexed_paths) + 1 :])
+        super().__init__(
+            f"Research indexing aborted at {failed_path}: {cause}. "
+            f"Indexed before failure: {', '.join(map(str, indexed_paths)) or 'none'}. "
+            f"Not attempted: {', '.join(map(str, self.unattempted_paths)) or 'none'}. "
+            f"Saved files preserved: {', '.join(map(str, saved_paths))}. "
+            "Research is incomplete; no knowledge gap was closed."
+        )
 
 
 def _sanitize_dirname(name: str) -> str:
@@ -208,11 +232,16 @@ authority: 3
     validate_vault_path(str(summary_path), vault_root)
     summary_path.write_text(summary_content, encoding="utf-8")
 
-    # 6. Index all notes
+    # Abort on the first failure; every saved path remains available for explicit recovery.
     all_paths = [*source_paths, summary_path]
+    indexed_paths: list[Path] = []
     for path in all_paths:
-        note = await asyncio.to_thread(parser.parse_file, path)
-        await asyncio.to_thread(store.index_single_note, note, parser)
+        try:
+            note = await asyncio.to_thread(parser.parse_file, path)
+            await asyncio.to_thread(store.index_single_note, note, parser)
+        except Exception as exc:
+            raise ResearchIndexError(all_paths, indexed_paths, path, exc) from exc
+        indexed_paths.append(path)
 
     logger.info(
         "Research pipeline complete: %d sources, summary at %s",

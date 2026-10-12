@@ -164,19 +164,35 @@ def test_chunk_note_propagates_authority_to_chunks(parser: VaultParser, tmp_vaul
 
 
 class TestIterNotesParseFailures:
-    def test_unparseable_notes_abort_the_scan_and_name_every_failing_path(
+    def test_strict_snapshot_aborts_and_names_every_failing_path(
         self, parser: VaultParser, tmp_vault: Path
     ) -> None:
         (tmp_vault / "00-inbox" / "broken-one.md").write_text("---\ntitle: [unclosed\n---\n\nx\n")
-        (tmp_vault / "02-projects" / "broken-two.md").write_text(
-            "---\ntitle: {unclosed\n---\n\nx\n"
-        )
+        (tmp_vault / "02-projects" / "broken-two.md").write_bytes(b"---\ntitle: \xff\xfe\n---\n\nx")
 
         with pytest.raises(VaultParseError) as raised:
-            parser.iter_notes()
+            parser.iter_notes(strict=True)
 
         failed = {str(path) for path, _ in raised.value.failures}
         assert failed == {"00-inbox/broken-one.md", "02-projects/broken-two.md"}
+
+    def test_ordinary_iteration_returns_valid_notes_and_logs_rejected_paths(
+        self, parser: VaultParser, tmp_vault: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        (tmp_vault / "00-inbox" / "broken-one.md").write_text("---\ntitle: [unclosed\n---\n\nx\n")
+        (tmp_vault / "02-projects" / "broken-two.md").write_bytes(b"\xff\xfe not utf8")
+        valid = {note.path.name for note in parser.iter_notes()}
+
+        with caplog.at_level("ERROR", logger="vaultmind.vault.parser"):
+            notes = parser.iter_notes()
+
+        assert {note.path.name for note in notes} == valid
+        assert "broken-one.md" not in valid
+        assert "broken-two.md" not in valid
+        assert "test-project.md" in valid
+        logged = " ".join(record.getMessage() for record in caplog.records)
+        assert "broken-one.md" in logged
+        assert "broken-two.md" in logged
 
     def test_directories_dangling_links_and_excluded_folders_are_not_failures(
         self, parser: VaultParser, tmp_vault: Path

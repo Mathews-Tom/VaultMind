@@ -14,7 +14,7 @@ import pytest
 
 from vaultmind.indexer.search_cache import SearchResultCache
 from vaultmind.indexer.store import IndexStage, IndexUpdateError, VaultStore
-from vaultmind.vault.parser import VaultParser
+from vaultmind.vault.parser import VaultParseError, VaultParser
 
 from .index_support import ALL_SURFACES, IndexEnv, make_env, make_neighbour_store
 
@@ -53,7 +53,7 @@ def env(tmp_path: Path) -> Iterator[IndexEnv]:
 def _reindex(env: IndexEnv, mode: str) -> int:
     if mode == "incremental":
         return env.index("log.md")
-    return env.store.index_notes(env.parser.iter_notes(), env.parser)
+    return env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
 
 
 def _counts(env: IndexEnv) -> tuple[int, int]:
@@ -64,7 +64,7 @@ def _counts(env: IndexEnv) -> tuple[int, int]:
 def test_shorter_revision_removes_stale_chunks_from_both_indexes(env: IndexEnv, mode: str) -> None:
     env.write("log.md", THREE_SECTIONS)
     env.write("other.md", OTHER_NOTE)
-    env.store.index_notes(env.parser.iter_notes(), env.parser)
+    env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
     assert _counts(env) == (4, 4)
 
     env.write("log.md", ONE_SECTION)
@@ -84,7 +84,7 @@ def test_note_without_indexable_content_is_retired_from_both_indexes(
 ) -> None:
     env.write("log.md", THREE_SECTIONS)
     env.write("other.md", OTHER_NOTE)
-    env.store.index_notes(env.parser.iter_notes(), env.parser)
+    env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
 
     env.write("log.md", "")
     reindexed = _reindex(env, mode)
@@ -99,10 +99,10 @@ def test_note_without_indexable_content_is_retired_from_both_indexes(
 def test_full_index_after_file_removal_removes_the_stale_rows(env: IndexEnv) -> None:
     env.write("keep.md", OTHER_NOTE)
     env.write("log.md", THREE_SECTIONS)
-    env.store.index_notes(env.parser.iter_notes(), env.parser)
+    env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
 
     (env.vault / "log.md").unlink()
-    indexed = env.store.index_notes(env.parser.iter_notes(), env.parser)
+    indexed = env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
 
     assert indexed == 1
     assert _counts(env) == (1, 1)
@@ -138,7 +138,7 @@ def test_embedding_failure_before_any_write_keeps_last_good_content(
 ) -> None:
     env.write("log.md", THREE_SECTIONS)
     env.write("gone.md", "## Gone\nquillfern dossier")
-    env.store.index_notes(env.parser.iter_notes(), env.parser)
+    env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
     (env.vault / "gone.md").unlink()  # a full reconcile would remove its rows
     env.write("log.md", REVISED_THREE)
     env.embedder.failure = RuntimeError("embedding provider unavailable")
@@ -253,12 +253,12 @@ def test_full_index_keyword_failure_reports_partial_progress_and_retry_converges
 ) -> None:
     env.write("keep.md", OTHER_NOTE)
     env.write("log.md", THREE_SECTIONS)
-    env.store.index_notes(env.parser.iter_notes(), env.parser)
+    env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
     (env.vault / "log.md").unlink()
     env.bm25.fail_on = {"replace_all"}
 
     with pytest.raises(IndexUpdateError) as failure:
-        env.store.index_notes(env.parser.iter_notes(), env.parser)
+        env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
 
     error = failure.value
     assert error.operation == "index_notes"
@@ -267,7 +267,7 @@ def test_full_index_keyword_failure_reports_partial_progress_and_retry_converges
     assert _counts(env) == (1, 4)
 
     env.bm25.fail_on = set()
-    assert env.store.index_notes(env.parser.iter_notes(), env.parser) == 1
+    assert env.store.index_notes(env.parser.iter_notes(strict=True), env.parser) == 1
 
     assert _counts(env) == (1, 1)
     for token in ALL_TOKENS_OF_THREE:
@@ -327,7 +327,7 @@ def test_index_calls_return_chunk_counts(env: IndexEnv) -> None:
     env.write("log.md", THREE_SECTIONS)
     env.write("other.md", OTHER_NOTE)
 
-    assert env.store.index_notes(env.parser.iter_notes(), env.parser) == 4
+    assert env.store.index_notes(env.parser.iter_notes(strict=True), env.parser) == 4
     assert env.index("log.md") == 3
     assert env.index("other.md") == 1
 
@@ -337,7 +337,7 @@ def test_supplied_search_cache_never_serves_a_retired_note(env: IndexEnv) -> Non
     store = VaultStore(env.store.config, cast("Embedder", env.embedder), env.bm25, cache)
     env.write("a.md", "## A\ntidewrack survey")
     env.write("b.md", OTHER_NOTE)
-    store.index_notes(env.parser.iter_notes(), env.parser)
+    store.index_notes(env.parser.iter_notes(strict=True), env.parser)
     assert any("tidewrack" in hit["content"] for hit in store.search("tidewrack"))
     assert cache.size == 1
 
@@ -365,7 +365,7 @@ def test_unchunkable_note_fails_before_any_write_and_is_named(env: IndexEnv) -> 
     parser = _RejectingParser(env.parser.config)
 
     with pytest.raises(ValueError, match=r"bad\.md"):
-        env.store.index_notes(parser.iter_notes(), parser)
+        env.store.index_notes(parser.iter_notes(strict=True), parser)
     with pytest.raises(ValueError):
         env.store.index_single_note(parser.parse_file(env.vault / "bad.md"), parser)
 
@@ -374,3 +374,48 @@ def test_unchunkable_note_fails_before_any_write_and_is_named(env: IndexEnv) -> 
     for token in (*ALL_TOKENS_OF_THREE, "fennelwick"):
         assert env.surfaces(token) == ALL_SURFACES
     assert env.surfaces("ironweft") == set()
+
+
+def test_strict_snapshot_with_unparseable_note_leaves_real_indexes_untouched(
+    env: IndexEnv,
+) -> None:
+    env.write("keep.md", OTHER_NOTE)
+    env.write("log.md", THREE_SECTIONS)
+    env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
+    embedded_before = env.embedder.calls
+    (env.vault / "log.md").write_text("---\ntitle: [unclosed\n---\n\nx\n", encoding="utf-8")
+
+    with pytest.raises(VaultParseError) as failure:
+        env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
+
+    assert {str(path) for path, _ in failure.value.failures} == {"log.md"}
+    assert env.embedder.calls == embedded_before
+    assert _counts(env) == (4, 4)
+    for token in (*ALL_TOKENS_OF_THREE, "fennelwick"):
+        assert env.surfaces(token) == ALL_SURFACES
+
+
+def test_non_reconciling_cli_consumer_still_works_with_an_unparseable_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from click.testing import CliRunner
+
+    import vaultmind.cli as app
+    import vaultmind.config as config
+
+    root = tmp_path.resolve()
+    vault = root / "vault"
+    vault.mkdir()
+    (vault / "good.md").write_text("---\ntype: permanent\n---\n\nreadable\n", encoding="utf-8")
+    (vault / "bad.md").write_text("---\ntitle: [unclosed\n---\n\nx\n", encoding="utf-8")
+    monkeypatch.setattr(config, "VAULTMIND_HOME", root / "home")
+    toml = root / "fixture.toml"
+    toml.write_text(
+        f'[vault]\npath = "{vault}"\n[graph]\npersist_path = "{root / "graph.json"}"\n',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app.cli, ["--config", str(toml), "stats"])
+
+    assert result.exit_code == 0, result.output
+    assert "Total notes: 1" in result.output

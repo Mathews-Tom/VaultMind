@@ -445,6 +445,28 @@ class TestExplicitBoundaryWrittenByTheBot:
 
         assert parser.parse_file(path).current_content() == "New claim."
 
+    def test_authored_leading_thematic_rules_are_body_text_not_frontmatter(
+        self, parser: VaultParser
+    ) -> None:
+        original = "---\n\nv0 claim alphaquartz.\n\n---\n\nOlder rule section."
+        first = "---\n\nv1 claim betaquartz.\n\n---\n\nMiddle rule section."
+        second = "---\n\nv2 claim gammaquartz.\n\n---\n\nFinal rule section."
+        path = _write(parser, "log.md", "title: Log\n", original + "\n")
+        assert parser.parse_file(path).current_content() == original
+
+        assert _write_edit(path, first, T1)
+        assert _write_edit(path, second, T2)
+
+        note = parser.parse_file(path)
+        assert note.current_content() == second
+        text = _chunk_text(parser, note)
+        assert "gammaquartz" in text
+        assert "Final rule section." in text
+        assert "alphaquartz" not in text
+        assert "betaquartz" not in text
+        for kept in ("alphaquartz", "Older rule section.", "betaquartz", "Middle rule section."):
+            assert kept in note.content
+
 
 class TestWriterRefusesToCorruptHistory:
     def test_edit_on_a_bot_deleted_note_is_refused_and_leaves_the_file_alone(

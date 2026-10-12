@@ -303,12 +303,54 @@ class TestHandleEditCallbackSequentialEdits:
             assert env.surfaces(token) == set()
         assert env.surfaces(T2) == ALL_SURFACES
 
-        env.store.index_notes(env.parser.iter_notes(), env.parser)
+        env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
 
         for token in (T0, T1):
             assert env.surfaces(token) == set()
         assert env.surfaces(T2) == ALL_SURFACES
         assert T0 in path.read_text(encoding="utf-8")
+
+
+class TestHandleEditCallbackLeadingThematicRule:
+    def test_authored_leading_rule_survives_two_edits_and_only_latest_is_current(
+        self, env: IndexEnv
+    ) -> None:
+        rule = "---"
+        original = f"{rule}\n\nv0 claim {T0}.\n\n{rule}\n\nOlder section after a rule."
+        first = f"{rule}\n\nv1 claim {T1}.\n\n{rule}\n\nMiddle section after a rule."
+        second = f"{rule}\n\nv2 claim {T2}.\n\n{rule}\n\nFinal section after a rule."
+        path = env.write("note.md", original)
+        assert env.index("note.md") > 0
+        assert env.surfaces(T0) == ALL_SURFACES
+        ctx = _make_ctx(env, lineage_store=_lineage(env), replies=[first, second])
+        pending: Pending = {}
+
+        _request(ctx, "note.md a", pending)
+        _confirm(ctx, pending)
+        _request(ctx, "note.md b", pending)
+        _confirm(ctx, pending)
+
+        raw = path.read_text(encoding="utf-8")
+        for token in (T0, T1, T2, "Older section", "Middle section", "Final section"):
+            assert token in raw
+
+        note = env.note("note.md")
+        assert note.current_content() == second
+        chunk_text = "\n".join(c.content for c in env.parser.chunk_note(note))
+        assert T2 in chunk_text
+        assert T0 not in chunk_text
+        assert T1 not in chunk_text
+
+        for token in (T0, T1):
+            assert env.surfaces(token) == set()
+        assert env.surfaces(T2) == ALL_SURFACES
+
+        env.store.index_notes(env.parser.iter_notes(strict=True), env.parser)
+
+        for token in (T0, T1):
+            assert env.surfaces(token) == set()
+        assert env.surfaces(T2) == ALL_SURFACES
+        assert path.read_text(encoding="utf-8") == raw
 
 
 class TestHandleEditRefusals:
