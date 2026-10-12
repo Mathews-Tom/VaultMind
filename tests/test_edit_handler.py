@@ -129,6 +129,15 @@ def _confirm(ctx: Any, pending: Pending, data: str = "edit_confirm:7") -> str:
     return str(callback.message.edit_text.call_args[0][0])
 
 
+def _read(ctx: Any, path: str = "note.md") -> str:
+    """Read through the actual handler; only Telegram delivery is recorded."""
+    from vaultmind.bot.handlers.read import handle_read
+
+    message = _fake_message()
+    asyncio.run(handle_read(ctx, message, path))
+    return "\n".join(str(call.args[0]) for call in message.answer.call_args_list)
+
+
 def _delete(ctx: Any) -> None:
     from vaultmind.bot.handlers.delete import handle_delete_callback
 
@@ -331,8 +340,10 @@ class TestHandleEditCallbackLeadingThematicRule:
         _confirm(ctx, pending)
 
         raw = path.read_text(encoding="utf-8")
+        visible = _read(ctx)
         for token in (T0, T1, T2, "Older section", "Middle section", "Final section"):
             assert token in raw
+            assert token in visible
 
         note = env.note("note.md")
         assert note.current_content() == second
@@ -351,6 +362,24 @@ class TestHandleEditCallbackLeadingThematicRule:
             assert env.surfaces(token) == set()
         assert env.surfaces(T2) == ALL_SURFACES
         assert path.read_text(encoding="utf-8") == raw
+
+    def test_read_keeps_single_leading_rule_and_prior_history_rule(self, env: IndexEnv) -> None:
+        original = f"Intro {T0}.\n\n---\n\nTail retainedhistory."
+        replacement = f"---\n\nCurrent claim {T1}."
+        path = env.write("note.md", original)
+        env.index("note.md")
+        ctx = _make_ctx(env, lineage_store=_lineage(env), replies=[replacement])
+        pending: Pending = {}
+        _request(ctx, "note.md revise", pending)
+        _confirm(ctx, pending)
+        saved = path.read_bytes()
+
+        visible = _read(ctx)
+
+        assert T0 in visible
+        assert T1 in visible
+        assert "retainedhistory" in visible
+        assert path.read_bytes() == saved
 
 
 class TestHandleEditRefusals:

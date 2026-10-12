@@ -6616,6 +6616,13 @@ async def lineage_thematic_edit_scenario(env: SimpleNamespace) -> None:
             note.title,
         ],
     )
+    read_calls = await w.harness.command("/read rules.md", LINEAGE_ACTOR)
+    visible = "\n".join(lineage_replies(read_calls))
+    ck(
+        "thematic-edit.full-read-keeps-current-and-all-preserved-revisions",
+        [True] * 6,
+        [token in visible for token in (*older, TH_V2, TH_V2_RULE)],
+    )
     cli = await lineage_cli_index(w)
     ck(
         "thematic-edit.full-index-cli-keeps-only-v2",

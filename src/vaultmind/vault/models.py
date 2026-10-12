@@ -73,11 +73,7 @@ class Note(BaseModel):
         return str(self.path)
 
     def body_without_frontmatter(self) -> str:
-        """Return content body without YAML frontmatter."""
-        if self.content.startswith("---"):
-            parts = self.content.split("---", 2)
-            if len(parts) >= 3:
-                return parts[2].strip()
+        """Return the already parsed body, including authored rules and preserved history."""
         return self.content
 
     def current_content(self) -> str:
