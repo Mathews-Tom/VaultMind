@@ -3715,7 +3715,15 @@ async def lineage_edit(
     return texts, lineage_replies(await world.harness.callback(confirm, LINEAGE_ACTOR))
 
 
-def lineage_config_text(vault: Path, data: Path, stability: bool, ttl: int, extra: str) -> str:
+def lineage_config_text(
+    vault: Path,
+    data: Path,
+    stability: bool,
+    ttl: int,
+    extra: str,
+    *,
+    embedding_cache: bool = False,
+) -> str:
     """Explicit absolute-path TOML shared by the bot, CLI and MCP assemblies of every world."""
     return (
         f'openai_api_key = "{LINEAGE_OFFLINE_KEY}"\n'
@@ -3728,7 +3736,8 @@ def lineage_config_text(vault: Path, data: Path, stability: bool, ttl: int, extr
         f"[watch]\ndebounce_ms = 60\nhash_stability_check = {str(stability).lower()}\n"
         "reextract_graph = false\n"
         f"[telegram]\nallowed_user_ids = [{LINEAGE_ACTOR}]\nthinking_session_ttl = {ttl}\n"
-        "[embedding]\ncache_enabled = false\n[llm]\ngraph_context_enabled = false\n" + extra
+        f"[embedding]\ncache_enabled = {str(embedding_cache).lower()}\n"
+        "[llm]\ngraph_context_enabled = false\n" + extra
     )
 
 
@@ -3743,6 +3752,7 @@ def lineage_world(
     ttl: int = 3600,
     extra_toml: str = "",
     cli_seed: bool = False,
+    embedding_cache: bool = False,
 ) -> SimpleNamespace:
     """Explicit temporary TOML + real parser/Chroma/SQLite BM25/handlers over isolated files."""
     from aiogram import Bot
@@ -3765,7 +3775,10 @@ def lineage_world(
         (vault / rel).write_text(text, encoding="utf-8")
     config = root / "config.toml"
     config.write_text(
-        lineage_config_text(vault, data, stability, ttl, extra_toml), encoding="utf-8"
+        lineage_config_text(
+            vault, data, stability, ttl, extra_toml, embedding_cache=embedding_cache
+        ),
+        encoding="utf-8",
     )
     settings = load_settings(config)
     embedder = LineageEmbedder()
@@ -3981,29 +3994,120 @@ def lineage_entry_identity() -> dict[str, Any]:
     }
 
 
-def lineage_keyword_instances() -> list[Any]:
-    import gc
-
-    from vaultmind.indexer.bm25 import BM25Index
-
-    return [obj for obj in gc.get_objects() if isinstance(obj, BM25Index)]
+LINEAGE_CLI_RESOURCES = ("bm25", "cache", "gap_store")
 
 
-def lineage_connection_open(index: Any) -> bool:
+def lineage_resource_state(resource: Any) -> str:
+    """'open' or 'closed' from the resource's own SQLite connection (anything else is surfaced)."""
+    connection = getattr(resource, "_con", None)
+    if connection is None:
+        connection = resource._conn
     try:
-        index._con.execute("SELECT 1").fetchall()
-    except sqlite3.ProgrammingError:
-        return False
-    return True
+        connection.execute("SELECT 1").fetchall()
+    except sqlite3.ProgrammingError as exc:
+        return "closed" if "closed database" in str(exc) else f"unreadable: {exc}"
+    return "open"
+
+
+class LineageResourceObserver:
+    """Passive observation of the configured resources one installed command creates.
+
+    A read-only profile hook reads the command's own frame locals; it replaces no event loop,
+    callback, resource or close. It STRONGLY RETAINS each configured resource (keyword index,
+    embedding cache, gap ledger) so it can neither be collected nor mistaken for closed, and reads
+    that resource's own SQLite connection state when the command's frame returns (``final``) and,
+    for a command that runs its own event loop, when that loop starts (``live``). A resource the
+    command never created is never reported, so an unobserved resource cannot pass as closed.
+    """
+
+    def __init__(self, command: str, module: str = "vaultmind.cli") -> None:
+        self.command = command
+        self.module = module
+        self.retained: dict[str, Any] = {}
+        self.live: dict[str, str] = {}
+        self.final: dict[str, str] = {}
+        self.previous = sys.getprofile()
+
+    def __call__(self, frame: Any, event: str, arg: Any) -> None:
+        if self.previous is not None:
+            self.previous(frame, event, arg)
+        if event not in ("call", "return") or frame.f_globals.get("__name__") != self.module:
+            return
+        name = frame.f_code.co_name
+        if event == "return" and name == self.command:
+            self._take(frame, self.final)
+        elif event == "call" and name == "_run_watch":
+            caller = frame.f_back
+            while caller is not None and not (
+                caller.f_code.co_name == self.command
+                and caller.f_globals.get("__name__") == self.module
+            ):
+                caller = caller.f_back
+            if caller is not None:
+                self._take(caller, self.live)
+
+    def _take(self, frame: Any, into: dict[str, str]) -> None:
+        for key, value in dict(frame.f_locals).items():
+            if key in LINEAGE_CLI_RESOURCES and value is not None:
+                self.retained[key] = value
+                into[key] = lineage_resource_state(value)
+
+
+def lineage_observer_selftest(scratch: Path) -> dict[str, dict[str, str]]:
+    """Run the observer over real resources that are left open, closed, or never created.
+
+    The probe functions are ordinary functions observed exactly like a CLI command; their real
+    SQLite resources are leaked, closed, or absent, so a passive observer that could not tell a
+    leak from a close (or reported an unobserved resource as closed) would fail here.
+    """
+    from vaultmind.indexer.bm25 import BM25Index
+    from vaultmind.indexer.embedding_cache import EmbeddingCache
+    from vaultmind.memory.gaps import GapStore
+
+    scratch.mkdir(parents=True)
+
+    def leak() -> None:
+        bm25 = BM25Index(scratch / "leak-bm25.db")
+        cache = EmbeddingCache(scratch / "leak-cache.db")
+        gap_store = GapStore(scratch / "leak-gaps.db")
+        # Real use of each resource, then returned without closing: a leak.
+        _ = bm25.count
+        cache.stats()
+        gap_store.list_open()
+
+    def release() -> None:
+        bm25 = BM25Index(scratch / "release-bm25.db")
+        cache = EmbeddingCache(scratch / "release-cache.db")
+        gap_store = GapStore(scratch / "release-gaps.db")
+        bm25.close()
+        cache.close()
+        gap_store.close()
+
+    def absent() -> None:
+        return None
+
+    outcome: dict[str, dict[str, str]] = {}
+    for probe in (leak, release, absent):
+        observer = LineageResourceObserver(probe.__name__, module=__name__)
+        sys.setprofile(observer)
+        try:
+            probe()
+        finally:
+            sys.setprofile(observer.previous)
+        outcome[probe.__name__] = observer.final
+        for resource in observer.retained.values():
+            resource.close()
+    return outcome
 
 
 def lineage_cli_run(world: SimpleNamespace, args: list[str], embedder: Any = None) -> Any:
     """Run the registered `vaultmind --config <explicit TOML> <args>` Click group (blocking).
 
-    Only the external Embedder factory is substituted. The command itself creates the
-    configured Chroma store and SQLite keyword index (nothing here builds, patches or injects
-    BM25, VaultStore, the watcher or the handler). ``leaked`` lists keyword-index connections
-    the command created and left open.
+    ``args[0]`` is the command name. Only the external Embedder factory is substituted. The
+    command itself creates the configured Chroma store, SQLite keyword index, embedding cache and
+    gap ledger (nothing here builds, patches or injects BM25, VaultStore, the watcher or the
+    handler, and no ``close`` is replaced). ``resources`` is the passive
+    `LineageResourceObserver` account of what the command created and its connection state.
     """
     from unittest.mock import patch
 
@@ -4012,20 +4116,19 @@ def lineage_cli_run(world: SimpleNamespace, args: list[str], embedder: Any = Non
     import vaultmind.indexer as indexer
 
     use = embedder or world.embedder
-    known = lineage_keyword_instances()
     cli = lineage_entry_point().load()
-    with patch.object(indexer, "Embedder", lambda *args, **kwargs: use):
-        result = CliRunner().invoke(cli, ["--config", str(world.config), *args])
-    leaked = [
-        str(index._con.execute("PRAGMA database_list").fetchone()[2])
-        for index in lineage_keyword_instances()
-        if not any(index is old for old in known) and lineage_connection_open(index)
-    ]
+    observer = LineageResourceObserver(args[0])
+    sys.setprofile(observer)
+    try:
+        with patch.object(indexer, "Embedder", lambda *args, **kwargs: use):
+            result = CliRunner().invoke(cli, ["--config", str(world.config), *args])
+    finally:
+        sys.setprofile(observer.previous)
     return SimpleNamespace(
         exit_code=result.exit_code,
         output=result.output,
         exception=result.exception,
-        leaked=leaked,
+        resources=observer,
     )
 
 
@@ -4282,11 +4385,6 @@ def lineage_launcher_checks(ck: Any, prefix: str, root: Path, state: Path) -> di
         },
     )
     ck(
-        prefix + "boundary.only-embedder-factory-substituted",
-        ["DeterministicEmbedder"],
-        [e["factory"] for e in by_kind.get("embedder-substitution", [])],
-    )
-    ck(
         prefix + "lifecycle.clean-exit",
         [[0, True]],
         [[e["code"], e["tee_joined"]] for e in by_kind.get("exit", [])],
@@ -4298,6 +4396,16 @@ def lineage_launcher_checks(ck: Any, prefix: str, root: Path, state: Path) -> di
         },
         "executable": entry["executable"],
         "python": entry["python"],
+        "boundary_metadata_not_evidence": {
+            "note": (
+                "Launcher-owned label of the one substituted external boundary (the Embedder "
+                "factory); recorded by the launcher itself, so it is metadata and not an "
+                "acceptance predicate. State evidence is the index/Chroma/SQLite comparisons."
+            ),
+            "embedder_substitution": [
+                e["factory"] for e in by_kind.get("embedder-substitution", [])
+            ],
+        },
         "launcher_events": events,
     }
 
@@ -5917,9 +6025,22 @@ async def lineage_cli_watch_scenario(env: SimpleNamespace) -> None:
         {"chroma": False, "keyword": False},
         w.indexes_before,
     )
+    ck(
+        "cli-watch.resource-observer-discriminates-leaked-closed-and-absent",
+        {
+            "leak": dict.fromkeys(LINEAGE_CLI_RESOURCES, "open"),
+            "release": dict.fromkeys(LINEAGE_CLI_RESOURCES, "closed"),
+            "absent": {},
+        },
+        lineage_observer_selftest(env.home / "observer-selftest"),
+    )
     cli = w.cli_seed_result
     ck("cli-watch.baseline-index-exit-code", 0, cli.exit_code)
-    ck("cli-watch.baseline-index-closes-its-keyword-connection", [], cli.leaked)
+    ck(
+        "cli-watch.baseline-index-closes-its-keyword-connection",
+        {"bm25": "closed"},
+        cli.resources.final,
+    )
     ck(
         "cli-watch.baseline-every-note-indexed-by-the-command",
         {rel: lineage_expected_ids(w, rel) for rel in notes},
@@ -5936,8 +6057,8 @@ async def lineage_cli_watch_scenario(env: SimpleNamespace) -> None:
     rig = LineageCliWatch(w)
     outcome = SimpleNamespace(stopped=False, result=None)
     try:
-        started = await rig.start()
-        ck("cli-watch.command-runs-its-own-event-loop", True, started)
+        if not await rig.start():
+            raise RuntimeError("installed watch command never started its event loop")
         ck("cli-watch.observer-live-via-real-filesystem-event", True, await rig.ready())
         ck("cli-watch.command-embeds-through-external-factory", True, w.embedder.batches > batches)
 
@@ -6045,7 +6166,10 @@ async def lineage_cli_watch_scenario(env: SimpleNamespace) -> None:
         outcome = await rig.stop()
 
     result = outcome.result or SimpleNamespace(
-        exit_code=None, output="", exception=None, leaked=None
+        exit_code=None,
+        output="",
+        exception=None,
+        resources=SimpleNamespace(live={}, final={}),
     )
     ck("cli-watch.graceful-cancellation-within-bound", True, outcome.stopped)
     ck(
@@ -6054,7 +6178,11 @@ async def lineage_cli_watch_scenario(env: SimpleNamespace) -> None:
         [result.exit_code, repr(result.exception) if result.exception else None],
     )
     ck("cli-watch.command-reported-watching", True, "Watching" in result.output)
-    ck("cli-watch.command-closes-its-keyword-connection", [], result.leaked)
+    ck(
+        "cli-watch.command-closes-its-keyword-connection",
+        {"live": {"bm25": "open"}, "final": {"bm25": "closed"}},
+        {"live": result.resources.live, "final": result.resources.final},
+    )
     retired_rels = ("ldel.md", "gone.md", "bdel.md", LINEAGE_CANARY)
     ck(
         "cli-watch.final-ids-equal-current-projection",
@@ -6240,6 +6368,605 @@ async def lineage_mcp_serve_scenario(env: SimpleNamespace) -> None:
     }
 
 
+SX_LOG_1 = "merelogpartone"
+SX_LOG_2 = "merelogparttwo"
+SX_LOG_3 = "merelogpartthree"
+SX_LOG_FIXED = "merelogrepaired"
+SX_GOOD_OLD = "meregoodbaseline"
+SX_GOOD_NEW = "meregoodrevision"
+SX_MALFORMED = b"---\ntitle: [unclosed\n---\n\nmalformed body text.\n"
+
+
+def lineage_note_vector_state(world: SimpleNamespace, rel: str) -> list[list[Any]]:
+    """Raw Chroma rows of one note: id, document, metadata and embedding (independent handle)."""
+    collection = lineage_chroma_client(world).get_collection(world.settings.chroma.collection_name)
+    got = collection.get(where={"note_path": rel}, include=["documents", "metadatas", "embeddings"])
+    embeddings = [[float(value) for value in row] for row in got["embeddings"]]
+    return sorted(
+        [chunk_id, document, dict(metadata), embedding]
+        for chunk_id, document, metadata, embedding in zip(
+            got["ids"], got["documents"], got["metadatas"], embeddings, strict=True
+        )
+    )
+
+
+def lineage_note_keyword_state(world: SimpleNamespace, rel: str) -> list[list[str]]:
+    """Raw keyword-index rows of one note (read-only, parameterized)."""
+    con = sqlite3.connect(f"file:{world.data / 'bm25.db'}?mode=ro", uri=True)
+    try:
+        return [
+            [str(value) for value in row]
+            for row in con.execute(
+                "SELECT chunk_id, note_path, note_title, content FROM fts_chunks"
+                " WHERE note_path = ? ORDER BY chunk_id",
+                (rel,),
+            )
+        ]
+    finally:
+        con.close()
+
+
+def lineage_error_chain(result: Any, kind: type[BaseException]) -> Any:
+    """The typed error behind a command's Click exit, found through its cause/context chain."""
+    error = result.exception
+    while error is not None and not isinstance(error, kind):
+        error = error.__cause__ or error.__context__
+    return error
+
+
+async def lineage_strict_cli_scenario(env: SimpleNamespace) -> None:
+    """Strict full-index CLI parse failure keeps last-good rows and bytes; lenient CLI works."""
+    from vaultmind.vault.parser import VaultParseError
+
+    ck = env.ck
+    log_tokens = (SX_LOG_1, SX_LOG_2, SX_LOG_3)
+    notes = {
+        "keep.md": lineage_note("Strict Keeper", f"Control record {LT_KEEP}."),
+        "good.md": lineage_note("Strict Good", f"Good baseline {SX_GOOD_OLD}."),
+        "log.md": lineage_note("Strict Log", lineage_parts(log_tokens)),
+    }
+    w = lineage_world(env.home, "strict-cli", notes, env.llm, env.closers, cli_seed=True)
+    env.worlds.append(w)
+    seed = w.cli_seed_result
+    ck(
+        "strict-cli.seed-by-installed-index-exits-zero-and-closes-keyword-connection",
+        [0, {"bm25": "closed"}],
+        [seed.exit_code, seed.resources.final],
+    )
+    tokens = (LT_KEEP, SX_GOOD_OLD, *log_tokens)
+    ck(
+        "strict-cli.seed-every-note-indexed-and-retrievable-on-every-surface",
+        [{rel: lineage_expected_ids(w, rel) for rel in notes}, [LINEAGE_FOUND] * len(tokens)],
+        [{rel: lineage_ids(w, rel) for rel in notes}, [lineage_found(w, t) for t in tokens]],
+    )
+    exposure_before = {t: lineage_exposure(w, t) for t in (*tokens, SX_GOOD_NEW)}
+    rows_before = {
+        rel: [lineage_note_vector_state(w, rel), lineage_note_keyword_state(w, rel)]
+        for rel in notes
+    }
+
+    revised = lineage_note("Strict Good", f"Good revision {SX_GOOD_NEW}.").encode()
+    (w.vault / "log.md").write_bytes(SX_MALFORMED)
+    (w.vault / "good.md").write_bytes(revised)
+    batches = w.embedder.batches
+    cli = await lineage_cli_index(w)
+    typed = lineage_error_chain(cli, VaultParseError)
+    ck(
+        "strict-cli.parse-failure-exits-nonzero-typed-without-traceback-or-success",
+        [True, True, ["log.md"], True, False, False],
+        [
+            cli.exit_code != 0,
+            "Indexing failed" in cli.output,
+            [str(path) for path, _ in typed.failures] if typed else None,
+            "log.md" in cli.output,
+            "Traceback" in cli.output,
+            bool(LINEAGE_SUCCESS.search(cli.output)),
+        ],
+    )
+    ck(
+        "strict-cli.parse-failure-reaches-no-embedding-and-leaves-raw-rows-unchanged",
+        [0, rows_before, exposure_before],
+        [
+            w.embedder.batches - batches,
+            {
+                rel: [lineage_note_vector_state(w, rel), lineage_note_keyword_state(w, rel)]
+                for rel in notes
+            },
+            {t: lineage_exposure(w, t) for t in (*tokens, SX_GOOD_NEW)},
+        ],
+    )
+    ck(
+        "strict-cli.parse-failure-keeps-malformed-and-edited-source-bytes",
+        [SX_MALFORMED, revised],
+        [(w.vault / "log.md").read_bytes(), (w.vault / "good.md").read_bytes()],
+    )
+    ck(
+        "strict-cli.parse-failure-closes-its-keyword-connection",
+        {"bm25": "closed"},
+        cli.resources.final,
+    )
+
+    lenient = await asyncio.to_thread(lineage_cli_run, w, ["stats"])
+    ck(
+        "strict-cli.unrelated-lenient-cli-stays-usable-over-the-readable-notes",
+        [0, True, False],
+        [lenient.exit_code, "Total notes: 2" in lenient.output, "Traceback" in lenient.output],
+    )
+    ck(
+        "strict-cli.lenient-cli-leaves-rows-and-malformed-bytes-unchanged",
+        [rows_before, SX_MALFORMED],
+        [
+            {
+                rel: [lineage_note_vector_state(w, rel), lineage_note_keyword_state(w, rel)]
+                for rel in notes
+            },
+            (w.vault / "log.md").read_bytes(),
+        ],
+    )
+
+    (w.vault / "log.md").write_text(
+        lineage_note("Strict Log", lineage_parts((SX_LOG_1, SX_LOG_2, SX_LOG_FIXED))),
+        encoding="utf-8",
+    )
+    repaired = await lineage_cli_index(w)
+    ck(
+        "strict-cli.repaired-vault-full-index-reconciles-both-indexes",
+        [0, {"bm25": "closed"}, LINEAGE_ABSENT, LINEAGE_FOUND, LINEAGE_ABSENT, LINEAGE_FOUND]
+        + [{rel: lineage_expected_ids(w, rel) for rel in notes}],
+        [
+            repaired.exit_code,
+            repaired.resources.final,
+            lineage_exposure(w, SX_GOOD_OLD),
+            lineage_found(w, SX_GOOD_NEW),
+            lineage_exposure(w, SX_LOG_3),
+            lineage_found(w, SX_LOG_FIXED),
+            {rel: lineage_ids(w, rel) for rel in notes},
+        ],
+    )
+    env.owning["strict_index_cli"] = {
+        "entry_point": lineage_entry_identity(),
+        "config_sha256": digest(w.config.read_bytes()),
+        "malformed_sha256": digest(SX_MALFORMED),
+        "failure_output": cli.output,
+        "lenient_output": lenient.output,
+    }
+
+
+TH_V0 = "rulesvzeroclaim"
+TH_V0_RULE = "rulesolderrule"
+TH_V1 = "rulesvoneclaim"
+TH_V1_RULE = "rulesmiddlerule"
+TH_V2 = "rulesvtwoclaim"
+TH_V2_RULE = "rulesfinalrule"
+
+
+async def lineage_thematic_edit_scenario(env: SimpleNamespace) -> None:
+    """Two real bot edits of a note led by Markdown thematic rules index only the latest text."""
+    ck = env.ck
+    original = f"---\n\nv0 claim {TH_V0}.\n\n---\n\nOlder rule section {TH_V0_RULE}."
+    first = f"---\n\nv1 claim {TH_V1}.\n\n---\n\nMiddle rule section {TH_V1_RULE}."
+    second = f"---\n\nv2 claim {TH_V2}.\n\n---\n\nFinal rule section {TH_V2_RULE}."
+    notes = {
+        "rules.md": lineage_note("Thematic Rules", "\n" + original),
+        "other.md": lineage_note("Other Notes", f"Control record: {LT_KEEP}."),
+    }
+    w = lineage_world(env.home, "thematic-edit", notes, env.llm, env.closers)
+    env.worlds.append(w)
+    path = w.vault / "rules.md"
+    lineage_index_full(w)
+    ck(
+        "thematic-edit.baseline-leading-rules-are-current-text-and-indexed",
+        [original, LINEAGE_FOUND, LINEAGE_FOUND, lineage_expected_ids(w, "rules.md")],
+        [
+            w.parser.parse_file(path).current_content(),
+            lineage_found(w, TH_V0),
+            lineage_found(w, TH_V0_RULE),
+            lineage_ids(w, "rules.md"),
+        ],
+    )
+    calls_before = len(env.llm.calls)
+
+    prompt, reply = await lineage_edit(w, "rules.md", first, "rewrite the rule sections")
+    ck(
+        "thematic-edit.first-applied-without-failure",
+        [False, True],
+        [lineage_failure_in(prompt + reply), lineage_success_in(reply)],
+    )
+    ck(
+        "thematic-edit.first-only-v1-indexed",
+        [[LINEAGE_ABSENT] * 2, [LINEAGE_FOUND] * 2, lineage_expected_ids(w, "rules.md")],
+        [
+            [lineage_exposure(w, TH_V0), lineage_exposure(w, TH_V0_RULE)],
+            [lineage_found(w, TH_V1), lineage_found(w, TH_V1_RULE)],
+            lineage_ids(w, "rules.md"),
+        ],
+    )
+
+    prompt, reply = await lineage_edit(w, "rules.md", second, "rewrite the rule sections again")
+    ck(
+        "thematic-edit.second-applied-without-failure",
+        [False, True],
+        [lineage_failure_in(prompt + reply), lineage_success_in(reply)],
+    )
+    older = (TH_V0, TH_V0_RULE, TH_V1, TH_V1_RULE)
+    ck(
+        "thematic-edit.second-only-v2-indexed-on-every-surface",
+        [[LINEAGE_ABSENT] * 4, [LINEAGE_FOUND] * 2, lineage_expected_ids(w, "rules.md")],
+        [
+            [lineage_exposure(w, token) for token in older],
+            [lineage_found(w, TH_V2), lineage_found(w, TH_V2_RULE)],
+            lineage_ids(w, "rules.md"),
+        ],
+    )
+    ck("thematic-edit.scripted-llm-called-per-edit", 2, len(env.llm.calls) - calls_before)
+    ck(
+        "thematic-edit.lineage-has-two-edited-edges",
+        ["edited", "edited"],
+        lineage_edges(w, "rules.md"),
+    )
+    text = path.read_text(encoding="utf-8")
+    note = w.parser.parse_file(path)
+    ck(
+        "thematic-edit.raw-file-keeps-original-v1-v2-and-title",
+        [[True] * 3, [True] * 3, second, "Thematic Rules"],
+        [
+            [part in text for part in (original, first, second)],
+            [part in note.content for part in (original, first, second)],
+            note.current_content(),
+            note.title,
+        ],
+    )
+    cli = await lineage_cli_index(w)
+    ck(
+        "thematic-edit.full-index-cli-keeps-only-v2",
+        [0, {"bm25": "closed"}, [LINEAGE_ABSENT] * 4, [LINEAGE_FOUND] * 2]
+        + [lineage_expected_ids(w, "rules.md")],
+        [
+            cli.exit_code,
+            cli.resources.final,
+            [lineage_exposure(w, token) for token in older],
+            [lineage_found(w, TH_V2), lineage_found(w, TH_V2_RULE)],
+            lineage_ids(w, "rules.md"),
+        ],
+    )
+    env.owning["thematic_edit"] = {
+        "files_sha256": {
+            "original": digest(original.encode()),
+            "v1": digest(first.encode()),
+            "v2": digest(second.encode()),
+            "final_file": digest(path.read_bytes()),
+        },
+        "config_sha256": digest(w.config.read_bytes()),
+    }
+
+
+RS_PRIOR = "harborpriorgood"
+RS_NEW = "harborreplacement"
+RS_OTHER = "harborothersource"
+RS_SUMMARY = "harborsummaryclaim"
+RS_TITLES = ("Alpha", "Beta")
+RS_VIDEOS = ("a", "b")
+
+
+class LineageResearchEmbedder(LineageEmbedder):
+    """External embedding boundary with a content-selective synthetic outage."""
+
+    def __init__(self, fail_on: str | None = None) -> None:
+        super().__init__()
+        self.fail_on = fail_on
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        if self.fail_on is not None and any(self.fail_on in text for text in texts):
+            self.batches += 1
+            self.failures += 1
+            raise RuntimeError("synthetic research embedding outage")
+        return super().embed_texts(texts)
+
+
+@contextlib.contextmanager
+def lineage_research_boundaries(llm: Any, transcripts: dict[str, str]) -> Any:
+    """External seams of the research command ONLY: yt-dlp search, transcript API, LLM client.
+
+    Parser, projection, store, keyword index, CLI assembly, pipeline, gap ledger and resource
+    handling all stay real; the command builds its own indexes, cache and gap store.
+    """
+    from unittest.mock import patch
+
+    from youtube_transcript_api import YouTubeTranscriptApi
+
+    from vaultmind.research.searcher import SearchResult
+
+    def search(query: str, max_results: int) -> list[Any]:
+        return [
+            SearchResult(
+                video_id=video,
+                title=title,
+                url=f"https://example.invalid/{video}",
+                channel="fixture",
+                duration_seconds=1,
+                view_count=1,
+                description="fixture",
+            )
+            for video, title in zip(RS_VIDEOS, RS_TITLES, strict=True)
+        ]
+
+    def transcript(video_id: str, languages: list[str] | None = None) -> list[dict[str, str]]:
+        return [{"text": transcripts[video_id]}]
+
+    with (
+        patch("vaultmind.cli._create_llm_client", lambda settings: llm),
+        patch("vaultmind.research.searcher._run_yt_search", search),
+        patch.object(YouTubeTranscriptApi, "get_transcript", staticmethod(transcript)),
+    ):
+        yield
+
+
+def lineage_gap_rows(world: SimpleNamespace, gap_id: str) -> list[list[Any]]:
+    """The gap ledger row, read-only from the configured SQLite file."""
+    con = sqlite3.connect(f"file:{world.data / 'gaps.db'}?mode=ro", uri=True)
+    try:
+        return [
+            list(row)
+            for row in con.execute(
+                "SELECT gap_id, kind, question, status, evidence_ref, resolution_ref, created,"
+                " last_seen, resolved, occurrence_count FROM gaps WHERE gap_id = ?",
+                (gap_id,),
+            )
+        ]
+    finally:
+        con.close()
+
+
+def lineage_rows_outside(world: SimpleNamespace, prefix: str) -> dict[str, dict[str, str]]:
+    """Raw stored vector and keyword rows of every note outside the `prefix` folder."""
+    return {
+        kind: {key: text for key, text in rows.items() if not key.startswith(prefix)}
+        for kind, rows in lineage_state(world).items()
+    }
+
+
+async def lineage_research_cli(
+    env: SimpleNamespace,
+    w: SimpleNamespace,
+    label: str,
+    failing: int | None,
+) -> SimpleNamespace:
+    """One installed `vaultmind research <query>` over the configured world; returns evidence.
+
+    `failing` is the position of the source whose replacement text the external embedding
+    boundary rejects (None: no outage). A prior-good row for that source is indexed first, and
+    a gap for the query is minted first, both through the real stores.
+    """
+    from vaultmind.memory.gaps import GapKind, GapStore
+
+    query = f"harbor{label}"
+    folder = w.vault / "research" / query
+    sources = [folder / f"{title}.md" for title in RS_TITLES]
+    summary = folder / "summary.md"
+    tokens = SimpleNamespace(
+        prior=RS_PRIOR + label,
+        new=RS_NEW + label,
+        other=RS_OTHER + label,
+        summary=RS_SUMMARY + label,
+    )
+    if failing is not None:
+        folder.mkdir(parents=True)
+        sources[failing].write_text(
+            lineage_note(RS_TITLES[failing], f"Prior good source {tokens.prior}."),
+            encoding="utf-8",
+        )
+        w.store.index_single_note(w.parser.parse_file(sources[failing]), w.parser)
+    gaps = GapStore(w.data / "gaps.db")
+    gap = gaps.mint(query, GapKind.UNANSWERED_QUESTION)
+    gaps.close()
+    prefix = f"research/{query}/"
+    failed_rel = str(sources[failing].relative_to(w.vault)) if failing is not None else ""
+    before = SimpleNamespace(
+        outside=lineage_rows_outside(w, prefix),
+        gap=lineage_gap_rows(w, gap.gap_id),
+        failed_vector=lineage_note_vector_state(w, failed_rel),
+        failed_keyword=lineage_note_keyword_state(w, failed_rel),
+    )
+    transcripts = {
+        video: (
+            f"{tokens.new} replacement transcript"
+            if failing is not None and index == failing
+            else f"{tokens.other} other source transcript"
+        )
+        for index, video in enumerate(RS_VIDEOS)
+    }
+    env.llm.reply = json.dumps(
+        {
+            "summary": f"{tokens.summary} fixture analysis",
+            "key_themes": ["fixture"],
+            "comparative_insights": "fixture",
+            "gaps": "fixture",
+            "recommendations": "fixture",
+        }
+    )
+    embedder = LineageResearchEmbedder(tokens.new if failing is not None else None)
+    with lineage_research_boundaries(env.llm, transcripts):
+        cli = await asyncio.to_thread(lineage_cli_run, w, ["research", query], embedder)
+    return SimpleNamespace(
+        query=query,
+        cli=cli,
+        embedder=embedder,
+        saved=[*sources, summary],
+        tokens=tokens,
+        gap_id=gap.gap_id,
+        prefix=prefix,
+        before=before,
+        failing=failing,
+    )
+
+
+async def lineage_research_cli_scenario(env: SimpleNamespace) -> None:
+    """Installed `research` CLI: control, then FIRST and SECOND source index failures."""
+    from vaultmind.indexer.store import IndexUpdateError
+    from vaultmind.research.pipeline import ResearchIndexError
+
+    ck = env.ck
+    data = (env.home / "research-cli").resolve() / "data"
+    w = lineage_world(
+        env.home,
+        "research-cli",
+        {"keep.md": lineage_note("Research Keeper", f"Control record {LT_KEEP}.")},
+        env.llm,
+        env.closers,
+        extra_toml=f'[gaps]\nenabled = true\ndb_path = "{data / "gaps.db"}"\n',
+        embedding_cache=True,
+    )
+    env.worlds.append(w)
+    lineage_index_full(w)
+    configured = {"bm25": "closed", "cache": "closed", "gap_store": "closed"}
+
+    def rel(path: Path) -> str:
+        return str(path.relative_to(w.vault))
+
+    control = await lineage_research_cli(env, w, "control", None)
+    saved = control.saved
+    gap = lineage_gap_rows(w, control.gap_id)
+    ck(
+        "research-cli.control-completes-closes-gap-and-releases-every-resource",
+        [0, True, True, ["answered", rel(saved[2])], configured],
+        [
+            control.cli.exit_code,
+            "Research complete" in control.cli.output,
+            "Closed gap" in control.cli.output,
+            [gap[0][3], gap[0][5]] if gap else None,
+            control.cli.resources.final,
+        ],
+    )
+    ck(
+        "research-cli.control-indexes-every-saved-note-searchable",
+        [{rel(path): lineage_expected_ids(w, rel(path)) for path in saved}]
+        + [LINEAGE_FOUND, LINEAGE_FOUND],
+        [
+            {rel(path): lineage_ids(w, rel(path)) for path in saved},
+            lineage_found(w, control.tokens.other),
+            lineage_found(w, control.tokens.summary),
+        ],
+    )
+
+    outcomes: dict[str, Any] = {}
+    for label, position in (("first", 0), ("second", 1)):
+        run = await lineage_research_cli(env, w, label, position)
+        cli, tokens = run.cli, run.tokens
+        saved = run.saved
+        failed = saved[position]
+        typed = lineage_error_chain(cli, ResearchIndexError)
+        update = typed.__cause__ if typed is not None else None
+        ck(
+            f"research-cli.{label}-failure-exits-nonzero-typed-without-traceback-or-success",
+            [True, True, "embed", [], 1, True, True, False, False],
+            [
+                cli.exit_code != 0,
+                isinstance(typed, ResearchIndexError),
+                update.stage.value if isinstance(update, IndexUpdateError) else None,
+                list(update.completed_stages) if isinstance(update, IndexUpdateError) else None,
+                run.embedder.failures,
+                "Error:" in cli.output,
+                "no index changes were applied" in cli.output,
+                "Traceback" in cli.output,
+                bool(re.search(r"Research complete|Closed gap", cli.output)),
+            ],
+        )
+        ck(
+            f"research-cli.{label}-failure-reports-exact-saved-indexed-failed-unattempted-paths",
+            [
+                [str(path) for path in saved],
+                [str(path) for path in saved[:position]],
+                str(failed),
+                [str(path) for path in saved[position + 1 :]],
+                True,
+            ],
+            [
+                [str(path) for path in getattr(typed, "saved_paths", ())],
+                [str(path) for path in getattr(typed, "indexed_paths", ())],
+                str(getattr(typed, "failed_path", "")),
+                [str(path) for path in getattr(typed, "unattempted_paths", ())],
+                all(str(path) in cli.output for path in saved),
+            ],
+        )
+        ck(
+            f"research-cli.{label}-failure-keeps-every-saved-file-with-its-new-bytes",
+            [True, True, True],
+            [
+                all(path.is_file() for path in saved),
+                tokens.new in failed.read_text(encoding="utf-8"),
+                tokens.summary in saved[2].read_text(encoding="utf-8"),
+            ],
+        )
+        last_good_ids = sorted(row[0] for row in run.before.failed_keyword)
+        ck(
+            f"research-cli.{label}-failed-source-last-good-rows-unchanged-and-searchable",
+            [
+                run.before.failed_vector,
+                run.before.failed_keyword,
+                LINEAGE_FOUND,
+                LINEAGE_ABSENT,
+                last_good_ids,
+                [],
+            ],
+            [
+                lineage_note_vector_state(w, rel(failed)),
+                lineage_note_keyword_state(w, rel(failed)),
+                lineage_found(w, tokens.prior),
+                lineage_exposure(w, tokens.new),
+                lineage_keyword_matched(w, tokens.prior),
+                lineage_keyword_matched(w, tokens.new),
+            ],
+        )
+        indexed = saved[:position]
+        ck(
+            f"research-cli.{label}-indexed-prefix-searchable-and-unattempted-absent",
+            [
+                {
+                    rel(path): lineage_expected_ids(w, rel(path))
+                    if path in indexed
+                    else {"vector": [], "keyword": []}
+                    for path in saved
+                    if path != failed
+                },
+                LINEAGE_FOUND if indexed else LINEAGE_ABSENT,
+                LINEAGE_ABSENT,
+            ],
+            [
+                {rel(path): lineage_ids(w, rel(path)) for path in saved if path != failed},
+                lineage_found(w, tokens.other) if indexed else lineage_exposure(w, tokens.other),
+                lineage_exposure(w, tokens.summary),
+            ],
+        )
+        ck(
+            f"research-cli.{label}-failure-leaves-prior-good-notes-and-gap-unchanged-open",
+            [run.before.outside, run.before.gap, "open", ""],
+            [
+                lineage_rows_outside(w, run.prefix),
+                lineage_gap_rows(w, run.gap_id),
+                lineage_gap_rows(w, run.gap_id)[0][3],
+                lineage_gap_rows(w, run.gap_id)[0][5],
+            ],
+        )
+        ck(
+            f"research-cli.{label}-failure-closes-every-configured-resource",
+            configured,
+            cli.resources.final,
+        )
+        outcomes[label] = {
+            "position": position,
+            "exit_code": cli.exit_code,
+            "output": cli.output,
+            "saved": [rel(path) for path in saved],
+            "stage": update.stage.value if isinstance(update, IndexUpdateError) else None,
+        }
+    env.owning["research_cli"] = {
+        "entry_point": lineage_entry_identity(),
+        "config_sha256": digest(w.config.read_bytes()),
+        "control_output": control.cli.output,
+        "failures": outcomes,
+    }
+
+
 LINEAGE_SCENARIOS = (
     ("delete", lineage_delete_scenario),
     ("edit", lineage_edit_scenario),
@@ -6249,6 +6976,9 @@ LINEAGE_SCENARIOS = (
     ("consumers", lineage_consumer_scenario),
     ("cli-watch", lineage_cli_watch_scenario),
     ("mcp-serve", lineage_mcp_serve_scenario),
+    ("strict-cli", lineage_strict_cli_scenario),
+    ("thematic-edit", lineage_thematic_edit_scenario),
+    ("research-cli", lineage_research_cli_scenario),
 )
 
 
@@ -6368,8 +7098,9 @@ async def lineage_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, An
             "Fixture-only offline proof over synthetic temporary vaults and explicit TOML. Real "
             "parser, Chroma, SQLite BM25, hybrid search, Telegram handlers over the aiogram "
             "dispatcher and lineage store run. The installed `vaultmind` console script runs "
-            "`index` and `watch` in-process and `index`/`mcp-serve` in isolated children "
-            "(MCP over the SDK stdio client); each command builds its own configured Chroma "
+            "`index`, `stats`, `research` and `watch` in-process and `index`/`mcp-serve` in "
+            "isolated children (MCP over the SDK stdio client); each command builds its own "
+            "configured Chroma "
             "store and SQLite keyword index. The direct-watcher scenarios use a verifier-"
             "assembled VaultWatcher/IncrementalWatchHandler over a verifier-wired store and "
             "prove only the handler's own error semantics. Only the LLM, embedding provider, "
@@ -6462,9 +7193,11 @@ def main() -> int:
                 "in-process: real VaultParser/Chroma/SQLite BM25/hybrid VaultStore, real "
                 "CommandHandlers behind bot.telegram.register_handlers over aiogram "
                 "Update/Dispatcher, real LineageStore; installed `vaultmind` console script "
-                "(Click group from installed metadata) running `index` and `watch` in-process "
-                "(watch on its own asyncio.run loop in a worker thread, real watchdog events, "
-                "cancelled gracefully) and `index`/`mcp-serve` in isolated children (MCP over "
+                "(Click group from installed metadata) running `index`, `stats`, `research` and "
+                "`watch` in-process (watch on its own asyncio.run loop in a worker thread, real "
+                "watchdog events, cancelled gracefully; resources observed passively by a "
+                "read-only profile hook that retains them) and `index`/`mcp-serve` in isolated "
+                "children (MCP over "
                 "the SDK stdio client); verifier-assembled direct VaultWatcher + "
                 "IncrementalWatchHandler scenarios are labelled direct-watcher and prove only "
                 "handler error semantics"
@@ -6475,9 +7208,14 @@ def main() -> int:
                 "outage in-process)",
                 "scripted llm.client (generating and confirming bot edits, distill, vision)",
                 "recording aiogram BaseSession plus synthetic GetFile/stream bytes (no Telegram)",
-                "urllib.request.urlopen, yt-dlp search and transcript API replaced for consumers",
+                "urllib.request.urlopen, yt-dlp search (`_run_yt_search`), transcript API and "
+                "`vaultmind.cli._create_llm_client` replaced for consumers and the research "
+                "command",
+                "content-selective synthetic embedding outage at the Embedder boundary for the "
+                "research command",
                 "fault injection at SQLite keyword-index write methods (direct stores) or a "
                 "read-only index file (installed commands), and the embedder only",
+                "launcher-recorded Embedder-substitution identity is metadata, not evidence",
                 "temporary HOME/VAULTMIND_HOME and explicit absolute fixture TOML per world",
                 "isolated children run behind a launcher-side network audit hook with a "
                 "blocked-lookup self-test",
