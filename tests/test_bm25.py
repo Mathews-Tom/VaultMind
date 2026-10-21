@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
@@ -132,17 +133,57 @@ class TestLargeBatch:
     """
 
     def test_upsert_batch_exceeding_sqlite_variable_limit(self, bm25: BM25Index) -> None:
-        import sqlite3
-
-        # Emulate a conservative build regardless of what this SQLite allows
         bm25._con.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
-
+        bm25.upsert("unrelated::0", "unrelated.md", "Unrelated", "unrelatedkeyword")
         rows = [
-            (f"note{i}::0", f"notes/note{i}.md", f"Note {i}", f"content {i}") for i in range(1500)
+            (f"note{i}::0", f"notes/note{i}.md", f"Note {i}", f"originalbatchtoken {i}")
+            for i in range(1500)
         ]
         bm25.upsert_batch(rows)
-        assert bm25.count == 1500
+        assert sorted(
+            (row["chunk_id"], row["note_path"], row["note_title"])
+            for row in bm25.search("originalbatchtoken", n_results=2000)
+        ) == sorted((chunk_id, path, title) for chunk_id, path, title, _ in rows)
 
-        # Re-upsert the same ids: delete path must also handle >999 ids
-        bm25.upsert_batch(rows)
-        assert bm25.count == 1500
+        replacements = [
+            (chunk_id, f"updated/{i}.md", f"Revised {i}", f"replacementbatchtoken {i}")
+            for i, (chunk_id, _, _, _) in enumerate(rows)
+        ]
+        bm25.upsert_batch(replacements)
+        bm25.upsert("later::0", "later.md", "Later", "laterkeyword")
+
+        assert sorted(
+            (row["chunk_id"], row["note_path"], row["note_title"])
+            for row in bm25.search("replacementbatchtoken", n_results=2000)
+        ) == sorted((chunk_id, path, title) for chunk_id, path, title, _ in replacements)
+        assert bm25.search("originalbatchtoken", n_results=2000) == []
+        assert [row["chunk_id"] for row in bm25.search("unrelatedkeyword")] == ["unrelated::0"]
+        assert [row["chunk_id"] for row in bm25.search("laterkeyword")] == ["later::0"]
+
+    def test_failed_replacement_rolls_back_and_does_not_leak_ids(self, bm25: BM25Index) -> None:
+        bm25.upsert("old::0", "old.md", "Old", "originalkeyword")
+        bm25.upsert("survivor::0", "survivor.md", "Survivor", "survivorkeyword")
+
+        def deny_fts_insert(
+            action: int,
+            table: str | None,
+            _column: str | None,
+            _database: str | None,
+            _trigger: str | None,
+        ) -> int:
+            if action == sqlite3.SQLITE_INSERT and table == "fts_chunks":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        bm25._con.set_authorizer(deny_fts_insert)
+        try:
+            with pytest.raises(sqlite3.DatabaseError):
+                bm25.upsert("old::0", "updated.md", "Updated", "replacementkeyword")
+        finally:
+            bm25._con.set_authorizer(None)
+
+        bm25.upsert("fresh::0", "fresh.md", "Fresh", "freshkeyword")
+        assert [row["chunk_id"] for row in bm25.search("originalkeyword")] == ["old::0"]
+        assert bm25.search("replacementkeyword") == []
+        assert [row["chunk_id"] for row in bm25.search("survivorkeyword")] == ["survivor::0"]
+        assert [row["chunk_id"] for row in bm25.search("freshkeyword")] == ["fresh::0"]
