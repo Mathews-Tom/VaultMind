@@ -115,28 +115,80 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def package_identity() -> dict[str, Any]:
+    """Identify the imported package, not the checkout containing this verifier."""
+    import vaultmind
+
+    package = Path(vaultmind.__file__).resolve().parent
+    hashes = {
+        str(path.relative_to(package)): digest(path.read_bytes())
+        for path in sorted(package.rglob("*.py"))
+    }
+    if "__init__.py" not in hashes:
+        raise ValueError(f"Missing required package source: {package / '__init__.py'}")
+    dist = importlib.metadata.distribution("vaultmind")
+    return {
+        "module_file": str(Path(vaultmind.__file__).resolve()),
+        "package_root": str(package),
+        "file_sha256": hashes,
+        "code_sha256": digest(json.dumps(hashes, sort_keys=True).encode()),
+        "distribution": {
+            "name": dist.metadata["Name"],
+            "version": dist.version,
+            "root": str(dist.locate_file("").resolve()),
+            "metadata_files": [
+                str(dist.locate_file(path).resolve())
+                for path in dist.files or ()
+                if str(path).endswith(".dist-info/METADATA")
+            ],
+            "direct_url": dist.read_text("direct_url.json"),
+        },
+        # Resolving the executable would discard the virtual environment's bin directory.
+        "interpreter": {"executable": sys.executable, "version": sys.version},
+    }
+
+
 def artifact_identity() -> dict[str, Any]:
-    files = sorted((ROOT / "src" / "vaultmind").rglob("*.py")) + [Path(__file__).resolve()]
-    hashes = {str(p.relative_to(ROOT)): digest(p.read_bytes()) for p in files}
+    contracts = {
+        name: (ROOT / ".docs" / name).read_bytes()
+        for name in ("DEVELOPMENT_PLAN.md", "EXECUTION_PROMPTS.md")
+    }
+    plan_ids = {}
+    for name, content in contracts.items():
+        match = re.search(r"^Plan ID: `([^`]+)`", content.decode("utf-8"), re.MULTILINE)
+        if match is None:
+            raise ValueError(f"Missing required Plan ID in {name}")
+        plan_ids[name] = match.group(1)
+    if len(set(plan_ids.values())) != 1:
+        raise ValueError(f"Contract Plan IDs disagree: {plan_ids}")
+    runtime = package_identity()
+    reviewed = {
+        str(path.relative_to(ROOT / "src" / "vaultmind")): digest(path.read_bytes())
+        for path in sorted((ROOT / "src" / "vaultmind").rglob("*.py"))
+    }
+    if "__init__.py" not in reviewed:
+        raise ValueError(f"Missing required reviewed package source: {ROOT / 'src' / 'vaultmind'}")
+    hashes = {f"src/vaultmind/{name}": value for name, value in runtime["file_sha256"].items()}
+    hashes["scripts/verify_acceptance.py"] = digest(Path(__file__).read_bytes())
     head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
     changes = subprocess.check_output(
         ["git", "-C", str(ROOT), "status", "--porcelain"], text=True
     ).splitlines()
     return {
-        "plan_id": "VM-REMEDIATION-2026-10-11-R1",
-        "revision": "R1-A+R1-B",
+        "plan_id": next(iter(plan_ids.values())),
         "head": head,
         "working_tree_dirty": bool(changes),
         "working_tree_changes": changes,
         "code_sha256": digest(json.dumps(hashes, sort_keys=True).encode()),
         "file_sha256": hashes,
+        "runtime": runtime,
+        "reviewed_root": str(ROOT),
+        "reviewed_package_sha256": digest(json.dumps(reviewed, sort_keys=True).encode()),
+        "runtime_matches_reviewed": runtime["file_sha256"] == reviewed,
         "dependency_sha256": {
             name: digest((ROOT / name).read_bytes()) for name in ("pyproject.toml", "uv.lock")
         },
-        "contract_sha256": {
-            name: digest((ROOT / ".docs" / name).read_bytes())
-            for name in ("DEVELOPMENT_PLAN.md", "EXECUTION_PROMPTS.md")
-        },
+        "contract_sha256": {name: digest(content) for name, content in contracts.items()},
     }
 
 
@@ -182,11 +234,6 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
         if expected != observed:
             raise AssertionError(f"{name}: expected {expected!r}, observed {observed!r}")
 
-    check(
-        "installed-code-origin",
-        True,
-        Path(vaultmind.__file__).resolve().is_relative_to(ROOT / "src"),
-    )
     corpus_hashes: dict[str, str] = {}
     settings = fixture_config(home, "live", False)
     for name, (authority, body) in NOTES.items():
@@ -486,15 +533,19 @@ MCP_OUTSIDE_NOTE: dict[str, Any] = {
 # console script from installed metadata, tees fd 1 byte-for-byte, then runs the Click group.
 MCP_LAUNCHER = r"""
 import importlib.metadata
+import hashlib
 import json
 import os
+import runpy
 import socket
 import sys
 import threading
+from pathlib import Path
 
 state = sys.argv[1]
 cli_args = sys.argv[2:]
 log = open(os.path.join(state, "launcher.jsonl"), "a", buffering=1, encoding="utf-8")
+console_script = Path(sys.executable).parent / "vaultmind"
 
 
 def emit(**fields):
@@ -508,6 +559,12 @@ PEER_EVENTS = {"socket.connect", "socket.sendto"}
 
 
 def guard(event, args):
+    if event == "exec" and args[0].co_filename == str(console_script):
+        emit(
+            kind="console-script",
+            path=args[0].co_filename,
+            sha256=hashlib.sha256(console_script.read_bytes()).hexdigest(),
+        )
     if event in HOST_EVENTS or (event in PEER_EVENTS and args[0].family != socket.AF_UNIX):
         emit(kind="network", event=event, probe=probing[0])
         raise RuntimeError("network forbidden by offline MCP acceptance")
@@ -563,7 +620,6 @@ if len(matches) != 1:
 entry = [
     ep for ep in importlib.metadata.entry_points(group="console_scripts") if ep.name == "vaultmind"
 ][0]
-cli = entry.load()
 import vaultmind
 
 dist = importlib.metadata.distribution("vaultmind")
@@ -572,10 +628,14 @@ emit(
     name=entry.name,
     group=entry.group,
     value=entry.value,
-    cli_type=type(cli).__module__ + "." + type(cli).__name__,
     dist_version=dist.version,
     direct_url=dist.read_text("direct_url.json"),
     module_file=os.path.realpath(vaultmind.__file__),
+    package_sha256=hashlib.sha256(json.dumps({
+        str(path.relative_to(Path(vaultmind.__file__).resolve().parent)):
+            hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(Path(vaultmind.__file__).resolve().parent.rglob("*.py"))
+    }, sort_keys=True).encode()).hexdigest(),
     executable=sys.executable,
     python=sys.version.split()[0],
     sys_path=sys.path,
@@ -583,8 +643,8 @@ emit(
 
 code = 0
 try:
-    sys.argv = ["vaultmind", *cli_args]
-    cli()
+    sys.argv = [str(console_script), *cli_args]
+    runpy.run_path(str(console_script), run_name="__main__")
 except SystemExit as exc:
     code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
 except BaseException:
@@ -1637,9 +1697,18 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
     )
     check(
         prefix + "origin.registered-entry-point",
-        ["vaultmind", "console_scripts", "vaultmind.cli:cli", "click.core.Group"],
-        [entry["name"], entry["group"], entry["value"], entry["cli_type"]],
+        ["vaultmind", "console_scripts", "vaultmind.cli:cli"],
+        [entry["name"], entry["group"], entry["value"]],
     )
+    sibling = Path(sys.executable).parent / "vaultmind"
+    check(
+        prefix + "origin.consumed-sibling-console-script",
+        [{"kind": "console-script", "path": str(sibling), "sha256": digest(sibling.read_bytes())}],
+        by_kind.get("console-script", []),
+    )
+    runtime = package_identity()
+    check(prefix + "origin.same-package", runtime["module_file"], entry["module_file"])
+    check(prefix + "origin.same-code", runtime["code_sha256"], entry["package_sha256"])
     check(prefix + "origin.running-interpreter", sys.executable, entry["executable"])
     check(
         prefix + "origin.not-fixture-or-cwd-shadowed",
@@ -3499,7 +3568,6 @@ def main() -> int:
     receipt_path = args.receipt_out.resolve() if args.receipt_out else None
     receipt: dict[str, Any] = {
         "case": args.case,
-        "artifact": artifact_identity(),
         "command": sys.argv,
         "python": sys.version,
         "checks": [],
@@ -3516,7 +3584,7 @@ def main() -> int:
     if args.case == "mcp":
         receipt.update(
             transport=(
-                "subprocess: registered `vaultmind` console_scripts entry point (Click group) "
+                "subprocess: sibling `vaultmind` console script via runpy in isolated Python "
                 "-> installed MCP SDK stdio server; client is the installed SDK ClientSession "
                 "over stdio_client"
             ),
@@ -3584,6 +3652,9 @@ def main() -> int:
             os.environ["HOME"] = str(home)
             os.environ["ANONYMIZED_TELEMETRY"] = "False"
             os.chdir(home)
+            receipt["artifact"] = artifact_identity()
+            if not receipt["artifact"]["runtime_matches_reviewed"]:
+                raise ValueError("Imported VaultMind code does not match the reviewed source")
             if args.case == "retrieval":
                 case = retrieval(home, receipt["checks"])
             elif args.case == "approval":
