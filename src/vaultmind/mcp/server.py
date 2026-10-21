@@ -556,6 +556,15 @@ def _require_enforcer(name: str, enforcer: ProfileEnforcer | None) -> ProfileEnf
     return enforcer
 
 
+def _capture_destination(scope: ProfileEnforcer, destination: Path, vault_path: Path) -> Path:
+    """Authorize a computed destination without disclosing generated or resolved paths."""
+    try:
+        scope.check_path(destination)
+        return validate_vault_path(str(destination), vault_path)
+    except (ProfileError, PathTraversalError, PathResolutionError):
+        raise ProfileError("Capture destination is not allowed by the active profile") from None
+
+
 def _scoped_markdown_files(
     resolved_root: Path, enforcer: ProfileEnforcer, roots: list[Path]
 ) -> list[Path]:
@@ -571,6 +580,8 @@ def _scoped_markdown_files(
                 rel = md.relative_to(resolved_root)
                 enforcer.check_path(rel)
             except (ValueError, ProfileError):
+                continue
+            if enforcer.note_path(str(rel)) is None:
                 continue
             allowed.add(rel)
     return sorted(allowed)
@@ -595,17 +606,18 @@ def _dispatch_tool(
     """Route tool calls to the appropriate handler."""
 
     if name == "vault_search":
+        scope = _require_enforcer(name, enforcer)
         where = {}
         if args.get("note_type"):
             where["note_type"] = args["note_type"]
-        results = store.search(
-            args["query"],
-            n_results=args.get("n_results", 5),
-            where=where or None,
+        results = scope.search(
+            store, args["query"], n_results=args.get("n_results", 5), where=where or None
         )
         return {"results": results, "count": len(results)}
 
     elif name == "vault_read":
+        scope = _require_enforcer(name, enforcer)
+        scope.check_path(Path(args["path"]))
         try:
             filepath = validate_vault_path(args["path"], vault_path)
         except PathTraversalError as e:
@@ -616,6 +628,10 @@ def _dispatch_tool(
         return {"path": args["path"], "content": content}
 
     elif name == "vault_write":
+        scope = _require_enforcer(name, enforcer)
+        scope.check_write()
+        scope.check_path(Path(args["path"]))
+        scope.check_size(args["content"])
         try:
             filepath = validate_vault_path(args["path"], vault_path)
         except PathTraversalError as e:
@@ -631,17 +647,23 @@ def _dispatch_tool(
         return {"status": "ok", "path": args["path"]}
 
     elif name == "vault_list":
+        scope = _require_enforcer(name, enforcer)
         try:
             folder = validate_vault_path(args.get("folder", ""), vault_path)
-        except PathTraversalError as e:
+        except (PathTraversalError, PathResolutionError) as e:
             return {"error": f"Path not allowed: {e.user_path}"}
-        if not folder.exists():
-            return {"error": f"Folder not found: {args.get('folder', '')}"}
-        notes = []
-        for md in folder.rglob("*.md"):
-            rel = md.relative_to(vault_path)
-            notes.append(str(rel))
-        return {"notes": sorted(notes), "count": len(notes)}
+        resolved_root = vault_path.resolve()
+        if not scope.policy.allows_all_folders and folder == resolved_root:
+            roots = [
+                resolved_root / allowed for allowed in dict.fromkeys(scope.policy.folder_scope)
+            ]
+        else:
+            scope.check_path(Path(args.get("folder", "")))
+            if not folder.exists():
+                return {"error": f"Folder not found: {args.get('folder', '')}"}
+            roots = [folder]
+        notes = [str(rel) for rel in _scoped_markdown_files(resolved_root, scope, roots)]
+        return {"notes": notes, "count": len(notes)}
 
     elif name == "read_frontmatter":
         scope = _require_enforcer(name, enforcer)
@@ -766,6 +788,8 @@ def _dispatch_tool(
         return {"path": None, "message": "No path found between entities"}
 
     elif name == "find_duplicates":
+        scope = _require_enforcer(name, enforcer)
+        scope.check_path(Path(args["note_path"]))
         if duplicate_detector is None:
             return {"error": "Duplicate detection is not configured"}
         try:
@@ -778,7 +802,13 @@ def _dispatch_tool(
         from vaultmind.indexer.duplicate_detector import DuplicateDetector
 
         assert isinstance(duplicate_detector, DuplicateDetector)
-        matches = duplicate_detector.find_duplicates(note, max_results=args.get("max_results", 10))
+        matches = duplicate_detector.find_duplicates(
+            note,
+            max_results=args.get("max_results", 10),
+            search=lambda query, count: scope.search(store, query, n_results=count),
+            cache_results=False,
+        )
+        matches = [m for m in matches if scope.note_path(m.match_path) is not None]
         return {
             "note_path": args["note_path"],
             "matches": [
@@ -794,6 +824,13 @@ def _dispatch_tool(
         }
 
     elif name == "suggest_links":
+        scope = _require_enforcer(name, enforcer)
+        scope.check_path(Path(args["note_path"]))
+        if not scope.policy.allows_all_folders:
+            raise ProfileError(
+                "Tool 'suggest_links' is unavailable for folder-restricted profiles: "
+                "graph-derived suggestion scores lack scoped note provenance"
+            )
         if note_suggester is None:
             return {"error": "Note suggestions are not configured"}
         try:
@@ -806,7 +843,13 @@ def _dispatch_tool(
         from vaultmind.indexer.note_suggester import NoteSuggester
 
         assert isinstance(note_suggester, NoteSuggester)
-        suggestions = note_suggester.suggest_links(note, max_results=args.get("max_results", 5))
+        suggestions = note_suggester.suggest_links(
+            note,
+            max_results=args.get("max_results", 5),
+            search=lambda query, count: scope.search(store, query, n_results=count),
+            cache_results=False,
+        )
+        suggestions = [s for s in suggestions if scope.note_path(s.target_path) is not None]
         return {
             "note_path": args["note_path"],
             "suggestions": [
@@ -836,10 +879,14 @@ def _dispatch_tool(
             f"created: {now.strftime('%Y-%m-%d %H:%M')}\nsource: mcp\nstatus: active\n---\n\n"
             f"# {title}\n\n{args['content']}\n"
         )
-        filepath = vault_path / "00-inbox" / filename
+        scope = _require_enforcer(name, enforcer)
+        scope.check_write()
+        destination = Path("00-inbox") / filename
+        scope.check_size(content)
+        filepath = _capture_destination(scope, destination, vault_path)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(content, encoding="utf-8")
-        return {"status": "ok", "path": f"00-inbox/{filename}"}
+        return {"status": "ok", "path": str(filepath.relative_to(vault_path.resolve()))}
 
     elif name == "capture_note":
         import re
@@ -885,7 +932,11 @@ def _dispatch_tool(
             f"{raw_content}\n"
         )
 
-        filepath = vault_path / target_folder / filename
+        scope = _require_enforcer(name, enforcer)
+        scope.check_write()
+        destination = Path(target_folder) / filename
+        scope.check_size(file_content)
+        filepath = _capture_destination(scope, destination, vault_path)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(file_content, encoding="utf-8")
 
@@ -896,7 +947,7 @@ def _dispatch_tool(
         except Exception as exc:
             logger.warning("Failed to index capture_note after write: %s", exc)
 
-        rel_path = f"{target_folder}/{filename}"
+        rel_path = str(filepath.relative_to(vault_path.resolve()))
         return {"status": "ok", "path": rel_path, "title": title}
 
     elif name == "vault_stats":

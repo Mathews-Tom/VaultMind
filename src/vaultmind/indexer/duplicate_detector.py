@@ -21,9 +21,11 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from vaultmind.config import DuplicateDetectionConfig
     from vaultmind.indexer.store import VaultStore
     from vaultmind.vault.events import NoteCreatedEvent, NoteModifiedEvent
@@ -92,21 +94,24 @@ class DuplicateDetector:
         note: Note,
         *,
         max_results: int = 10,
+        search: Callable[[str, int], list[dict[str, Any]]] | None = None,
+        cache_results: bool = True,
     ) -> list[DuplicateMatch]:
         """Find duplicate/merge candidates for a single note.
 
-        Queries ChromaDB with the note's body text and filters out
-        self-matches (same note_path). Returns matches sorted by
-        descending similarity.
+        Queries ChromaDB (or the supplied authorized search) with the note's body
+        text and filters out self-matches. ``cache_results=False`` keeps read-only
+        callers from changing the event-driven results buffer.
         """
         body = note.body_without_frontmatter().strip()
         if len(body) < self._config.min_content_length:
             return []
 
         # Query more results than needed to account for self-chunks
-        raw_results = self._store.search(
-            query=body[:2000],  # cap query length for embedding
-            n_results=max_results + 10,
+        raw_results = (
+            self._store.search(query=body[:2000], n_results=max_results + 10)
+            if search is None
+            else search(body[:2000], max_results + 10)
         )
 
         note_path = str(note.path)
@@ -148,7 +153,7 @@ class DuplicateDetector:
                 break
 
         # Store results for later retrieval
-        if matches:
+        if matches and cache_results:
             self._results[note_path] = matches
             logger.info(
                 "Duplicates for %s: %d duplicate, %d merge",

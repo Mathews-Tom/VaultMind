@@ -76,6 +76,8 @@ Semantic search over the vault using ChromaDB embeddings.
 
 **Returns:** Array of matching note chunks with similarity scores, source paths, and content.
 
+Folder-restricted profiles search only verified existing Markdown notes in their allowed folders. The note-path whitelist is applied together with `note_type` before the store selects its top results; forbidden high-ranking chunks cannot crowd out allowed matches. Returned chunks are checked again for valid in-scope note provenance, and `count` includes only returned chunks.
+
 ### `vault_read`
 
 Read the full content of a note.
@@ -103,10 +105,12 @@ List notes in a vault folder.
 
 **Parameters:**
 
-- `folder` (string, default `""`) — folder path relative to vault root (empty = root)
+- `folder` (string, default `""`) — folder path relative to vault root. Omitted, empty, dot, or vault-root input returns a virtual aggregate of the active profile's allowed roots.
 - `tag` (string, optional) — filter by tag
 
 **Returns:** Sorted list of note paths and count.
+
+Explicit forbidden folders are denied, whether or not they exist. Only allowed existing Markdown paths contribute entries or counts; symlinks do not bypass vault containment or folder scope.
 
 ### `graph_query`
 
@@ -144,6 +148,10 @@ Find semantically similar or duplicate notes.
 - **Duplicate** (>= 92% similarity) — nearly identical content
 - **Merge candidate** (80-92% similarity) — related content worth consolidating
 
+The source note must be allowed by the active profile. Candidate search is scoped before its result limit, and only verified in-scope matches contribute to the returned count. Restricted profiles can receive positive duplicate matches from their allowed folders.
+
+The stdio server assembles the configured duplicate detector and note suggester when their corresponding features are enabled; disabled or unavailable producers return a not-configured error for otherwise authorized calls. MCP duplicate lookups do not populate the producer's notification/results cache.
+
 ### `suggest_links`
 
 Find notes that should be linked to a given note using composite scoring.
@@ -158,6 +166,10 @@ Find notes that should be linked to a given note using composite scoring.
 - Semantic similarity (70-80% band, below duplicate threshold)
 - Shared graph entities (weight: 0.1 per entity)
 - Graph path distance (weight: 0.05)
+
+**Restricted profiles:** This tool is explicitly denied whenever folder scope is restricted, even when the source and proposed target notes are allowed. Shared entities, graph distance, and composite scores do not yet have scoped provenance, so filtering only target paths would not protect private graph information. Wildcard-folder profiles retain the existing composite-scoring behavior.
+
+Authorized MCP suggestion lookups likewise do not populate the producer's notification/results cache. Their candidates and returned target paths still pass through the shared note-result boundary, including for wildcard profiles.
 
 ### `capture`
 
@@ -184,6 +196,8 @@ Rich note capture with full frontmatter control. Creates the note, writes full Y
 - `folder` (string, optional, default `"00-inbox"`) — target folder relative to vault root
 
 **Returns:** Status, path, and title of the created note.
+
+Both capture tools authorize the computed destination and check the complete serialized note's UTF-8 size, including title, tags, and frontmatter, before creating directories, writing files, or indexing. `capture` always targets `00-inbox`; a profile excluding that folder cannot use it. `capture_note` can create nested folders only inside the active profile's allowed scope.
 
 ### `vault_stats`
 
@@ -327,11 +341,11 @@ write_enabled = false
 
 ### Path traversal protection
 
-All path-based tools validate that the requested path resolves within the vault root. Attempts to access `../`, absolute paths, or symlinks outside the vault are blocked.
+Note-backed tools validate vault containment and folder scope, including resolved symlink targets. Wildcard folder access bypasses folder restrictions, never vault containment. Config-defined profiles override built-ins and use the same result boundary.
 
-Traversal tools enforce the same `ProfileEnforcer` policy on inputs and every returned path. Wildcard folder access bypasses folder restrictions, never vault containment. Config-defined profiles override built-ins and use the same result filtering. Direct traversal dispatch requires an explicit enforcement context and denies calls without one.
+The shared `ProfileEnforcer` boundary covers `vault_search`, `vault_list`, `vault_read`, `vault_write`, `capture`, `capture_note`, `find_duplicates`, and the traversal tools (`read_frontmatter`, `list_folder_index`, `follow_links`). Direct dispatch of these tools requires an explicit enforcement context. For folder-restricted profiles, search and duplicate candidates are scoped before store truncation. Wildcard profiles preserve the original query filters and valid literal provenance. Both paths defensively verify candidates before returning content, paths, metadata, or counts. Missing, ill-typed, unresolvable, non-Markdown, and forbidden note provenance is omitted rather than treated as permission to disclose a result. Restricted `suggest_links` calls are denied rather than returning unscoped graph-derived scores.
 
-This verification covers only `read_frontmatter`, `list_folder_index`, and `follow_links`, not global MCP privacy. The planner profile's existing `vault_list` and `vault_search` do not filter results by folder scope and can disclose out-of-scope paths or content. Do not use planner as a whole-vault privacy sandbox. Traversal denials can echo caller-supplied paths but must not disclose unknown resolved symlink targets.
+**Derived/global privacy is not enforced:** This is a note-result boundary, not all-tool privacy. Derived/global tools — `vault_stats`, `graph_query`, `graph_path`, `episode_query`, `workflow_suggest`, `graph_evolution`, and `recent_activity` — are not secured by this change and may disclose out-of-scope information. Do not use planner or another folder-restricted profile as a whole-vault privacy sandbox. Denials can echo caller-supplied paths but must not disclose unknown resolved symlink targets.
 
 Symlink loops fail closed with a caller-path-only error, on Python 3.12 and 3.13. Other strict-resolution filesystem errors fall back to ordinary non-strict lookup before containment and scope checks; allowed missing paths and children of files retain their normal not-found response. A genuine fallback-resolution failure remains an explicit caller-path-only error. Invalid or forbidden candidates do not contribute metadata or counts and do not prevent `list_folder_index` or `follow_links` from returning valid allowed notes. The offline receipt checks unknown targets on payloads, raw protocol frames, stderr, and audit reasons, and exercises each traversal tool through the registered SDK request handler with missing enforcement context and a valid-context control using the same arguments.
 
@@ -356,6 +370,6 @@ The `ProfileEnforcer` checks:
 1. Is this tool allowed for the active profile?
 2. Is write access enabled (for `vault_write`, `capture`, `capture_note`)?
 3. Is the target path within the allowed folder scope?
-4. Is the content size within limits (for `vault_write`)?
+4. Is the complete written content within size limits (for `vault_write`, `capture`, and `capture_note`)?
 
 Violations return a structured error response — the tool call does not execute.

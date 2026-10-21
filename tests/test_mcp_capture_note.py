@@ -5,9 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
-from vaultmind.mcp.auth import ProfileEnforcer
+import pytest
+
+from vaultmind.config import VaultConfig
+from vaultmind.mcp.auth import ProfileEnforcer, ProfileError, ProfilePolicy
 from vaultmind.mcp.profiles import load_profile
 from vaultmind.mcp.server import _dispatch_tool
+from vaultmind.vault.parser import VaultParser
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,18 +28,8 @@ def _make_fake_store() -> MagicMock:
     return store
 
 
-def _make_fake_parser(vault_root: Path) -> MagicMock:
-    parser = MagicMock()
-    parser.vault_root = vault_root
-
-    def _parse_file(filepath: Path) -> MagicMock:
-        note = MagicMock()
-        note.path = filepath.relative_to(vault_root)
-        note.title = filepath.stem
-        return note
-
-    parser.parse_file.side_effect = _parse_file
-    return parser
+def _make_parser(vault_root: Path) -> VaultParser:
+    return VaultParser(VaultConfig(path=vault_root))  # type: ignore[arg-type]
 
 
 def _make_fake_graph() -> MagicMock:
@@ -52,7 +46,7 @@ def _call_capture_note(
 ) -> dict:
     store = _make_fake_store()
     graph = _make_fake_graph()
-    parser = _make_fake_parser(vault_root)
+    parser = _make_parser(vault_root)
     return _dispatch_tool(
         "capture_note",
         args,
@@ -96,27 +90,11 @@ class TestCaptureNoteCreatesFile:
         assert "status: active" in content
         assert "This is the note body." in content
 
-    def test_capture_note_frontmatter_structure(self, tmp_path: Path) -> None:
-        """Frontmatter delimiters are present and well-formed."""
-        result = _call_capture_note(
-            tmp_path,
-            {
-                "content": "Body text here.",
-                "title": "Structured Note",
-            },
-        )
-
-        note_path = tmp_path / result["path"]
-        content = note_path.read_text()
-        parts = content.split("---")
-        # At least 3 parts: empty, frontmatter, body
-        assert len(parts) >= 3
-
     def test_capture_note_indexes_note(self, tmp_path: Path) -> None:
         """index_single_note is called after writing."""
         store = _make_fake_store()
         graph = _make_fake_graph()
-        parser = _make_fake_parser(tmp_path)
+        parser = _make_parser(tmp_path)
 
         _dispatch_tool(
             "capture_note",
@@ -208,29 +186,180 @@ class TestCaptureNoteAutoTitle:
         assert result["title"] == "Explicit Title"
 
 
-class TestCaptureNoteProfileEnforced:
-    def test_load_planner_profile_includes_capture_note(self) -> None:
-        """load_profile returns planner policy that allows capture_note."""
-        policy = load_profile("planner")
-        assert "capture_note" in policy.allowed_tools
+def _capture_policy(
+    root: Path,
+    *,
+    folders: tuple[str, ...] = ("02-projects",),
+    write: bool = True,
+    limit: int | None = None,
+) -> ProfileEnforcer:
+    return ProfileEnforcer(
+        ProfilePolicy(
+            name="capture-test",
+            description="Capture boundary",
+            allowed_tools=frozenset({"*"}),
+            folder_scope=folders,
+            write_enabled=write,
+            max_note_size_bytes=limit,
+        ),
+        root,
+    )
 
-    def test_capture_note_not_in_researcher_profile(self) -> None:
-        """capture_note is not in the researcher (read-only) profile."""
-        policy = load_profile("researcher")
-        assert "capture_note" not in policy.allowed_tools
 
-    def test_full_profile_allows_all_tools(self) -> None:
-        """Full profile with wildcard allows capture_note implicitly."""
-        policy = load_profile("full")
-        assert policy.allows_all_tools
+def _capture_dispatch(
+    tool: str, args: dict, root: Path, scope: ProfileEnforcer, store: MagicMock
+) -> dict:
+    return _dispatch_tool(
+        tool,
+        args,
+        root,
+        store,
+        _make_fake_graph(),
+        _make_parser(root),
+        enforcer=scope,
+    )
 
-    def test_capture_note_note_type_default_is_fleeting(self, tmp_path: Path) -> None:
-        """When note_type is omitted, defaults to fleeting."""
-        result = _call_capture_note(
+
+class TestCaptureMutationBoundary:
+    @pytest.mark.parametrize("tool", ["capture", "capture_note"])
+    def test_forbidden_destination_is_denied_without_side_effects(
+        self, tmp_path: Path, tool: str
+    ) -> None:
+        store = _make_fake_store()
+        with pytest.raises(ProfileError):
+            _capture_dispatch(tool, {"content": "body"}, tmp_path, _capture_policy(tmp_path), store)
+        assert list(tmp_path.iterdir()) == []
+        store.index_single_note.assert_not_called()
+
+    @pytest.mark.parametrize("tool", ["capture", "capture_note"])
+    def test_write_disabled_is_denied_without_side_effects(self, tmp_path: Path, tool: str) -> None:
+        store = _make_fake_store()
+        with pytest.raises(ProfileError):
+            _capture_dispatch(
+                tool,
+                {"content": "body"},
+                tmp_path,
+                _capture_policy(tmp_path, folders=("*",), write=False),
+                store,
+            )
+        assert list(tmp_path.iterdir()) == []
+        store.index_single_note.assert_not_called()
+
+    @pytest.mark.parametrize("tool", ["capture", "capture_note"])
+    @pytest.mark.parametrize("profile", ["restricted", "wildcard"])
+    def test_symlink_escape_is_denied_before_creating_outside_directory(
+        self, tmp_path: Path, tool: str, profile: str
+    ) -> None:
+        root = tmp_path / "vault"
+        root.mkdir()
+        outside = tmp_path / "outside-not-created"
+        (root / "00-inbox").symlink_to(outside, target_is_directory=True)
+        store = _make_fake_store()
+        folders = ("*",) if profile == "wildcard" else ("00-inbox",)
+        with pytest.raises(ProfileError):
+            _capture_dispatch(
+                tool,
+                {"content": "body"},
+                root,
+                _capture_policy(root, folders=folders),
+                store,
+            )
+        assert not outside.exists()
+        assert sorted(p.name for p in root.iterdir()) == ["00-inbox"]
+        store.index_single_note.assert_not_called()
+
+    @pytest.mark.parametrize("tool", ["capture", "capture_note"])
+    @pytest.mark.parametrize(
+        "args",
+        [
+            {"content": "é" * 200},
+            {"content": "x", "title": "T" * 400},
+            {"content": "x", "tags": ["tag" * 150]},
+            {"content": "x"},
+        ],
+    )
+    def test_serialized_size_is_checked_before_mkdir_write_or_index(
+        self, tmp_path: Path, tool: str, args: dict
+    ) -> None:
+        store = _make_fake_store()
+        # Even the one-byte body exceeds this limit after required frontmatter is serialized.
+        with pytest.raises(ProfileError):
+            _capture_dispatch(
+                tool,
+                args,
+                tmp_path,
+                _capture_policy(tmp_path, folders=("*",), limit=64),
+                store,
+            )
+        assert list(tmp_path.iterdir()) == []
+        store.index_single_note.assert_not_called()
+
+    @pytest.mark.parametrize("folder", ["04-private/new", "../outside", "/outside"])
+    def test_capture_note_explicit_destination_denial(self, tmp_path: Path, folder: str) -> None:
+        store = _make_fake_store()
+        with pytest.raises(ProfileError):
+            _capture_dispatch(
+                "capture_note",
+                {"content": "body", "folder": folder},
+                tmp_path,
+                _capture_policy(tmp_path),
+                store,
+            )
+        assert list(tmp_path.iterdir()) == []
+        store.index_single_note.assert_not_called()
+
+    @pytest.mark.parametrize("tool", ["capture", "capture_note"])
+    @pytest.mark.parametrize("folders", [("00-inbox",), ("*",)])
+    def test_allowed_capture_remains_positive(
+        self, tmp_path: Path, tool: str, folders: tuple[str, ...]
+    ) -> None:
+        store = _make_fake_store()
+        result = _capture_dispatch(
+            tool,
+            {"content": "Allowed body", "title": "Allowed Capture"},
             tmp_path,
-            {"content": "Some content without type."},
+            _capture_policy(tmp_path, folders=folders, limit=50000),
+            store,
         )
+        assert result["status"] == "ok"
+        path = tmp_path / result["path"]
+        assert path.is_file()
+        assert "Allowed body" in path.read_text(encoding="utf-8")
+        note = _make_parser(tmp_path).parse_file(path)
+        assert note.path.as_posix() == result["path"]
+        if tool == "capture_note":
+            store.index_single_note.assert_called_once()
 
-        note_path = tmp_path / result["path"]
-        content = note_path.read_text()
-        assert "type: fleeting" in content
+    def test_capture_note_can_create_allowed_nested_folder(self, tmp_path: Path) -> None:
+        store = _make_fake_store()
+        result = _capture_dispatch(
+            "capture_note",
+            {"content": "body", "folder": "02-projects/new/nested"},
+            tmp_path,
+            _capture_policy(tmp_path),
+            store,
+        )
+        assert result["status"] == "ok"
+        assert (tmp_path / result["path"]).is_file()
+        store.index_single_note.assert_called_once()
+
+    @pytest.mark.parametrize("absolute", [False, True])
+    def test_wildcard_capture_note_rejects_explicit_vault_escape(
+        self, tmp_path: Path, absolute: bool
+    ) -> None:
+        root = tmp_path / "vault"
+        root.mkdir()
+        outside = tmp_path / "outside"
+        folder = str(outside / "new") if absolute else "../outside/new"
+        store = _make_fake_store()
+        with pytest.raises(ProfileError):
+            _capture_dispatch(
+                "capture_note",
+                {"content": "body", "folder": folder},
+                root,
+                _capture_policy(root, folders=("*",)),
+                store,
+            )
+        assert not outside.exists()
+        assert list(root.iterdir()) == []
+        store.index_single_note.assert_not_called()

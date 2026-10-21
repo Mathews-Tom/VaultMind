@@ -1733,6 +1733,8 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
     from vaultmind.config import load_settings
     from vaultmind.graph import KnowledgeGraph
     from vaultmind.indexer import Embedder, VaultStore
+    from vaultmind.indexer.duplicate_detector import DuplicateDetector
+    from vaultmind.indexer.note_suggester import NoteSuggester
     from vaultmind.mcp.server import create_mcp_server
     from vaultmind.vault import VaultParser
 
@@ -1772,11 +1774,24 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
     store = VaultStore(settings.chroma, embedder)
     graph = KnowledgeGraph(settings.graph)
 
+    detector = (
+        DuplicateDetector(settings.duplicate_detection, store)
+        if settings.duplicate_detection.enabled
+        else None
+    )
+    suggester = (
+        NoteSuggester(settings.note_suggestions, store, graph=graph)
+        if settings.note_suggestions.enabled
+        else None
+    )
+
     server = create_mcp_server(
         settings.vault.path,
         store,
         graph,
         parser,
+        duplicate_detector=detector,
+        note_suggester=suggester,
         enforcer=enforcer,
         audit_logger=audit_log,
     )

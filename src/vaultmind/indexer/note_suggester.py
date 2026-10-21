@@ -16,9 +16,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from vaultmind.config import NoteSuggestionsConfig
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
@@ -77,10 +79,14 @@ class NoteSuggester:
         note: Note,
         *,
         max_results: int = 5,
+        search: Callable[[str, int], list[dict[str, Any]]] | None = None,
+        cache_results: bool = True,
     ) -> list[NoteSuggestion]:
         """Find notes that should be linked to *note*.
 
-        Returns suggestions sorted by composite score (descending).
+        Returns suggestions sorted by composite score (descending). A supplied
+        search authorizes candidates before scoring; disabling cache writes keeps
+        read-only consumers separate from the event-driven results buffer.
         """
         body = note.body_without_frontmatter().strip()
         if len(body) < self._config.min_content_length:
@@ -89,9 +95,10 @@ class NoteSuggester:
         # Query ChromaDB for candidates in the suggestion band + above
         # We fetch a wide range and filter locally to capture both
         # in-band (link suggestion) and near-band results
-        raw_results = self._store.search(
-            query=body[:2000],
-            n_results=max_results + 20,
+        raw_results = (
+            self._store.search(query=body[:2000], n_results=max_results + 20)
+            if search is None
+            else search(body[:2000], max_results + 20)
         )
 
         note_path = str(note.path)
@@ -159,7 +166,7 @@ class NoteSuggester:
         suggestions.sort(key=lambda s: s.composite_score, reverse=True)
         suggestions = suggestions[:max_results]
 
-        if suggestions:
+        if suggestions and cache_results:
             self._results[note_path] = suggestions
             logger.info(
                 "Suggestions for %s: %d candidates (top score: %.3f)",
