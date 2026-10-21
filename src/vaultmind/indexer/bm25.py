@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from threading import Lock
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,6 +32,12 @@ CREATE TABLE IF NOT EXISTS bm25_meta (
 );
 """
 
+_CREATE_REPLACEMENT_IDS = """
+CREATE TEMP TABLE IF NOT EXISTS bm25_replacement_ids (
+    chunk_id TEXT PRIMARY KEY
+) WITHOUT ROWID;
+"""
+
 
 class BM25Index:
     """FTS5-backed keyword index.
@@ -43,6 +50,7 @@ class BM25Index:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._con = sqlite3.connect(str(db_path), check_same_thread=False)
         self._con.row_factory = sqlite3.Row
+        self._write_lock = Lock()
         self._init_schema()
         logger.info("BM25Index opened at %s (%d chunks)", db_path, self.count)
 
@@ -52,7 +60,7 @@ class BM25Index:
 
     def _init_schema(self) -> None:
         with self._con:
-            self._con.executescript(_CREATE_FTS + _CREATE_META)
+            self._con.executescript(_CREATE_FTS + _CREATE_META + _CREATE_REPLACEMENT_IDS)
 
     # ------------------------------------------------------------------
     # Write
@@ -70,23 +78,27 @@ class BM25Index:
         """
         if not rows:
             return
-        chunk_ids = [r[0] for r in rows]
-        placeholders = ",".join("?" * len(chunk_ids))
-        with self._con:
+        with self._write_lock, self._con:
+            self._con.executemany(
+                "INSERT OR IGNORE INTO bm25_replacement_ids(chunk_id) VALUES (?)",
+                ((row[0],) for row in rows),
+            )
+            # FTS5 cannot index chunk_id: scan once, not once per ID batch.
             self._con.execute(
-                f"DELETE FROM fts_chunks WHERE chunk_id IN ({placeholders})",
-                chunk_ids,
+                "DELETE FROM fts_chunks WHERE chunk_id IN"
+                " (SELECT chunk_id FROM bm25_replacement_ids)"
             )
             self._con.executemany(
                 "INSERT INTO fts_chunks(chunk_id, note_path, note_title, content)"
                 " VALUES (?, ?, ?, ?)",
                 rows,
             )
+            self._con.execute("DELETE FROM bm25_replacement_ids")
         logger.debug("BM25 upserted %d chunks", len(rows))
 
     def delete_note(self, note_path: str) -> None:
         """Remove all chunks belonging to a note."""
-        with self._con:
+        with self._write_lock, self._con:
             cur = self._con.execute("DELETE FROM fts_chunks WHERE note_path = ?", (note_path,))
         logger.debug("BM25 deleted %d chunks for %s", cur.rowcount, note_path)
 

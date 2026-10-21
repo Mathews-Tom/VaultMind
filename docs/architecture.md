@@ -350,6 +350,8 @@ All blocking calls (ChromaDB, embedding API, LLM) are wrapped with `asyncio.to_t
 
 Sessions, embedding cache, preferences, tag quarantine, BM25 FTS5 index, activation tracking, and episodic memory all use SQLite. It's embedded, requires no server, handles concurrent reads well, and the data volumes are small enough that a full database would be over-engineering.
 
+Large BM25 replacements stage chunk IDs in a keyed temporary table with one host parameter per insert, then delete matching FTS5 rows in a single scan rather than rescanning the virtual table per ID batch. Writes on the shared BM25 connection are serialized; staging, replacement and staging cleanup remain in one transaction, so a failed insert rolls back the replacement without leaking IDs into the next call. Embedding-cache lookups split their `IN` clauses to support SQLite builds with a 999-host-parameter limit, including the fixed provider/model/access-time parameters. Cache lookups retain provider/model isolation and update access times only for matching hits. These are local SQLite guarantees, not cross-index atomicity or preservation of the old note during the separate delete-before-embedding path.
+
 ## Compound Loop Engine
 
 The scheduler (`services/scheduler.py`) supports state-aware compound loops where each run reads prior-run output as input. This enables cross-cycle pattern recognition.
