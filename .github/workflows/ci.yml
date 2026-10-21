@@ -48,6 +48,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Approval reconstructs the legacy migration schema from committed history.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v4
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}

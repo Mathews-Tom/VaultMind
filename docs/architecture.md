@@ -208,6 +208,8 @@ uv run --extra dev --extra mcp python scripts/verify_acceptance.py --case mcp --
 uv run --extra dev --extra mcp python scripts/verify_acceptance.py --case approval --offline
 ```
 
+Keep committed Git history available: approval reconstructs its legacy migration schema from a prior committed revision. The standalone CI job uses `fetch-depth: 0` for this fixture; it does not copy an ignored ledger or private historical files.
+
 The verifier creates temporary HOME/vault/index/SQLite/graph state and supplies explicit fixture TOML before loading application settings. MCP executes the `vaultmind` console script beside the running Python executable, inside the existing isolated child with its offline network guard and stdio instrumentation. It records the consumed script's execution path and digest, the imported package origin and code digest, and the interpreter. Approval exercises the real CLI/review queue/appliers and Telegram router with recorded delivery rather than external effects.
 
 Reviewed assets resolve relative to the verifier, not the caller's working directory. Both tracked contracts (`.docs/DEVELOPMENT_PLAN.md` and `.docs/EXECUTION_PROMPTS.md`) are required, must declare the same Plan ID, and are hashed into the receipt alongside the script and dependency identities. The imported package is fingerprinted separately from the reviewed checkout; differing code fails acceptance. Missing required assets also fail explicitly. No ignored history is needed, and ordinary installed CLI commands do not read these verifier-only contracts. Add `--receipt-out /temporary/path/receipt.json` to retain a JSON outcome; consumer failures emit a failed outcome and exit nonzero.
