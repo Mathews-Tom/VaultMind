@@ -161,7 +161,9 @@ Markdown files → Parser (contextual chunks) → Embedder → ChromaDB
 
 1. `VaultParser` reads markdown files, splits by headings into `NoteChunk` objects, and prepends a contextual prefix (`note: {title} (type: {type}) | section: {heading} | tags: {t1, t2}`) for embedding quality
 2. `Embedder` generates vectors, checking `EmbeddingCache` first (keyed by content hash + provider + model)
-3. `VaultStore` upserts chunks into ChromaDB with metadata (note type, mode, tags, source path) and syncs the BM25 FTS5 index in parallel
+3. `VaultStore` upserts chunks with their metadata and deletes prior chunks in batches bounded by ChromaDB's client-reported record cap, then synchronizes the BM25 FTS5 index after the vector operations succeed. The cap is read from the method in ChromaDB 0.5.1+ or the property in 0.5.0, not a guessed limit.
+
+An indexing run is not atomic across ChromaDB batches or across the vector and keyword stores. A later vector-batch failure propagates to the caller and can leave earlier vector writes committed before BM25 synchronization. Incremental replacement still deletes the target note's prior rows before embedding; batching does not change that ordering or provide last-good-content preservation. Unrelated notes remain outside that replacement's scope.
 
 ### Hybrid Search
 
