@@ -639,9 +639,16 @@ class ThinkingPartner:
             )
             return
 
-        await asyncio.to_thread(
-            self._index_distilled_note, result, model, store, episode_store, source_ref
-        )
+        try:
+            await asyncio.to_thread(
+                self._index_distilled_note, result, model, store, episode_store, source_ref
+            )
+        except Exception:
+            logger.exception(
+                "qa-artifact saved to %s, but finalization failed for user %s",
+                result.output_path,
+                user_id,
+            )
 
     def _index_distilled_note(
         self,

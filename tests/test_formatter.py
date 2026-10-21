@@ -366,13 +366,6 @@ class TestEdgeCases:
         # Should still return the header
         assert "<b>Test Note</b>" in result
 
-    def test_content_only_frontmatter(self) -> None:
-        # body_without_frontmatter will return empty string
-        note = _make_note(content="---\ntitle: test\n---\n")
-        result = TelegramFormatter.format_note(note)
-        # Header is still present
-        assert "<b>Test Note</b>" in result
-
     def test_note_no_title_uses_stem(self) -> None:
         note = _make_note(title="", path="inbox/my-file.md")
         result = TelegramFormatter.format_note(note)

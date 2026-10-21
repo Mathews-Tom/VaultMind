@@ -6,6 +6,15 @@ full prior content stays on disk, unchanged, underneath the callout) and
 drops the note from the vector store so it no longer surfaces via
 `/recall`. One `LineageEdge` is recorded per confirmed deletion, queryable
 via `ctx.lineage_store.get_lineage(note_path)`.
+
+M14: the callout carries an explicit paired boundary
+(`vaultmind.vault.projection`) so the note projects to no current content.
+The lineage edge is recorded for the actual file mutation before search
+retirement is attempted; a retirement failure is reported, never claimed as
+success. Confirming again on an already-marked note performs no second
+mutation, records a lineage edge only if none exists, and retries retirement.
+A note whose bot supersede history is ambiguous or malformed is refused
+untouched, with no lineage edge, whether the confirmation is first or repeated.
 """
 
 from __future__ import annotations
@@ -17,6 +26,13 @@ from vaultmind.bot.handlers.utils import _is_authorized, _resolve_note_path
 from vaultmind.bot.sanitize import sanitize_path
 from vaultmind.contradiction.marking import write_superseded_block
 from vaultmind.graph.evolution import LineageStore
+from vaultmind.vault.projection import (
+    DELETE_MARKER,
+    DELETE_RATIONALE,
+    DELETE_TITLE,
+    SUPERSEDED_CALLOUT,
+    SUPERSEDED_KEY,
+)
 from vaultmind.vault.security import (
     PathResolutionError,
     PathTraversalError,
@@ -29,12 +45,6 @@ if TYPE_CHECKING:
     from vaultmind.bot.handlers.context import HandlerContext
 
 logger = logging.getLogger(__name__)
-
-# Sentinel frontmatter value marking a note as bot-deleted — a fixed
-# (non-dated) value so re-confirming delete on an already-superseded note
-# is idempotent, matching write_superseded_block()'s dedup contract.
-DELETE_MARKER = "bot:delete"
-DELETE_RATIONALE = "Requested via Telegram `/delete` — content preserved below."
 
 
 async def handle_delete(ctx: HandlerContext, message: Message, query: str) -> None:
@@ -121,29 +131,55 @@ async def handle_delete_callback(ctx: HandlerContext, callback: CallbackQuery) -
             await callback.answer()
             return
 
-        written = write_superseded_block(
-            filepath,
-            callout_type="superseded",
-            title="Deleted via bot",
-            rationale=DELETE_RATIONALE,
-            frontmatter_key="superseded_at",
-            frontmatter_value=DELETE_MARKER,
-            dated=True,
-        )
-        if not written:
+        try:
+            written = write_superseded_block(
+                filepath,
+                callout_type=SUPERSEDED_CALLOUT,
+                title=DELETE_TITLE,
+                rationale=DELETE_RATIONALE,
+                frontmatter_key=SUPERSEDED_KEY,
+                frontmatter_value=DELETE_MARKER,
+                dated=True,
+                boundary="delete",
+            )
+        except Exception as exc:
+            logger.exception("Failed to mark note as deleted: %s", rel_path)
             await callback.message.edit_text(  # type: ignore[union-attr]
-                f"Note already superseded: `{rel_path}`",
-                parse_mode="Markdown",
+                f"Delete failed for {rel_path}: {exc}\nThe delete was not applied."
             )
             await callback.answer()
             return
 
-        # Drop from the vector store — superseded notes no longer surface
-        # via /recall, but the file (and its full prior content) stays.
-        ctx.store.delete_note(rel_path)
+        # The file now (or already) carries the delete marker. Record the lineage edge for
+        # the mutation first, then drop the note from search; either step may fail without
+        # undoing the other, and a repeat confirmation retries both without re-marking.
+        problems: list[str] = []
+        try:
+            _ensure_deleted_edge(ctx, rel_path)
+        except Exception as exc:
+            logger.exception("Failed to record delete lineage for %s", rel_path)
+            problems.append(f"the lineage edge was not recorded ({exc})")
+        try:
+            ctx.store.delete_note(rel_path)
+        except Exception as exc:
+            logger.exception("Failed to retire deleted note from search: %s", rel_path)
+            problems.append(f"removing it from search failed ({exc})")
 
-        if isinstance(ctx.lineage_store, LineageStore):
-            ctx.lineage_store.record(rel_path, "deleted", DELETE_RATIONALE)
+        if problems:
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"\u26a0\ufe0f {rel_path} is marked as deleted on disk (original text "
+                f"preserved), but {'; '.join(problems)}. Confirm the delete again to retry."
+            )
+            await callback.answer()
+            return
+
+        if not written:
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"Note already superseded: `{rel_path}` \u2014 removed from search again.",
+                parse_mode="Markdown",
+            )
+            await callback.answer()
+            return
 
         logger.info("Superseded (soft-deleted) note: %s", rel_path)
 
@@ -153,3 +189,12 @@ async def handle_delete_callback(ctx: HandlerContext, callback: CallbackQuery) -
             parse_mode="Markdown",
         )
         await callback.answer()
+
+
+def _ensure_deleted_edge(ctx: HandlerContext, rel_path: str) -> None:
+    """Record the `deleted` lineage edge unless the note already has one."""
+    if not isinstance(ctx.lineage_store, LineageStore):
+        return
+    if any(edge.event == "deleted" for edge in ctx.lineage_store.get_lineage(rel_path)):
+        return
+    ctx.lineage_store.record(rel_path, "deleted", DELETE_RATIONALE)

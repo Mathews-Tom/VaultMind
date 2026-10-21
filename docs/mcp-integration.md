@@ -88,7 +88,7 @@ Read the full content of a note.
 
 ### `vault_write`
 
-Create or overwrite a note. The note is automatically re-indexed in ChromaDB after writing.
+Create or overwrite a note. The saved note is immediately indexed into the configured vector and keyword indexes using its current-content projection. Full `vault_read` responses still include preserved history. If parsing, projection or indexing fails after the file write, the response contains `error`, `saved: true` and `path`, not `status: "ok"`; the saved Markdown is retained and the audit outcome is `ERROR`. Chroma/SQLite replacement is not a cross-database transaction.
 
 **Parameters:**
 
@@ -173,7 +173,7 @@ Quick-capture a note to the vault inbox.
 
 ### `capture_note`
 
-Rich note capture with full frontmatter control. Creates the note, writes full YAML frontmatter, and indexes immediately.
+Rich note capture with full frontmatter control. Creates the note, writes full YAML frontmatter, and indexes immediately. A failed post-write index returns `error`, `saved: true` and the saved `path`; it does not report successful capture or remove the file.
 
 **Parameters:**
 
@@ -268,7 +268,7 @@ List a folder's structured index: note titles and one-line descriptions, without
 
 - `folder` (string, default `""`) — folder path relative to vault root. Omitted, empty, or explicit vault-root input aggregates only the active profile's allowed roots; unrestricted profiles list the whole vault.
 
-**Returns:** `{folder, notes: [{path, title, description, note_type, tags}], count}`. `description` is the frontmatter `description` field if present, else the note's first non-heading body line.
+**Returns:** `{folder, notes: [{path, title, description, note_type, tags}], count}`. `description` is the frontmatter `description` field if present, else the note's first non-empty body line that is neither a heading nor a Markdown thematic rule.
 
 Explicit out-of-scope folders are denied before checking existence. Every candidate is checked against the active profile before parsing its metadata, including resolved symlink targets. `count` includes only returned entries.
 

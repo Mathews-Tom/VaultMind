@@ -160,6 +160,21 @@ class TestListFolderIndex:
         entry = result["notes"][0]
         assert entry["description"] == "First body line as the description fallback."
 
+    @pytest.mark.parametrize("rule", ["---", "***", "___", "- - -", "* * *", "_ _ _"])
+    def test_folder_description_skips_authored_thematic_rules(
+        self, vault_root: Path, parser: VaultParser, rule: str
+    ) -> None:
+        path = vault_root / "00-inbox" / "rules.md"
+        path.write_text(
+            f"---\ntitle: Rules\n---\n\n{rule}\n\nCurrent claim preservedcaption.\n",
+            encoding="utf-8",
+        )
+
+        result = _dispatch("list_folder_index", {"folder": "00-inbox"}, vault_root, parser)
+        entry = next(note for note in result["notes"] if note["path"] == "00-inbox/rules.md")
+
+        assert entry["description"] == "Current claim preservedcaption."
+
     def test_folder_index_recursive_listing_includes_subfolders(
         self, vault_root: Path, parser: VaultParser
     ) -> None:

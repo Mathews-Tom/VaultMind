@@ -491,13 +491,17 @@ def create_mcp_server(
             change_detail = _build_change_detail(name, arguments, result)
             output_summary = _build_output_summary(name, result)
 
-            # Audit log success
+            # Structured dispatch errors must not be audited as successful mutations.
+            mutation_error = (
+                result.get("error", "") if name in ("vault_write", "capture_note") else ""
+            )
             if audit_logger is not None and enforcer is not None:
                 audit_logger.log(
                     enforcer.policy.name,
                     name,
                     arguments,
-                    "OK",
+                    "ERROR" if mutation_error else "OK",
+                    reason=str(mutation_error),
                     duration_ms=_duration_ms,
                     change_detail=change_detail,
                     output_summary=output_summary,
@@ -545,6 +549,10 @@ def _one_line_description(note: Note, max_len: int = 160) -> str:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
+        if stripped[0] in "-*_":
+            rule = stripped.replace(" ", "").replace("\t", "")
+            if len(rule) >= 3 and rule.count(rule[0]) == len(rule):
+                continue
         return stripped[:max_len]
     return ""
 
@@ -628,6 +636,11 @@ def _dispatch_tool(
             store.index_single_note(note, parser)
         except Exception as e:
             logger.warning("Failed to re-index after write: %s", e)
+            return {
+                "error": f"Note saved, but indexing failed: {e}",
+                "path": args["path"],
+                "saved": True,
+            }
         return {"status": "ok", "path": args["path"]}
 
     elif name == "vault_list":
@@ -895,6 +908,11 @@ def _dispatch_tool(
             store.index_single_note(note, parser)
         except Exception as exc:
             logger.warning("Failed to index capture_note after write: %s", exc)
+            return {
+                "error": f"Note saved, but indexing failed: {exc}",
+                "path": f"{target_folder}/{filename}",
+                "saved": True,
+            }
 
         rel_path = f"{target_folder}/{filename}"
         return {"status": "ok", "path": rel_path, "title": title}
