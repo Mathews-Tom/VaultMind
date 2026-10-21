@@ -197,7 +197,7 @@ Rich note capture with full frontmatter control. Creates the note, writes full Y
 
 **Returns:** Status, path, and title of the created note.
 
-Both capture tools authorize the computed destination and check the complete serialized note's UTF-8 size, including title, tags, and frontmatter, before creating directories, writing files, or indexing. `capture` always targets `00-inbox`; a profile excluding that folder cannot use it. `capture_note` can create nested folders only inside the active profile's allowed scope.
+Both capture tools authorize the computed destination and check the complete serialized note's UTF-8 size, including title, tags, and frontmatter, before creating directories, writing files, or indexing. `capture` always targets `00-inbox`; a profile excluding that folder cannot use it. Its title is sanitized into a single filename component, so slashes and traversal text cannot select another directory. `capture_note` can create nested folders only inside the active profile's allowed scope.
 
 ### `vault_stats`
 

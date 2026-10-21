@@ -90,24 +90,6 @@ class TestCaptureNoteCreatesFile:
         assert "status: active" in content
         assert "This is the note body." in content
 
-    def test_capture_note_indexes_note(self, tmp_path: Path) -> None:
-        """index_single_note is called after writing."""
-        store = _make_fake_store()
-        graph = _make_fake_graph()
-        parser = _make_parser(tmp_path)
-
-        _dispatch_tool(
-            "capture_note",
-            {"content": "Some content", "title": "Indexed Note"},
-            tmp_path,
-            store,
-            graph,
-            parser,
-            enforcer=_full_enforcer(tmp_path),
-        )
-
-        store.index_single_note.assert_called_once()
-
 
 class TestCaptureNoteCustomFolder:
     def test_capture_note_custom_folder(self, tmp_path: Path) -> None:
@@ -327,8 +309,24 @@ class TestCaptureMutationBoundary:
         assert "Allowed body" in path.read_text(encoding="utf-8")
         note = _make_parser(tmp_path).parse_file(path)
         assert note.path.as_posix() == result["path"]
-        if tool == "capture_note":
-            store.index_single_note.assert_called_once()
+
+    @pytest.mark.parametrize("title", ["Q3/Q4 planning", "x/../../02-projects/y"])
+    @pytest.mark.parametrize("folders", [("00-inbox",), ("*",)])
+    def test_capture_title_cannot_change_the_inbox_destination(
+        self, tmp_path: Path, title: str, folders: tuple[str, ...]
+    ) -> None:
+        result = _capture_dispatch(
+            "capture",
+            {"content": "Captured body", "title": title},
+            tmp_path,
+            _capture_policy(tmp_path, folders=folders),
+            _make_fake_store(),
+        )
+        path = tmp_path / result["path"]
+        assert path.parent == tmp_path / "00-inbox"
+        content = path.read_text(encoding="utf-8")
+        assert f"# {title}\n" in content
+        assert "Captured body" in content
 
     def test_capture_note_can_create_allowed_nested_folder(self, tmp_path: Path) -> None:
         store = _make_fake_store()
@@ -341,7 +339,6 @@ class TestCaptureMutationBoundary:
         )
         assert result["status"] == "ok"
         assert (tmp_path / result["path"]).is_file()
-        store.index_single_note.assert_called_once()
 
     @pytest.mark.parametrize("absolute", [False, True])
     def test_wildcard_capture_note_rejects_explicit_vault_escape(

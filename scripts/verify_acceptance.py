@@ -1279,6 +1279,12 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
             "DENIED",
         )
         if name == "root-capture-scope":
+            call(
+                "capture",
+                {"content": "ROOT-CAPTURE", "title": "x/../../02-projects/y"},
+                {"error": True},
+                "DENIED",
+            )
             for folder in (
                 "03-private/new-directory",
                 "02-projects/private-dir/new-directory",

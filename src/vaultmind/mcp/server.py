@@ -867,12 +867,13 @@ def _dispatch_tool(
         }
 
     elif name == "capture":
+        import re
         from datetime import datetime
 
         now = datetime.now()
         title = args.get("title", now.strftime("Capture %Y%m%d-%H%M%S"))
         tags = args.get("tags", ["capture"])
-        slug = title.lower().replace(" ", "-")[:60]
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
         filename = f"{now.strftime('%Y%m%d-%H%M%S')}-{slug}.md"
         content = (
             f"---\ntype: fleeting\ntags: [{', '.join(tags)}]\n"
