@@ -1,7 +1,7 @@
 """Configuration management for VaultMind.
 
-Loads from environment variables, .env files, and config/default.toml.
-All secrets come from env vars; structural config from TOML.
+Loads defaults, TOML, .env, environment, and deliberate constructor overrides.
+Higher-priority sources override individual nested keys, not whole sections.
 
 Default base directory: ~/.vaultmind/
   vault/              — Obsidian vault (or symlink to existing)
@@ -13,10 +13,18 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast, get_args, get_origin
 
-from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    EnvSettingsSource,
+    InitSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 VAULTMIND_HOME = Path.home() / ".vaultmind"
 
@@ -490,13 +498,31 @@ class MCPAuditConfig(BaseSettings):
     retention_days: int = 90
 
 
+class MCPProfileConfig(BaseModel):
+    """Validated profile values, independent of the optional MCP server package."""
+
+    description: str = ""
+    allowed_tools: list[str] = Field(default_factory=list)
+    folder_scope: list[str] = Field(default_factory=lambda: ["*"])
+    write_enabled: bool = False
+    max_note_size_bytes: int | None = Field(default=None, ge=0)
+    requires_confirmation: bool = False
+
+    @field_validator("max_note_size_bytes", mode="before")
+    @classmethod
+    def reject_boolean_size(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("max_note_size_bytes must be an integer or null")
+        return value
+
+
 class MCPConfig(BaseSettings):
     """MCP server configuration."""
 
     enabled: bool = False
     host: str = "127.0.0.1"
     port: int = 8765
-    profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    profiles: dict[str, MCPProfileConfig] = Field(default_factory=dict)
     audit: MCPAuditConfig = Field(default_factory=MCPAuditConfig)
 
 
@@ -533,6 +559,47 @@ class SchedulerConfig(BaseSettings):
     """Background scheduler configuration."""
 
     state_path: str = ""  # Empty = default ~/.vaultmind/data/scheduler_state.json
+
+
+class _DictionaryEnvSource(EnvSettingsSource):
+    """Consume mapping keys before inspecting fields on their value model."""
+
+    def next_field(
+        self, field: FieldInfo | Any | None, key: str, case_sensitive: bool | None = None
+    ) -> FieldInfo | None:
+        annotation = field.annotation if isinstance(field, FieldInfo) else field
+        if get_origin(annotation) is dict:
+            # pydantic-settings 2.13 searches value-model fields first, so a
+            # profile named "allowed_tools" otherwise skips the mapping level.
+            return FieldInfo.from_annotation(get_args(annotation)[1])
+        return super().next_field(field, key, case_sensitive)
+
+
+class _DictionaryDotEnvSource(DotEnvSettingsSource, _DictionaryEnvSource):
+    """Use the same dictionary traversal for dotenv values."""
+
+
+def _dictionary_source(source: EnvSettingsSource) -> EnvSettingsSource:
+    # Reuse resolved BaseSettings controls, including per-load overrides, rather
+    # than rebuilding either source from model_config defaults.
+    options: dict[str, Any] = {
+        "case_sensitive": source.case_sensitive,
+        "env_prefix": source.env_prefix,
+        "env_prefix_target": source.env_prefix_target,
+        "env_nested_delimiter": source.env_nested_delimiter,
+        "env_nested_max_split": source.env_nested_max_split,
+        "env_ignore_empty": source.env_ignore_empty,
+        "env_parse_none_str": source.env_parse_none_str,
+        "env_parse_enums": source.env_parse_enums,
+    }
+    if isinstance(source, DotEnvSettingsSource):
+        return _DictionaryDotEnvSource(
+            source.settings_cls,
+            env_file=source.env_file,
+            env_file_encoding=source.env_file_encoding,
+            **options,
+        )
+    return _DictionaryEnvSource(source.settings_cls, **options)
 
 
 class Settings(BaseSettings):
@@ -594,6 +661,36 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     voyage_api_key: str = ""
 
+    def __init__(self, *, _toml_file: Path | None = None, **values: Any) -> None:
+        """Select TOML per load while forwarding all BaseSettings controls."""
+        super().__init__(_toml_file=_toml_file, **values)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # Keep the file selection local to this load. TOML values must not become
+        # constructor overrides, which would outrank environment values.
+        init_values = init_settings().copy()
+        config_path: Path | None = init_values.pop("_toml_file", None)
+        toml_values: dict[str, Any] = {}
+        if config_path is not None and config_path.exists():
+            with config_path.open("rb") as stream:
+                toml_values = tomllib.load(stream)
+
+        return (
+            InitSettingsSource(settings_cls, init_values),
+            _dictionary_source(cast("EnvSettingsSource", env_settings)),
+            _dictionary_source(cast("DotEnvSettingsSource", dotenv_settings)),
+            InitSettingsSource(settings_cls, toml_values),
+            file_secret_settings,
+        )
+
     @property
     def llm_api_key(self) -> str:
         """Resolve the API key for the configured LLM provider."""
@@ -606,14 +703,9 @@ class Settings(BaseSettings):
         return keys.get(self.llm.provider, "")
 
     @classmethod
-    def from_toml(cls, path: Path | None = None) -> Settings:
-        """Load settings from TOML file, with env var overrides."""
-        config_path = path or Path("config/default.toml")
-        if config_path.exists():
-            with open(config_path, "rb") as f:
-                data = tomllib.load(f)
-            return cls(**data)
-        return cls()
+    def from_toml(cls, path: Path | None = None, **overrides: Any) -> Settings:
+        """Load TOML below environment/.env and deliberate call-site overrides."""
+        return cls(_toml_file=path or Path("config/default.toml"), **overrides)
 
 
 def load_settings(config_path: Path | None = None) -> Settings:

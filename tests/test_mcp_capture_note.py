@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from vaultmind.mcp.auth import ProfileEnforcer
-from vaultmind.mcp.profiles import DEFAULT_PROFILES, load_profile
+from vaultmind.mcp.profiles import load_profile
 from vaultmind.mcp.server import _dispatch_tool
 
 if TYPE_CHECKING:
@@ -209,10 +209,6 @@ class TestCaptureNoteAutoTitle:
 
 
 class TestCaptureNoteProfileEnforced:
-    def test_capture_note_in_planner_allowed_tools(self) -> None:
-        """capture_note appears in planner profile's allowed_tools."""
-        assert "capture_note" in DEFAULT_PROFILES["planner"]["allowed_tools"]
-
     def test_load_planner_profile_includes_capture_note(self) -> None:
         """load_profile returns planner policy that allows capture_note."""
         policy = load_profile("planner")

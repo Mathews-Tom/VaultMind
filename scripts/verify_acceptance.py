@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline acceptance: M11 retrieval and M12 MCP stdio, real consumers, labeled seams."""
+"""Offline acceptance: retrieval, MCP, approval and M21 configuration, real consumers."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import functools
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import socket
@@ -3545,9 +3546,519 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
     return receipt
 
 
+async def config_mcp_policy_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
+    """M21: real Click/SDK policy calls; terminal transport and embeddings are substituted."""
+    from importlib import import_module
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+    from mcp.types import CallToolRequest, CallToolRequestParams
+    from pydantic import ValidationError
+
+    import vaultmind.indexer as indexer
+    from vaultmind.config import load_settings
+
+    cli_module = import_module("vaultmind.cli")
+    check = make_checker(checks)
+    root = home / "config-mcp-case"
+    selected = root / "selected-vault"
+    sentinel = root / "sentinel-vault"
+    data = root / "selected-data"
+    forbidden = root / "forbidden-data"
+    for vault, marker in ((selected, "SELECTED-POLICY"), (sentinel, "SENTINEL-POLICY")):
+        for folder in ("allowed", "dotenv-only", "toml-only"):
+            target = vault / folder / "policy.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"---\ntitle: Policy\n---\n\n{marker} {folder}\n", encoding="utf-8")
+
+    def snapshot(vault: Path) -> dict[str, Any]:
+        return {
+            str(path.relative_to(vault)): (
+                path.is_dir(),
+                path.stat().st_mtime_ns,
+                None if path.is_dir() else digest(path.read_bytes()),
+            )
+            for path in [vault, *sorted(vault.rglob("*"))]
+        }
+
+    before = snapshot(sentinel)
+    config = root / "policy.toml"
+    config.write_text(
+        f"[vault]\npath = {json.dumps(str(sentinel))}\n"
+        f"[chroma]\npersist_dir = {json.dumps(str(forbidden / 'chroma'))}\n"
+        f"[graph]\npersist_path = {json.dumps(str(forbidden / 'graph.json'))}\n"
+        "[embedding]\ncache_enabled = false\n"
+        "[mcp.profiles.config-policy]\n"
+        'description = "source-precedence policy fixture"\n'
+        'allowed_tools = ["vault_read"]\nfolder_scope = ["toml-only"]\n'
+        "write_enabled = true\nmax_note_size_bytes = 4096\n",
+        encoding="utf-8",
+    )
+    dotenv = home / ".env"
+    dotenv.write_text(
+        "VAULTMIND_MCP__PROFILES__CONFIG-POLICY__WRITE_ENABLED=false\n"
+        'VAULTMIND_MCP__PROFILES__CONFIG-POLICY__ALLOWED_TOOLS=["vault_read","vault_stats"]\n'
+        'VAULTMIND_MCP__PROFILES__CONFIG-POLICY__FOLDER_SCOPE=["dotenv-only"]\n'
+        "VAULTMIND_MCP__PROFILES__CONFIG-POLICY__MAX_NOTE_SIZE_BYTES=1024\n",
+        encoding="utf-8",
+    )
+    prefix = "VAULTMIND_MCP__PROFILES__CONFIG-POLICY__"
+    overrides = {
+        "VAULTMIND_VAULT__PATH": str(selected),
+        "VAULTMIND_CHROMA__PERSIST_DIR": str(data / "chroma"),
+        "VAULTMIND_GRAPH__PERSIST_PATH": str(data / "graph.json"),
+        "VAULTMIND_OPENAI_API_KEY": "acceptance-only-not-a-provider-key",
+        prefix + "WRITE_ENABLED": "false",
+        prefix + "ALLOWED_TOOLS": json.dumps(["vault_read", "vault_write", "vault_search"]),
+        prefix + "FOLDER_SCOPE": '["allowed"]',
+        prefix + "MAX_NOTE_SIZE_BYTES": "256",
+    }
+    requests: list[tuple[str, dict[str, Any]]] = []
+    responses: list[dict[str, Any]] = []
+    starts = 0
+
+    async def terminal_transport(server: Any, _stdio_server: Any) -> None:
+        """Terminal stdio/run seam only; exercise the actual SDK-registered handler."""
+        nonlocal starts
+        starts += 1
+        handler = server.request_handlers[CallToolRequest]
+        for tool, arguments in requests:
+            request = CallToolRequest(
+                method="tools/call", params=CallToolRequestParams(name=tool, arguments=arguments)
+            )
+            result = (await handler(request)).root
+            responses.append(json.loads(result.content[0].text))
+
+    async def serve(calls: list[tuple[str, dict[str, Any]]]) -> Any:
+        requests[:] = calls
+        responses.clear()
+        # CliRunner invokes the real command in a thread because mcp-serve owns asyncio.run.
+        # No settings, profile, enforcer, store, persistence, or SDK handler is substituted.
+        result = await asyncio.to_thread(
+            CliRunner().invoke,
+            cli_module.cli,
+            ["--config", str(config), "mcp-serve", "--profile", "config-policy"],
+        )
+        return result
+
+    written = selected / "allowed" / "written.md"
+    content = "---\ntitle: Policy write\n---\n\nharbor policy persisted\n"
+    receipts: dict[str, Any] = {}
+    try:
+        with (
+            patch.dict(os.environ, overrides),
+            patch.object(indexer, "Embedder", side_effect=lambda *a, **k: DeterministicEmbedder()),
+            patch.object(cli_module, "_run_mcp", terminal_transport),
+        ):
+            result = await serve(
+                [
+                    ("vault_read", {"path": "allowed/policy.md"}),
+                    ("vault_write", {"path": "allowed/written.md", "content": content}),
+                    ("vault_read", {"path": "dotenv-only/policy.md"}),
+                    ("vault_read", {"path": "toml-only/policy.md"}),
+                    ("vault_stats", {}),
+                ]
+            )
+            check("config.mcp.false.cli-exit", 0, result.exit_code)
+            check("config.mcp.false.transport-starts", 1, starts)
+            check("config.mcp.false.response-count", 5, len(responses))
+            selected_read, denied_write, dotenv_read, toml_read, denied_tool = responses
+            check(
+                "config.mcp.selected-vault-read",
+                "SELECTED-POLICY allowed",
+                selected_read.get("content", "").split("\n\n")[-1].strip(),
+            )
+            check(
+                "config.mcp.false.write-denied",
+                True,
+                "Write operations disabled" in denied_write.get("error", ""),
+            )
+            check("config.mcp.false.no-persisted-write", False, written.exists())
+            for label, payload in (("dotenv", dotenv_read), ("toml", toml_read)):
+                check(
+                    f"config.mcp.env-folder-denies-{label}",
+                    True,
+                    bool(payload.get("error")) and "content" not in payload,
+                )
+            check("config.mcp.env-tool-denies-dotenv", True, bool(denied_tool.get("error")))
+            receipts["false"] = list(responses)
+            del os.environ[prefix + "WRITE_ENABLED"]
+            result = await serve(
+                [("vault_write", {"path": "allowed/written.md", "content": content})]
+            )
+            check("config.mcp.dotenv-false.cli-exit", 0, result.exit_code)
+            check("config.mcp.dotenv-false.transport-starts", 2, starts)
+            check("config.mcp.dotenv-false.response-count", 1, len(responses))
+            check(
+                "config.mcp.dotenv-false.over-toml-true",
+                True,
+                "Write operations disabled" in responses[0].get("error", ""),
+            )
+            check("config.mcp.dotenv-false.no-persisted-write", False, written.exists())
+            receipts["dotenv_false"] = list(responses)
+
+            # Explicit env true overrides dotenv false; replay the exact denied arguments.
+            os.environ[prefix + "WRITE_ENABLED"] = "true"
+            result = await serve(
+                [
+                    ("vault_write", {"path": "allowed/written.md", "content": content}),
+                    ("vault_read", {"path": "allowed/written.md"}),
+                    ("vault_search", {"query": "harbor policy persisted", "n_results": 1}),
+                    ("vault_write", {"path": "allowed/oversize.md", "content": "x" * 257}),
+                    ("vault_write", {"path": "dotenv-only/written.md", "content": content}),
+                ]
+            )
+            check("config.mcp.true.cli-exit", 0, result.exit_code)
+            check("config.mcp.true.transport-starts", 3, starts)
+            check("config.mcp.true.response-count", 5, len(responses))
+            allowed_write, reread, search, oversized, out_of_scope = responses
+            check(
+                "config.mcp.true.write-success",
+                {"status": "ok", "path": "allowed/written.md"},
+                allowed_write,
+            )
+            check(
+                "config.mcp.true.persisted-content",
+                content,
+                written.read_text(encoding="utf-8") if written.exists() else None,
+            )
+            check("config.mcp.true.sdk-reread", content, reread.get("content"))
+            indexed = search.get("results", [])
+            check("config.mcp.true.indexed-count", 1, len(indexed))
+            check(
+                "config.mcp.true.indexed-paths",
+                ["allowed/written.md"],
+                [hit["metadata"]["note_path"] for hit in indexed],
+            )
+            check(
+                "config.mcp.true.indexed-content",
+                True,
+                bool(indexed) and "harbor policy persisted" in indexed[0]["content"],
+            )
+            check(
+                "config.mcp.env-size-denied",
+                True,
+                "exceeds limit 256" in oversized.get("error", ""),
+            )
+            check(
+                "config.mcp.env-size-not-persisted",
+                False,
+                (selected / "allowed" / "oversize.md").exists(),
+            )
+            check("config.mcp.true.scope-denied", True, bool(out_of_scope.get("error")))
+            check(
+                "config.mcp.true.scope-not-persisted",
+                False,
+                (selected / "dotenv-only" / "written.md").exists(),
+            )
+            check("config.mcp.selected-chroma-created", True, (data / "chroma").is_dir())
+            receipts["true"] = list(responses)
+            stable = snapshot(selected)
+            for label, leaf, value in (
+                ("bool", "WRITE_ENABLED", "not-a-boolean"),
+                ("tool-list", "ALLOWED_TOOLS", '{"not":"a-list"}'),
+                ("tool-leaf", "ALLOWED_TOOLS", '["vault_read",9]'),
+                ("folder-list", "FOLDER_SCOPE", '{"not":"a-list"}'),
+                ("folder-leaf", "FOLDER_SCOPE", '["allowed",9]'),
+                ("negative-size", "MAX_NOTE_SIZE_BYTES", "-1"),
+                ("invalid-size", "MAX_NOTE_SIZE_BYTES", "not-a-size"),
+            ):
+                with patch.dict(os.environ, {prefix + leaf: value}):
+                    invalid = False
+                    try:
+                        load_settings(config)
+                    except ValidationError:
+                        invalid = True
+                    check(f"config.mcp.invalid-{label}.load-rejected", True, invalid)
+                    result = await serve([])
+                    check(f"config.mcp.invalid-{label}.cli-failed", True, result.exit_code != 0)
+                    check(
+                        f"config.mcp.invalid-{label}.cli-validation",
+                        True,
+                        isinstance(result.exception, ValidationError),
+                    )
+                    check(f"config.mcp.invalid-{label}.before-server-start", 3, starts)
+                    check(f"config.mcp.invalid-{label}.vault-unchanged", stable, snapshot(selected))
+    finally:
+        check("config.mcp.sentinel-unchanged", before, snapshot(sentinel))
+        check("config.mcp.forbidden-data-absent", False, forbidden.exists())
+        dotenv.unlink(missing_ok=True)
+    return {
+        "boundary": (
+            "real Click mcp-serve assembly and SDK CallToolRequest handler; terminal stdio/run "
+            "boundary replaced; deterministic embedding provider boundary only"
+        ),
+        "policy_responses": receipts,
+    }
+
+
+async def config_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
+    """M21: source precedence reaches real CLI indexing and retrieval computation."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+    from pydantic import ValidationError
+
+    import vaultmind.indexer as indexer
+    from vaultmind.bot.handlers.context import HandlerContext
+    from vaultmind.bot.handlers.recall import handle_recall
+    from vaultmind.bot.thinking import ThinkingPartner
+    from vaultmind.cli import cli
+    from vaultmind.config import Settings, load_settings
+    from vaultmind.graph.knowledge_graph import KnowledgeGraph
+    from vaultmind.indexer.bm25 import BM25Index
+    from vaultmind.indexer.store import VaultStore
+    from vaultmind.vault.parser import VaultParser
+
+    check = make_checker(checks)
+    root = home / "config-case"
+    sentinel = root / "sentinel-vault"
+    selected = root / "selected-vault"
+    forbidden = root / "forbidden-data"
+    data = root / "selected-data"
+    sentinel.mkdir(parents=True)
+    check("config.isolation.home", str(home), os.environ.get("HOME"))
+    check("config.isolation.cwd", True, home.resolve() == Path.cwd().resolve())
+    selected.mkdir()
+    data.mkdir()
+    (sentinel / "private.md").write_text("Sentinel must never be indexed.\n", encoding="utf-8")
+    for name in ("alpha", "beta", "gamma"):
+        (selected / f"{name}.md").write_text(
+            f"---\ntitle: {name}\n---\n\nharbor lantern {name} inspections\n",
+            encoding="utf-8",
+        )
+
+    def snapshot() -> dict[str, Any]:
+        return {
+            str(path.relative_to(sentinel)): (
+                path.is_dir(),
+                path.stat().st_mtime_ns,
+                None if path.is_dir() else digest(path.read_bytes()),
+            )
+            for path in [sentinel, *sorted(sentinel.rglob("*"))]
+        }
+
+    before = snapshot()
+    config = root / "explicit.toml"
+    config.write_text(
+        f"[vault]\npath = {json.dumps(str(sentinel))}\n"
+        f"[chroma]\npersist_dir = {json.dumps(str(forbidden / 'chroma'))}\n"
+        f"[graph]\npersist_path = {json.dumps(str(forbidden / 'graph.json'))}\n"
+        "[search]\nhybrid_enabled = true\nmax_results = 3\npage_size = 7\n"
+        f"bm25_db_path = {json.dumps(str(forbidden / 'bm25.db'))}\n"
+        "cache_enabled = false\n[embedding]\ncache_enabled = false\n",
+        encoding="utf-8",
+    )
+    dotenv = home / ".env"
+    dotenv.write_text("VAULTMIND_SEARCH__MAX_RESULTS=2\n", encoding="utf-8")
+    fixture_secret = "acceptance-only-not-a-provider-key"
+    overrides = {
+        "VAULTMIND_VAULT__PATH": str(selected),
+        "VAULTMIND_CHROMA__PERSIST_DIR": str(data / "chroma"),
+        "VAULTMIND_GRAPH__PERSIST_PATH": str(data / "graph.json"),
+        "VAULTMIND_SEARCH__BM25_DB_PATH": str(data / "bm25.db"),
+        "VAULTMIND_SEARCH__MAX_RESULTS": "1",
+        "VAULTMIND_OPENAI_API_KEY": fixture_secret,
+    }
+    captured: list[str] = []
+    try:
+        with patch.dict(os.environ, overrides):
+            settings = load_settings(config)
+            check("config.env.vault", True, settings.vault.path == selected.resolve())
+            check("config.env.chroma", True, settings.chroma.persist_dir == data / "chroma")
+            check("config.env.graph", True, settings.graph.persist_path == data / "graph.json")
+            check("config.env.bm25", True, Path(settings.search.bm25_db_path) == data / "bm25.db")
+            check("config.toml.unset-leaf-preserved", 7, settings.search.page_size)
+            check("config.env.over-dotenv", 1, settings.search.max_results)
+            deliberate = Settings.from_toml(config, search={"max_results": 4})
+            check("config.constructor.over-env", 4, deliberate.search.max_results)
+            check("config.constructor.nested-merge", 7, deliberate.search.page_size)
+
+            # This is the only substituted production boundary. CLI settings loading,
+            # parsing, chunking, Chroma persistence and BM25 indexing remain real.
+            with patch.object(
+                indexer, "Embedder", side_effect=lambda *a, **k: DeterministicEmbedder()
+            ):
+                result = CliRunner().invoke(cli, ["--config", str(config), "index"])
+            captured.append(result.output)
+            check("config.cli.index-exit", 0, result.exit_code)
+            check("config.cli.chroma-created", True, (data / "chroma").is_dir())
+            check("config.cli.bm25-created", True, (data / "bm25.db").is_file())
+            bm25 = BM25Index(data / "bm25.db")
+            try:
+                store = VaultStore(
+                    settings.chroma, cast("Embedder", DeterministicEmbedder()), bm25=bm25
+                )
+
+                async def retrieve(current: Any) -> list[dict[str, Any]]:
+                    llm = ScriptedLLM()
+                    context = HandlerContext(
+                        current,
+                        store,
+                        KnowledgeGraph(current.graph),
+                        VaultParser(current.vault),
+                        ThinkingPartner(current.llm, current.telegram, llm_client=llm),
+                        llm,
+                        current.vault.path,
+                    )
+                    message = FakeMessage()
+                    sessions: dict[int, Any] = {}
+                    await handle_recall(
+                        context, cast("TelegramMessage", message), "harbor lantern", sessions
+                    )
+                    captured.extend(message.answers)
+                    return sessions[42].results
+
+                hits = await retrieve(settings)
+                check("config.consumer.env-result-count", 1, len(hits))
+                check(
+                    "config.consumer.selected-note",
+                    True,
+                    all(
+                        hit["metadata"]["note_path"] in {"alpha.md", "beta.md", "gamma.md"}
+                        for hit in hits
+                    ),
+                )
+                check(
+                    "config.consumer.bm25-indexed",
+                    ["alpha.md", "beta.md", "gamma.md"],
+                    sorted(hit["note_path"] for hit in bm25.search("harbor", 3)),
+                )
+                del os.environ["VAULTMIND_SEARCH__MAX_RESULTS"]
+                dotenv_settings = load_settings(config)
+                check("config.dotenv.over-toml", 2, dotenv_settings.search.max_results)
+                check(
+                    "config.consumer.dotenv-result-count", 2, len(await retrieve(dotenv_settings))
+                )
+                dotenv.unlink()
+                toml_settings = load_settings(config)
+                check("config.toml.absent-env", 3, toml_settings.search.max_results)
+                toml_hits = await retrieve(toml_settings)
+                check("config.consumer.toml-result-count", 3, len(toml_hits))
+                check(
+                    "config.consumer.toml-note-paths",
+                    ["alpha.md", "beta.md", "gamma.md"],
+                    sorted(hit["metadata"]["note_path"] for hit in toml_hits),
+                )
+                # Index with hybrid enabled above so the independent BM25 proof
+                # remains real; disable it only for this loaded consumer run.
+                with patch.dict(os.environ, {"VAULTMIND_SEARCH__HYBRID_ENABLED": "false"}):
+                    semantic_settings = load_settings(config)
+                    check(
+                        "config.env.semantic-only", False, semantic_settings.search.hybrid_enabled
+                    )
+                    semantic_hits = await retrieve(semantic_settings)
+                check(
+                    "config.consumer.semantic-note-paths",
+                    ["alpha.md", "beta.md", "gamma.md"],
+                    sorted(hit["metadata"]["note_path"] for hit in semantic_hits),
+                )
+                check("config.consumer.chroma-document-count", 3, store._collection.count())
+                check(
+                    "config.consumer.semantic-indexed-content",
+                    ["alpha.md", "beta.md", "gamma.md"],
+                    sorted(
+                        hit["metadata"]["note_path"]
+                        for hit in semantic_hits
+                        if (
+                            f"harbor lantern {Path(hit['metadata']['note_path']).stem} inspections"
+                            in hit["content"]
+                        )
+                    ),
+                )
+                check(
+                    "config.consumer.semantic-vector-evidence",
+                    3,
+                    sum(
+                        isinstance(hit.get("distance"), (int, float))
+                        and not isinstance(hit["distance"], bool)
+                        and math.isfinite(hit["distance"])
+                        and 0 <= hit["distance"] < 1
+                        and bool(hit.get("chunk_id"))
+                        for hit in semantic_hits
+                    ),
+                )
+            finally:
+                bm25.close()
+
+            graph = KnowledgeGraph(settings.graph)
+            graph.add_entity("Harbor", "project", source_note="alpha.md")
+            graph.save()
+            check("config.consumer.graph-created", True, (data / "graph.json").is_file())
+            reloaded = KnowledgeGraph(settings.graph)
+            entity = reloaded.get_entity("Harbor")
+            check(
+                "config.consumer.graph-reload",
+                ["alpha.md"],
+                entity["source_notes"] if entity is not None else None,
+            )
+            os.environ["VAULTMIND_SEARCH__MAX_RESULTS"] = "not-an-integer"
+            invalid = False
+            try:
+                load_settings(config)
+            except ValidationError:
+                invalid = True
+            check("config.invalid-env-rejected", True, invalid)
+            # Invalid input must fail at the real command's loading boundary too.
+            result = CliRunner().invoke(cli, ["--config", str(config), "index"])
+            captured.append(result.output)
+            check("config.cli.invalid-env-rejected", True, result.exit_code != 0)
+            check(
+                "config.cli.invalid-env-validation",
+                True,
+                isinstance(result.exception, ValidationError),
+            )
+            check(
+                "config.secret-free-output",
+                False,
+                fixture_secret in json.dumps(checks) + "".join(captured),
+            )
+            del os.environ["VAULTMIND_SEARCH__MAX_RESULTS"]
+            os.environ["VAULTMIND_VAULT__PATH"] = str(root / "missing-vault")
+            invalid_vault = False
+            try:
+                load_settings(config)
+            except ValidationError:
+                invalid_vault = True
+            check("config.invalid-vault-rejected", True, invalid_vault)
+            for key in overrides:
+                os.environ.pop(key, None)
+            fallback = load_settings(config)
+            check("config.toml.vault-preserved", True, fallback.vault.path == sentinel.resolve())
+            check(
+                "config.toml.chroma-preserved",
+                True,
+                fallback.chroma.persist_dir == forbidden / "chroma",
+            )
+            check(
+                "config.toml.graph-preserved",
+                True,
+                fallback.graph.persist_path == forbidden / "graph.json",
+            )
+            check(
+                "config.toml.bm25-preserved",
+                True,
+                Path(fallback.search.bm25_db_path) == forbidden / "bm25.db",
+            )
+    finally:
+        check("config.isolation.sentinel-unchanged", True, snapshot() == before)
+        check("config.isolation.forbidden-data-absent", False, forbidden.exists())
+        if dotenv.exists():
+            dotenv.unlink()
+    mcp_policy = await config_mcp_policy_case(home, checks)
+    return {
+        "fixture": "explicit temporary TOML, cwd dotenv, HOME, sentinel and selected vault/data",
+        "consumer": (
+            "real Click index; semantic-only recall over persisted Chroma; BM25 contents; "
+            "graph save/reload; real Click mcp-serve SDK policy and persistence"
+        ),
+        "mcp_policy": mcp_policy,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", required=True, choices=["retrieval", "mcp", "approval"])
+    parser.add_argument("--case", required=True, choices=["retrieval", "mcp", "approval", "config"])
     parser.add_argument("--offline", required=True, action="store_true")
     parser.add_argument("--receipt-out", type=Path)
     args = parser.parse_args()
@@ -3567,6 +4078,24 @@ def main() -> int:
         ],
         "limitations": "No hosted embedding quality, model quality or Telegram delivery evidence.",
     }
+    if args.case == "config":
+        receipt.update(
+            transport=(
+                "in-process real Click index, semantic recall, graph persistence and Click "
+                "mcp-serve assembly with real SDK registered call handlers"
+            ),
+            boundary_substitutions=[
+                "deterministic token embeddings at indexer.Embedder and query embedder",
+                "recording FakeMessage instead of Telegram delivery",
+                "unused ScriptedLLM dependency of ThinkingPartner; no LLM invocation",
+                "MCP terminal stdio/run boundary only; real settings, policy and persistence",
+            ],
+            limitations=(
+                "Temporary fixture only; no hosted embedding quality, native model, Telegram, "
+                "or MCP transport qualification. Graph persistence is exercised directly, "
+                "not entity extraction (which requires a model)."
+            ),
+        )
     if args.case == "mcp":
         receipt.update(
             transport=(
@@ -3624,6 +4153,7 @@ def main() -> int:
             "retrieval": "vm-m11-retrieval-",
             "mcp": "vm-m12-mcp-",
             "approval": "vm-m13-approval-",
+            "config": "vm-m21-config-",
         }[args.case]
         with tempfile.TemporaryDirectory(prefix=prefix) as directory:
             home = Path(directory)
@@ -3645,6 +4175,8 @@ def main() -> int:
                 case = retrieval(home, receipt["checks"])
             elif args.case == "approval":
                 case = approval_case(home, receipt["checks"])
+            elif args.case == "config":
+                case = config_case(home, receipt["checks"])
             else:
                 case = mcp_case(home, receipt["checks"])
             receipt.update(asyncio.run(case))
