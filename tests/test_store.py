@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import chromadb
 import pytest
 from chromadb.config import Settings as ChromaSettings
+from chromadb.db.impl.sqlite import SqliteDB
 
 from vaultmind.config import ChromaConfig
 from vaultmind.indexer.store import VaultStore
 from vaultmind.vault.models import Note, NoteChunk
+
+if TYPE_CHECKING:
+    from chromadb.api.client import Client
 
 
 class FakeEmbedder:
@@ -146,3 +150,41 @@ class TestUpsertBatching:
             assert documents[position] == chunk.content
             assert metadatas[position] == chunk.to_chroma_metadata()
             assert embeddings[position] == pytest.approx(vector)
+
+    def test_large_note_can_be_replaced_and_deleted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = ChromaConfig(persist_dir=tmp_path / "chroma", collection_name="bounded_deletes")
+        client = cast(
+            "Client",
+            chromadb.PersistentClient(
+                path=str(config.persist_dir), settings=ChromaSettings(anonymized_telemetry=False)
+            ),
+        )
+        monkeypatch.setattr(client._system.instance(SqliteDB), "_max_batch_size", 3)
+        store = VaultStore(config, embedder=FakeEmbedder())  # type: ignore[arg-type]
+        parser = FakeParser()
+        target, unrelated = _make_notes(n_notes=2, chunks_per_note=8)
+        store.index_notes([target, unrelated], parser)  # type: ignore[arg-type]
+        replacement = Note(
+            path=target.path,
+            title=target.title,
+            content="\n".join(f"replacement line {i}" for i in range(5)),
+        )
+        store.index_single_note(replacement, parser)  # type: ignore[arg-type]
+        records = store._collection.get(include=["documents"])
+        documents = records["documents"]
+        assert documents is not None
+        assert dict(zip(records["ids"], documents, strict=True)) == {
+            chunk.chunk_id: chunk.content
+            for note in (replacement, unrelated)
+            for chunk in parser.chunk_note(note)
+        }
+
+        store.delete_note(str(target.path))
+        remaining = store._collection.get(include=["documents"])
+        remaining_documents = remaining["documents"]
+        assert remaining_documents is not None
+        assert dict(zip(remaining["ids"], remaining_documents, strict=True)) == {
+            chunk.chunk_id: chunk.content for chunk in parser.chunk_note(unrelated)
+        }

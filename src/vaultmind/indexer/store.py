@@ -151,9 +151,12 @@ class VaultStore:
         existing = self._collection.get(
             where={"note_path": note_path},
         )
-        if existing["ids"]:
-            self._collection.delete(ids=existing["ids"])
-            logger.debug("Deleted %d chunks for %s", len(existing["ids"]), note_path)
+        ids = existing["ids"]
+        if ids:
+            step = self._max_batch_size
+            for i in range(0, len(ids), step):
+                self._collection.delete(ids=ids[i : i + step])
+            logger.debug("Deleted %d chunks for %s", len(ids), note_path)
 
         if self._bm25 is not None:
             self._bm25.delete_note(note_path)
