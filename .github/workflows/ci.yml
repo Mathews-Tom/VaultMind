@@ -12,6 +12,8 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +35,31 @@ jobs:
 
       - name: Test
         run: uv run --extra dev --extra mcp pytest -v --cov=vaultmind --cov-report=term-missing
+
+  offline-acceptance:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.12", "3.13"]
+        case: [retrieval, mcp, approval]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync --extra dev --extra mcp
+      - name: Verify offline ${{ matrix.case }}
+        shell: bash
+        run: |
+          export HOME="$(mktemp -d "$RUNNER_TEMP/vaultmind-home.XXXXXX")"
+          uv run --extra dev --extra mcp python scripts/verify_acceptance.py \
+            --case "${{ matrix.case }}" --offline \
+            --receipt-out "$RUNNER_TEMP/acceptance-${{ matrix.python-version }}-${{ matrix.case }}.json"
 
   format:
     runs-on: ubuntu-latest
