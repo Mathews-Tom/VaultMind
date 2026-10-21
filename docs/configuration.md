@@ -1,12 +1,36 @@
 # Configuration Reference
 
-VaultMind uses a layered configuration system:
+Configuration precedence, highest priority first:
 
-1. **`config/default.toml`** — all non-secret settings
-2. **`.env`** — API keys and secrets only
-3. **Environment variables** — `VAULTMIND_*` prefix overrides any TOML setting
+1. **Deliberate constructor/call-site overrides** — `Settings(...)` or `Settings.from_toml(path, **overrides)`.
+2. **Environment variables** — `VAULTMIND_*`.
+3. **`.env`** — read from the current working directory, with the same key names as environment variables. Keep secrets here or in the process environment, not in TOML.
+4. **TOML** — the explicit `--config PATH` file, or `config/default.toml` relative to the current working directory.
+5. **Model defaults** — used for keys absent from all higher-priority sources.
 
-Nested keys use `__` as delimiter in env vars: `VAULTMIND_TELEGRAM__BOT_TOKEN`.
+Nested keys use `__`, for example `VAULTMIND_VAULT__PATH=/absolute/vault` and `VAULTMIND_SEARCH__HYBRID_ENABLED=false`. Overrides merge by nested key: changing the vault path does not discard a TOML `inbox_folder`. Lists use JSON syntax, for example `VAULTMIND_TELEGRAM__ALLOWED_USER_IDS='[123,456]'`. Invalid selected values raise a configuration error; they do not fall back to a valid lower-priority value.
+
+MCP profile names are dictionary keys, including names that match policy fields such as `allowed_tools`, `description`, or `write_enabled`. For example, `VAULTMIND_MCP__PROFILES__ALLOWED_TOOLS__FOLDER_SCOPE='["00-inbox"]'` changes the `allowed_tools` profile's folder scope without changing its allowed tools or write policy. The same JSON-list syntax applies in cwd `.env`.
+
+Settings loading requires `pydantic-settings>=2.13.1,<3`. The environment/dotenv source adapter preserves that API's resolved per-load controls; older settings-library releases do not expose all of those controls.
+
+All CLI, bot, and MCP assemblies use [`load_settings`](../src/vaultmind/config.py), which delegates to `Settings.from_toml`. TOML is a separate lower-priority Pydantic source, not a dictionary of constructor overrides. Plain `Settings(...)` reads environment/`.env` and defaults without implicitly selecting a TOML file. A missing TOML file retains the established environment/default loading behavior; malformed TOML and unreadable files fail.
+
+For an isolated run, set `HOME`, use a working directory without a personal `.env`, pass an explicit temporary TOML file, and configure every persistent component the command uses. Overriding `vault.path` alone does not relocate `chroma.persist_dir`, `graph.persist_path`, or `search.bm25_db_path`. The offline `scripts/verify_acceptance.py --case config --offline` case exercises temporary targets through runtime consumers with deterministic external embeddings; it is not hosted-provider qualification.
+
+## Declared versus consumed controls
+
+The five sections below are **dormant schema**, not operational capabilities. Their values are parsed and validated, but enabling them does not start jobs, enforce approval policy, create identity notes, send drafts, or connect adapters. Table descriptions in these sections describe reserved intent only.
+
+| Section | Declaration in [`config.py`](../src/vaultmind/config.py) | Runtime status |
+| --- | --- | --- |
+| `memory_profile` | `MemoryProfileConfig`, `Settings.memory_profile` | Dormant; no identity-context or daily-log consumer |
+| `proactivity` | `ProactivityConfig`, `Settings.proactivity` | Dormant; no runtime policy enforcement |
+| `heartbeat` | `HeartbeatConfig`, `Settings.heartbeat` | Dormant; no heartbeat orchestrator |
+| `drafts` | `DraftsConfig`, `Settings.drafts` | Dormant; no draft lifecycle consumer |
+| `integrations` | `IntegrationsConfig`, `Settings.integrations` | Dormant; no integration-policy consumer |
+
+Consumer inventory: [`cli.py`](../src/vaultmind/cli.py) assembles CLI commands, bot jobs, and MCP dependencies; [`mcp/server.py`](../src/vaultmind/mcp/server.py) implements MCP tools. Neither reads these five settings sections. Existing `autonomy` review queues, `sources` connectors, scheduler jobs, and MCP profiles use their own consumed controls; they do not make these five sections active.
 
 ---
 
@@ -26,11 +50,11 @@ Vault filesystem paths and behavior.
 
 ## `[memory_profile]`
 
-Curated identity-memory layout and promotion guardrails. This is the control-plane definition for VaultMind's always-available user context and daily-log pipeline.
+Reserved identity-memory layout and promotion settings; dormant, with no always-available context or daily-log pipeline driven by this section.
 
 | Key                         | Type   | Default              | Description                                          |
 | --------------------------- | ------ | -------------------- | ---------------------------------------------------- |
-| `enabled`                   | bool   | `true`               | Enable identity-memory layout management             |
+| `enabled`                   | bool   | `true`               | Reserved identity-layout toggle; no runtime effect   |
 | `identity_folder`           | string | `_meta/identity`     | Vault folder holding curated identity-memory notes   |
 | `user_note_name`            | string | `user.md`            | User profile note filename                           |
 | `system_note_name`          | string | `system.md`          | System rules and operating-boundaries note filename  |
@@ -42,7 +66,7 @@ Curated identity-memory layout and promotion guardrails. This is the control-pla
 
 ## `[proactivity]`
 
-Global autonomy policy. This section does not itself perform actions; it defines what later automation layers are allowed to do.
+Reserved autonomy-policy values; dormant. These fields do not enforce confirmation or side-effect boundaries.
 
 | Key                                          | Type   | Default      | Description                                         |
 | -------------------------------------------- | ------ | ------------ | --------------------------------------------------- |
@@ -54,11 +78,11 @@ Global autonomy policy. This section does not itself perform actions; it defines
 
 ## `[heartbeat]`
 
-Deterministic proactive-state collection boundaries for the future heartbeat orchestrator.
+Reserved proactive-state collection settings; dormant. No heartbeat job is scheduled from this section.
 
 | Key                   | Type   | Default    | Description                                             |
 | --------------------- | ------ | ---------- | ------------------------------------------------------- |
-| `enabled`             | bool   | `false`    | Enable heartbeat orchestration                          |
+| `enabled`             | bool   | `false`    | Reserved heartbeat toggle; no runtime effect             |
 | `schedule`            | string | `*/30 * * * *` | Cron schedule for heartbeat runs                    |
 | `timezone`            | string | `UTC`      | Timezone for schedule interpretation                    |
 | `active_hours_start`  | int    | `8`        | Start hour for active monitoring window                 |
@@ -69,11 +93,11 @@ Deterministic proactive-state collection boundaries for the future heartbeat orc
 
 ## `[drafts]`
 
-Draft lifecycle storage and approval defaults.
+Reserved draft lifecycle settings; dormant. No draft storage, expiration, approval, or send workflow consumes this section.
 
 | Key                      | Type   | Default                 | Description                                       |
 | ------------------------ | ------ | ----------------------- | ------------------------------------------------- |
-| `enabled`                | bool   | `false`                 | Enable draft lifecycle support                    |
+| `enabled`                | bool   | `false`                 | Reserved draft toggle; no runtime effect           |
 | `active_folder`          | string | `_meta/drafts/active`   | Vault folder for live drafts                      |
 | `sent_folder`            | string | `_meta/drafts/sent`     | Vault folder for user-sent replies                |
 | `expired_folder`         | string | `_meta/drafts/expired`  | Vault folder for expired drafts                   |
@@ -83,11 +107,11 @@ Draft lifecycle storage and approval defaults.
 
 ## `[integrations]`
 
-External adapter policy defaults.
+Reserved external-adapter policy settings; dormant. They do not configure the existing source connectors or enforce capability limits.
 
 | Key                      | Type   | Default | Description                                                   |
 | ------------------------ | ------ | ------- | ------------------------------------------------------------- |
-| `enabled`                | bool   | `false` | Enable external integration framework                         |
+| `enabled`                | bool   | `false` | Reserved integration toggle; no runtime effect                 |
 | `manifest_path`          | string | `""`    | Integration manifest path (empty = default under data dir)    |
 | `default_capability`     | string | `read`  | Default adapter capability ceiling: `read`, `draft`, `write`  |
 | `sanitize_external_text` | bool   | `true`  | Sanitize provider payload text before prompt assembly         |
@@ -174,7 +198,7 @@ Telegram bot behavior.
 **Secrets** (set in `.env`):
 
 - `VAULTMIND_TELEGRAM__BOT_TOKEN` — Bot token from @BotFather
-- `VAULTMIND_TELEGRAM__ALLOWED_USER_IDS` — Comma-separated user ID whitelist (empty = allow all)
+- `VAULTMIND_TELEGRAM__ALLOWED_USER_IDS` — JSON user ID list, e.g. `[123,456]` (empty = allow all)
 
 ### Proactive Notifications
 
@@ -538,3 +562,7 @@ requires_confirmation = true
 ```
 
 Activate with: `vaultmind mcp-serve --profile <name>`. Default (no flag) uses `researcher`.
+
+Profile values are validated during settings loading, before the MCP server starts. `allowed_tools` and `folder_scope` must be lists of strings; nested environment/`.env` overrides use JSON arrays, for example `VAULTMIND_MCP__PROFILES__PLANNER__FOLDER_SCOPE='["00-inbox"]'`. `write_enabled` and `requires_confirmation` are booleans: environment/`.env` values such as `false` and `true` are parsed as booleans, not string truthiness. Invalid booleans, lists, and note-size limits fail validation. `max_note_size_bytes` is a nonnegative integer, or `None` through programmatic configuration for no size limit; omitting it also means no limit.
+
+A configured profile replaces the same-named built-in profile rather than inheriting its policy. Omitted profile fields retain the established custom-profile defaults: empty description, no allowed tools, folder scope `["*"]`, writes disabled, no note-size limit, and confirmation disabled. Built-in researcher, planner, and full policies remain unchanged when no same-named profile is configured.

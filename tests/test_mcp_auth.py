@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from vaultmind.config import VaultConfig
+from vaultmind.config import MCPProfileConfig, VaultConfig
 from vaultmind.mcp.auth import AuditLogger, ProfileEnforcer, ProfileError, ProfilePolicy
 from vaultmind.mcp.profiles import load_profile
 from vaultmind.mcp.server import _dispatch_tool
@@ -218,12 +218,12 @@ class TestLoadProfile:
 
     def test_config_profiles_override_defaults(self) -> None:
         custom = {
-            "researcher": {
-                "description": "Custom researcher",
-                "allowed_tools": ["vault_search"],
-                "folder_scope": ["04-resources"],
-                "write_enabled": False,
-            }
+            "researcher": MCPProfileConfig(
+                description="Custom researcher",
+                allowed_tools=["vault_search"],
+                folder_scope=["04-resources"],
+                write_enabled=False,
+            )
         }
         policy = load_profile("researcher", config_profiles=custom)
         assert policy.description == "Custom researcher"
@@ -263,12 +263,12 @@ class TestWildcardContainment:
 class TestConfiguredProfileUsesSameEnforcer:
     def test_config_override_scope_is_enforced(self, vault_root: Path) -> None:
         custom = {
-            "planner": {
-                "description": "Narrowed planner",
-                "allowed_tools": ["read_frontmatter"],
-                "folder_scope": ["04-resources"],
-                "write_enabled": False,
-            }
+            "planner": MCPProfileConfig(
+                description="Narrowed planner",
+                allowed_tools=["read_frontmatter"],
+                folder_scope=["04-resources"],
+                write_enabled=False,
+            )
         }
         enforcer = ProfileEnforcer(load_profile("planner", config_profiles=custom), vault_root)
         enforcer.check_path(Path("04-resources/a.md"))

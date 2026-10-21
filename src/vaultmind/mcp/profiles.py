@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
+from vaultmind.config import MCPProfileConfig
 from vaultmind.mcp.auth import ProfilePolicy
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
 
 # Built-in default profiles (used when no profiles in config)
-DEFAULT_PROFILES: dict[str, dict[str, Any]] = {
-    "researcher": {
-        "description": "Read-only access for research and Q&A tasks",
-        "allowed_tools": [
+DEFAULT_PROFILES: dict[str, MCPProfileConfig] = {
+    "researcher": MCPProfileConfig(
+        description="Read-only access for research and Q&A tasks",
+        allowed_tools=[
             "vault_search",
             "vault_read",
             "vault_list",
@@ -28,12 +32,12 @@ DEFAULT_PROFILES: dict[str, dict[str, Any]] = {
             "list_folder_index",
             "follow_links",
         ],
-        "folder_scope": ["*"],
-        "write_enabled": False,
-    },
-    "planner": {
-        "description": "Read/write access for project planning",
-        "allowed_tools": [
+        folder_scope=["*"],
+        write_enabled=False,
+    ),
+    "planner": MCPProfileConfig(
+        description="Read/write access for project planning",
+        allowed_tools=[
             "vault_search",
             "vault_read",
             "vault_write",
@@ -51,21 +55,23 @@ DEFAULT_PROFILES: dict[str, dict[str, Any]] = {
             "list_folder_index",
             "follow_links",
         ],
-        "folder_scope": ["02-projects", "00-inbox"],
-        "write_enabled": True,
-        "max_note_size_bytes": 50000,
-    },
-    "full": {
-        "description": "Unrestricted access",
-        "allowed_tools": ["*"],
-        "folder_scope": ["*"],
-        "write_enabled": True,
-        "requires_confirmation": True,
-    },
+        folder_scope=["02-projects", "00-inbox"],
+        write_enabled=True,
+        max_note_size_bytes=50000,
+    ),
+    "full": MCPProfileConfig(
+        description="Unrestricted access",
+        allowed_tools=["*"],
+        folder_scope=["*"],
+        write_enabled=True,
+        requires_confirmation=True,
+    ),
 }
 
 
-def load_profile(name: str, config_profiles: dict[str, Any] | None = None) -> ProfilePolicy:
+def load_profile(
+    name: str, config_profiles: Mapping[str, MCPProfileConfig] | None = None
+) -> ProfilePolicy:
     """Load a profile by name from config or built-in defaults.
 
     Args:
@@ -92,10 +98,10 @@ def load_profile(name: str, config_profiles: dict[str, Any] | None = None) -> Pr
 
     return ProfilePolicy(
         name=name,
-        description=profile_data.get("description", ""),
-        allowed_tools=frozenset(profile_data.get("allowed_tools", [])),
-        folder_scope=tuple(profile_data.get("folder_scope", ["*"])),
-        write_enabled=profile_data.get("write_enabled", False),
-        max_note_size_bytes=profile_data.get("max_note_size_bytes"),
-        requires_confirmation=profile_data.get("requires_confirmation", False),
+        description=profile_data.description,
+        allowed_tools=frozenset(profile_data.allowed_tools),
+        folder_scope=tuple(profile_data.folder_scope),
+        write_enabled=profile_data.write_enabled,
+        max_note_size_bytes=profile_data.max_note_size_bytes,
+        requires_confirmation=profile_data.requires_confirmation,
     )
