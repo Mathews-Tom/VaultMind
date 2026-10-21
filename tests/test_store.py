@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
+import chromadb
 import pytest
+from chromadb.config import Settings as ChromaSettings
 
 from vaultmind.config import ChromaConfig
 from vaultmind.indexer.store import VaultStore
@@ -15,7 +19,7 @@ class FakeEmbedder:
     """Deterministic embedder — no API calls."""
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+        return [[float(i + 1), 0.2, 0.3, 0.4] for i, _ in enumerate(texts)]
 
     def embed_query(self, text: str) -> list[float]:
         return [0.1, 0.2, 0.3, 0.4]
@@ -92,8 +96,53 @@ class TestUpsertBatching:
         assert indexed == 9
         assert store._collection.count() == 9
 
-    def test_max_batch_size_from_client(self, store: VaultStore) -> None:
-        # PersistentClient exposes get_max_batch_size(); the store should
-        # pick it up rather than hardcoding a guess.
-        assert store._max_batch_size == store._client.get_max_batch_size()
-        assert store._max_batch_size > 0
+    @pytest.mark.parametrize("legacy", [False, True], ids=["method", "property"])
+    def test_client_limit_preserves_record_associations(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: bool
+    ) -> None:
+        config = ChromaConfig(persist_dir=tmp_path / "chroma", collection_name="bounded_chunks")
+        client = chromadb.PersistentClient(
+            path=str(config.persist_dir), settings=ChromaSettings(anonymized_telemetry=False)
+        )
+        limited_client = SimpleNamespace(get_or_create_collection=client.get_or_create_collection)
+        if legacy:
+            limited_client.max_batch_size = 3
+        else:
+            limited_client.get_max_batch_size = lambda: 3
+        monkeypatch.setattr(chromadb, "PersistentClient", lambda **_: limited_client)
+        store = VaultStore(config, embedder=FakeEmbedder())  # type: ignore[arg-type]
+        original_upsert = store._collection.upsert
+
+        def bounded_upsert(
+            *,
+            ids: list[str],
+            documents: list[str],
+            embeddings: list[list[float]],
+            metadatas: list[dict[str, Any]],
+        ) -> None:
+            if len(ids) > 3:
+                raise ValueError("client batch limit exceeded")
+            original_upsert(
+                ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas
+            )
+
+        monkeypatch.setattr(store._collection, "upsert", bounded_upsert)
+        notes = _make_notes(n_notes=2, chunks_per_note=4)
+        parser = FakeParser()
+        chunks = [chunk for note in notes for chunk in parser.chunk_note(note)]
+        vectors = FakeEmbedder().embed_texts([chunk.content for chunk in chunks])
+        store.index_notes(notes, parser)  # type: ignore[arg-type]
+        records = store._collection.get(include=["documents", "embeddings", "metadatas"])
+        positions = {chunk_id: i for i, chunk_id in enumerate(records["ids"])}
+        assert set(positions) == {chunk.chunk_id for chunk in chunks}
+        documents = records["documents"]
+        metadatas = records["metadatas"]
+        embeddings = records["embeddings"]
+        assert documents is not None
+        assert metadatas is not None
+        assert embeddings is not None
+        for chunk, vector in zip(chunks, vectors, strict=True):
+            position = positions[chunk.chunk_id]
+            assert documents[position] == chunk.content
+            assert metadatas[position] == chunk.to_chroma_metadata()
+            assert embeddings[position] == pytest.approx(vector)

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 if TYPE_CHECKING:
+    from chromadb.api.types import Metadata
+
     from vaultmind.config import ChromaConfig
     from vaultmind.indexer.bm25 import BM25Index
     from vaultmind.indexer.embedder import Embedder
@@ -52,13 +54,13 @@ class VaultStore:
             self._collection.count(),
         )
 
-        # Chroma rejects upserts above a per-call record cap (~5461 on
-        # default builds, derived from SQLite limits). Query it so large
-        # indexing runs can be split into accepted batches.
-        try:
-            self._max_batch_size: int = self._client.get_max_batch_size()
-        except AttributeError:  # older chromadb without the API
-            self._max_batch_size = 5000
+        # Chroma 0.5.0 exposes the limit as a property; 0.5.1+ uses a method.
+        get_max_batch_size = getattr(self._client, "get_max_batch_size", None)
+        self._max_batch_size: int = (
+            get_max_batch_size()
+            if get_max_batch_size is not None
+            else cast("Any", self._client).max_batch_size
+        )
 
     def _upsert_chunks(self, chunks: list[NoteChunk], embeddings: list[Any]) -> None:
         """Upsert chunks into ChromaDB in batches that respect the per-call cap.
@@ -68,7 +70,7 @@ class VaultStore:
         """
         ids = [c.chunk_id for c in chunks]
         texts = [c.content for c in chunks]
-        metas = [c.to_chroma_metadata() for c in chunks]
+        metas: list[Metadata] = [c.to_chroma_metadata() for c in chunks]
         step = self._max_batch_size
         for i in range(0, len(chunks), step):
             self._collection.upsert(
