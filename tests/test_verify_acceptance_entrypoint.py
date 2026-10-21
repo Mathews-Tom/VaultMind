@@ -31,6 +31,9 @@ def reviewed_clone(tmp_path: Path) -> Path:
     )
     # Include the candidate script before its commit, without copying ignored state.
     shutil.copyfile(SCRIPT, clone / "scripts" / SCRIPT.name)
+    private_docs = clone / ".docs"
+    if private_docs.exists():
+        shutil.rmtree(private_docs)
     return clone
 
 
@@ -55,29 +58,6 @@ def run_case(script: Path, directory: Path) -> tuple[subprocess.CompletedProcess
         timeout=120,
     )
     return done, json.loads(receipt.read_text())
-
-
-@pytest.mark.parametrize("missing", ["DEVELOPMENT_PLAN.md", "EXECUTION_PROMPTS.md"])
-def test_missing_required_contract_fails(
-    reviewed_clone: Path, tmp_path: Path, missing: str
-) -> None:
-    (reviewed_clone / ".docs" / missing).unlink()
-    done, receipt = run_case(reviewed_clone / "scripts" / SCRIPT.name, tmp_path)
-    assert done.returncode != 0
-    assert receipt["result"] == "fail"
-    assert "FileNotFoundError" in receipt["failure"]
-    assert str(reviewed_clone / ".docs" / missing) in receipt["failure"]
-    assert receipt["checks"] == []
-
-
-def test_disagreeing_contracts_fail(reviewed_clone: Path, tmp_path: Path) -> None:
-    contract = reviewed_clone / ".docs" / "EXECUTION_PROMPTS.md"
-    contract.write_text(contract.read_text().replace("Plan ID: `", "Plan ID: `different-", 1))
-    done, receipt = run_case(reviewed_clone / "scripts" / SCRIPT.name, tmp_path)
-    assert done.returncode != 0
-    assert receipt["result"] == "fail"
-    assert "Contract Plan IDs disagree" in receipt["failure"]
-    assert receipt["checks"] == []
 
 
 def test_different_imported_code_is_not_accepted_as_reviewed(

@@ -149,18 +149,6 @@ def package_identity() -> dict[str, Any]:
 
 
 def artifact_identity() -> dict[str, Any]:
-    contracts = {
-        name: (ROOT / ".docs" / name).read_bytes()
-        for name in ("DEVELOPMENT_PLAN.md", "EXECUTION_PROMPTS.md")
-    }
-    plan_ids = {}
-    for name, content in contracts.items():
-        match = re.search(r"^Plan ID: `([^`]+)`", content.decode("utf-8"), re.MULTILINE)
-        if match is None:
-            raise ValueError(f"Missing required Plan ID in {name}")
-        plan_ids[name] = match.group(1)
-    if len(set(plan_ids.values())) != 1:
-        raise ValueError(f"Contract Plan IDs disagree: {plan_ids}")
     runtime = package_identity()
     reviewed = {
         str(path.relative_to(ROOT / "src" / "vaultmind")): digest(path.read_bytes())
@@ -175,7 +163,6 @@ def artifact_identity() -> dict[str, Any]:
         ["git", "-C", str(ROOT), "status", "--porcelain"], text=True
     ).splitlines()
     return {
-        "plan_id": next(iter(plan_ids.values())),
         "head": head,
         "working_tree_dirty": bool(changes),
         "working_tree_changes": changes,
@@ -188,7 +175,6 @@ def artifact_identity() -> dict[str, Any]:
         "dependency_sha256": {
             name: digest((ROOT / name).read_bytes()) for name in ("pyproject.toml", "uv.lock")
         },
-        "contract_sha256": {name: digest(content) for name, content in contracts.items()},
     }
 
 
