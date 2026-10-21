@@ -197,6 +197,25 @@ The bench `--bundle` fixture (`retrieval.yaml`: golden query text → ordered hi
 
 `scripts/verify_acceptance.py --case retrieval --offline` exercises this contract through the real parser → ChromaDB + BM25 → `handle_recall` / `run_bench` / `ThinkingPartner.think` → `GapStore` path in a fresh temporary HOME configured by explicit TOML, and emits a JSON receipt (git revision, dirty flag, code/API-origin/corpus digests, boundary labels, per-assertion expected vs observed). Its boundary substitutions are labeled in the receipt: a deterministic hash embedder (no embedding provider), a scripted LLM client, an in-process fake Telegram message, a scripted store used *only* for exact floor-boundary values (`floor − ε`, `floor`, `None`, missing key), and a direct BM25 insert that creates the lexical-only chunk. It is a plumbing and raw-distance-semantics check, not retrieval-quality or live-provider evidence; thinking retrieves with vector-only `store.search()`, so its `unknown` branch is covered only through the scripted store.
 
+### Offline Acceptance and CI
+
+Run each standalone consumer case from a tracked checkout after installing `dev` and `mcp`:
+
+```bash
+uv sync --extra dev --extra mcp
+uv run --extra dev --extra mcp python scripts/verify_acceptance.py --case retrieval --offline
+uv run --extra dev --extra mcp python scripts/verify_acceptance.py --case mcp --offline
+uv run --extra dev --extra mcp python scripts/verify_acceptance.py --case approval --offline
+```
+
+Keep committed Git history available: approval reconstructs its legacy migration schema from a prior committed revision. The standalone CI job uses `fetch-depth: 0` for this fixture; it does not copy an ignored ledger or private historical files.
+
+The verifier creates temporary HOME/vault/index/SQLite/graph state and supplies explicit fixture TOML before loading application settings. MCP executes the `vaultmind` console script beside the running Python executable, inside the existing isolated child with its offline network guard and stdio instrumentation. It records the consumed script's execution path and digest, the imported package origin and code digest, and the interpreter. Approval exercises the real CLI/review queue/appliers and Telegram router with recorded delivery rather than external effects.
+
+Reviewed assets resolve relative to the verifier, not the caller's working directory. Both tracked contracts (`.docs/DEVELOPMENT_PLAN.md` and `.docs/EXECUTION_PROMPTS.md`) are required, must declare the same Plan ID, and are hashed into the receipt alongside the script and dependency identities. The imported package is fingerprinted separately from the reviewed checkout; differing code fails acceptance. Missing required assets also fail explicitly. No ignored history is needed, and ordinary installed CLI commands do not read these verifier-only contracts. Add `--receipt-out /temporary/path/receipt.json` to retain a JSON outcome; consumer failures emit a failed outcome and exit nonzero.
+
+CI retains lint, strict source typing, full pytest and formatting checks. A separate fail-fast matrix runs each of `retrieval`, `mcp` and `approval` offline on Python 3.12 and 3.13 with `dev+mcp`, explicit interpreter selection and a temporary HOME. These are synthetic source-consumer checks, not hosted-model qualification or installed-wheel evidence. Wheel verification must invoke this reviewed script with the wheel environment's Python from outside the checkout, without source-path injection or an editable install.
+
 ### Watch Pipeline
 
 ```text
