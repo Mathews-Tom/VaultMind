@@ -1730,6 +1730,7 @@ def synthesize_workflows(ctx: click.Context, min_episodes: int) -> None:
 @click.pass_context
 def mcp_serve(ctx: click.Context, profile: str | None) -> None:
     """Start the MCP server for agent integration."""
+    from contextlib import ExitStack
     from functools import partial
 
     from vaultmind.config import load_settings
@@ -1795,41 +1796,95 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
     diagnostics.print(f"  Write: {'enabled' if policy.write_enabled else 'disabled'}")
     diagnostics.print(f"  Folder scope: {', '.join(policy.folder_scope)}")
 
-    is_openai = settings.embedding.provider == "openai"
-    api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
-    cache = _create_embedding_cache(settings)
-    parser = VaultParser(settings.vault)
-    embedder = Embedder(settings.embedding, api_key, cache=cache)
-    store = VaultStore(settings.chroma, embedder)
-    graph = KnowledgeGraph(settings.graph)
+    with ExitStack() as resources:
+        is_openai = settings.embedding.provider == "openai"
+        api_key = settings.openai_api_key if is_openai else settings.voyage_api_key
+        cache = _create_embedding_cache(settings)
+        if cache is not None:
+            resources.callback(cache.close)
+        parser = VaultParser(settings.vault)
+        embedder = Embedder(settings.embedding, api_key, cache=cache)
+        store = VaultStore(settings.chroma, embedder)
+        graph = KnowledgeGraph(settings.graph)
 
-    detector = (
-        DuplicateDetector(settings.duplicate_detection, store)
-        if settings.duplicate_detection.enabled
-        else None
-    )
-    suggester = (
-        NoteSuggester(settings.note_suggestions, store, graph=graph)
-        if settings.note_suggestions.enabled
-        else None
-    )
+        detector = (
+            DuplicateDetector(settings.duplicate_detection, store)
+            if settings.duplicate_detection.enabled
+            else None
+        )
+        suggester = (
+            NoteSuggester(settings.note_suggestions, store, graph=graph)
+            if settings.note_suggestions.enabled
+            else None
+        )
 
-    server = create_mcp_server(
-        settings.vault.path,
-        store,
-        graph,
-        parser,
-        duplicate_detector=detector,
-        note_suggester=suggester,
-        enforcer=enforcer,
-        audit_logger=audit_log,
-    )
+        episode_store = None
+        if settings.episodic.enabled:
+            from vaultmind.memory.store import EpisodeStore
 
-    diagnostics.print("[green]✓[/green] MCP server starting...")
+            episode_db = (
+                Path(settings.episodic.db_path)
+                if settings.episodic.db_path
+                else VAULTMIND_HOME / "data" / "episodes.db"
+            )
+            episode_store = EpisodeStore(episode_db)
+            resources.callback(episode_store.close)
 
-    from mcp.server.stdio import stdio_server
+        procedural_memory = None
+        if settings.procedural.enabled:
+            from vaultmind.memory.procedural import ProceduralMemory
 
-    asyncio.run(_run_mcp(server, stdio_server))
+            procedural_db = (
+                Path(settings.procedural.db_path)
+                if settings.procedural.db_path
+                else VAULTMIND_HOME / "data" / "procedural.db"
+            )
+            procedural_memory = ProceduralMemory(procedural_db)
+            resources.callback(procedural_memory.close)
+
+        evolution_detector = None
+        if settings.evolution.enabled:
+            from vaultmind.graph.evolution import EvolutionDetector
+
+            evolution_detector = EvolutionDetector(
+                knowledge_graph=graph,
+                confidence_drift_threshold=settings.evolution.confidence_drift_threshold,
+                stale_days=settings.evolution.stale_days,
+                min_confidence_for_stale=settings.evolution.min_confidence_for_stale,
+            )
+
+        preference_store = None
+        if settings.tracking.enabled:
+            from vaultmind.tracking.preferences import PreferenceStore
+
+            preference_db = (
+                Path(settings.tracking.db_path)
+                if settings.tracking.db_path
+                else VAULTMIND_HOME / "data" / "preferences.db"
+            )
+            preference_store = PreferenceStore(preference_db)
+            resources.callback(preference_store.close)
+
+        server = create_mcp_server(
+            settings.vault.path,
+            store,
+            graph,
+            parser,
+            duplicate_detector=detector,
+            note_suggester=suggester,
+            enforcer=enforcer,
+            audit_logger=audit_log,
+            episode_store=episode_store,
+            procedural_memory=procedural_memory,
+            evolution_detector=evolution_detector,
+            preference_store=preference_store,
+        )
+
+        diagnostics.print("[green]✓[/green] MCP server starting...")
+
+        from mcp.server.stdio import stdio_server
+
+        asyncio.run(_run_mcp(server, stdio_server))
 
 
 async def _run_mcp(server: object, stdio_server: object) -> None:
