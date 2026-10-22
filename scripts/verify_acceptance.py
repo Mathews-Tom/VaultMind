@@ -1512,7 +1512,7 @@ def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str
     # scan's confidence drift and relationship shift rather than an empty control.
     graph._graph = nx.MultiDiGraph()
     nodes: dict[str, dict[str, Any]] = {}
-    edges: list[tuple[str, str, dict[str, Any], bool]] = []
+    edges: list[tuple[str, str, dict[str, Any]]] = []
     missing = object()
 
     def node(label: str, provenance: Any = missing) -> None:
@@ -1527,22 +1527,21 @@ def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str
         b: str,
         provenance: Any = missing,
         *,
-        allowed: bool = False,
         relation: str = "related_to",
         confidence: float = 1.0,
     ) -> None:
         attrs: dict[str, Any] = {"relation": relation, "confidence": confidence}
         if provenance is not missing:
             attrs["source_notes"] = provenance
-        edges.append((a, b, attrs, allowed))
+        edges.append((a, b, attrs))
         graph._graph.add_edge(a.lower(), b.lower(), **attrs)
 
     node("Start", [source])
     node("Middle", ["./" + peer, str(vault / peer), "02-projects/allowed-alias.md"])
     node("Finish", ["02-projects/typed.md"])
     node("EdgeOnly", [peer])
-    edge("Start", "Middle", ["./" + source, source], allowed=True)
-    edge("Middle", "Finish", [peer], allowed=True)
+    edge("Start", "Middle", ["./" + source, source])
+    edge("Middle", "Finish", [peer])
     bad_sources = [
         missing,
         [],
@@ -1578,6 +1577,50 @@ def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str
     node("DriftB", [private])
     edge("DriftA", "DriftB", [source], relation="depends_on", confidence=0.1)
     edge("DriftA", "DriftB", [private], relation="competes_with", confidence=0.9)
+    # Real producer merges omit unknown contributions from otherwise allowed source
+    # lists. Transfer their complete records into the persisted multigraph without
+    # changing attributes; retain the independent parallel-edge evolution controls.
+    producer = KnowledgeGraph(GraphConfig(persist_path=root / "merge-producer.json"))
+    for order in ("UnknownFirst", "AllowedFirst"):
+        a, b = order + "A", order + "B"
+        unknown_first = order == "UnknownFirst"
+        marker = "UNPROVENANCED-FIRST" if unknown_first else "UNPROVENANCED-SECOND"
+        for origin in ("", source) if unknown_first else (source, ""):
+            for label in (a, b):
+                producer.add_entity(
+                    label,
+                    "concept",
+                    source_note=origin,
+                    confidence=0.7 if origin else 0.95,
+                    **({} if origin else {"private_context": marker}),
+                )
+            producer.add_relationship(
+                a,
+                b,
+                relation="related_to" if origin else "depends_on",
+                source_note=origin,
+                confidence=0.7 if origin else 0.95,
+            )
+        for label in (a, b):
+            nodes[label] = {
+                "label": label,
+                "type": "concept",
+                "confidence": 0.95,
+                "source_notes": [source],
+                "private_context": marker,
+            }
+        edges.append(
+            (
+                a,
+                b,
+                {
+                    "relation": "depends_on" if unknown_first else "related_to",
+                    "confidence": 0.95,
+                    "source_notes": [source],
+                },
+            )
+        )
+    graph._graph.update(producer._graph)
     graph.save()
     dismissed = root / ".vaultmind" / "data" / "evolution_dismissed.json"
     dismissed.parent.mkdir(parents=True, exist_ok=True)
@@ -1642,6 +1685,8 @@ def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str
     def call(
         tool: str, arguments: dict[str, Any], expected: dict[str, Any], policy: str = "filter"
     ) -> None:
+        if not full and tool in {"graph_query", "graph_path", "vault_stats"}:
+            expected, policy = {"error": True}, "deny"
         denied = policy == "deny"
         calls.append(
             {
@@ -1655,47 +1700,28 @@ def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str
         )
 
     safe_labels = {"Start", "Middle", "Finish", "EdgeOnly"}
-    visible_nodes = (
-        nodes
-        if full
-        else {
-            label: {
-                **attrs,
-                "source_notes": [peer]
-                if label in ("Middle", "EdgeOnly")
-                else ["02-projects/typed.md"]
-                if label == "Finish"
-                else [source],
-            }
-            for label, attrs in nodes.items()
-            if label in safe_labels
-        }
-    )
-    visible_edges = edges if full else [entry for entry in edges if entry[3]]
 
     def neighborhood(label: str, depth: int = 1) -> dict[str, Any]:
-        if label not in visible_nodes:
+        if label not in nodes:
             return {"entity": None, "outgoing": [], "incoming": [], "neighbors": []}
         near = {label}
         for _ in range(depth):
             previous = set(near)
-            near |= {b for a, b, _, _ in visible_edges if a in previous}
-            near |= {a for a, b, _, _ in visible_edges if b in previous}
+            near |= {b for a, b, _ in edges if a in previous}
+            near |= {a for a, b, _ in edges if b in previous}
         return {
-            "entity": {"id": label.lower(), **visible_nodes[label]},
+            "entity": {"id": label.lower(), **nodes[label]},
             "outgoing": [
                 {"target": b, "relation": attrs["relation"], "confidence": attrs["confidence"]}
-                for a, b, attrs, _ in visible_edges
+                for a, b, attrs in edges
                 if a == label
             ],
             "incoming": [
                 {"source": a, "relation": attrs["relation"], "confidence": attrs["confidence"]}
-                for a, b, attrs, _ in visible_edges
+                for a, b, attrs in edges
                 if b == label
             ],
-            "neighbors": [
-                {"id": other.lower(), **visible_nodes[other]} for other in sorted(near - {label})
-            ]
+            "neighbors": [{"id": other.lower(), **nodes[other]} for other in sorted(near - {label})]
             if depth > 1
             else [],
         }
@@ -1705,20 +1731,21 @@ def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str
     for label in nodes:
         if label not in safe_labels:
             call("graph_query", {"entity": label}, neighborhood(label))
+    for order in ("UnknownFirst", "AllowedFirst"):
+        call(
+            "graph_path",
+            {"source": order + "A", "target": order + "B"},
+            {"path": [order + "A", order + "B"], "length": 1},
+        )
     call(
         "graph_path",
         {"source": "Start", "target": "Finish"},
-        {
-            "path": ["Start", "Finish"] if full else ["Start", "Middle", "Finish"],
-            "length": 1 if full else 2,
-        },
+        {"path": ["Start", "Finish"], "length": 1},
     )
     call(
         "graph_path",
         {"source": "Start", "target": "EdgeOnly"},
-        {"path": ["Start", "EdgeOnly"], "length": 1}
-        if full
-        else {"path": None, "message": "No path found between entities"},
+        {"path": ["Start", "EdgeOnly"], "length": 1},
     )
     canonical_notes = sorted(
         p
@@ -1732,8 +1759,8 @@ def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str
         {
             "total_notes": len(canonical_notes),
             "by_type": {"project": 1},
-            "by_folder": {"02-projects": 4, **({"03-private": 16} if full else {})},
-            "graph": {"entities": len(visible_nodes), "edges": len(visible_edges)},
+            "by_folder": {"02-projects": 4, "03-private": 16},
+            "graph": {"entities": len(nodes), "edges": len(edges)},
         },
     )
     for days in (7, 0):
@@ -1836,6 +1863,7 @@ def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str
             else [
                 "DERIVED-REJECTED",
                 "DERIVED-PRIVATE",
+                "UNPROVENANCED",
                 "DERIVED-PENDING",
                 "DriftA",
                 "DriftB",
@@ -3084,7 +3112,15 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
             True,
             any("error" not in row["actual"] and row["audit_result"] == "OK" for row in rows),
         )
-        if tool in {"episode_query", "workflow_suggest", "graph_evolution", "suggest_links"}:
+        if tool in {
+            "graph_query",
+            "graph_path",
+            "vault_stats",
+            "episode_query",
+            "workflow_suggest",
+            "graph_evolution",
+            "suggest_links",
+        }:
             check(
                 "inventory." + tool + ".restricted-denial-and-full-positive",
                 True,
@@ -3101,7 +3137,7 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
                     for row in rows
                 ),
             )
-        if tool in {"vault_stats", "recent_activity", "graph_query", "graph_path"}:
+        if tool == "recent_activity":
             check(
                 "inventory." + tool + ".scoped-filter-and-global-positive",
                 True,
@@ -3134,6 +3170,9 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
                         "deny"
                         if tool
                         in {
+                            "graph_query",
+                            "graph_path",
+                            "vault_stats",
                             "episode_query",
                             "workflow_suggest",
                             "graph_evolution",
@@ -3147,9 +3186,6 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
                             "list_folder_index",
                             "follow_links",
                             "find_duplicates",
-                            "graph_query",
-                            "graph_path",
-                            "vault_stats",
                             "recent_activity",
                         }
                         else "allow"

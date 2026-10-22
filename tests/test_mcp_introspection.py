@@ -409,68 +409,53 @@ def _restricted(vault: Path) -> ProfileEnforcer:
     )
 
 
-@pytest.mark.parametrize(
-    "provenance",
-    [
-        None,
-        [],
-        "",
-        "02-projects/project.md",
-        17,
-        [None],
-        [False],
-        ["02-projects/missing.md"],
-        ["00-inbox/note1.md"],
-        ["02-projects/project.md", "00-inbox/note1.md"],
-        ["02-projects/project.md", {"path": "02-projects/project.md"}],
-    ],
-)
-def test_graph_merged_records_require_every_source(
-    vault_root: Path, knowledge_graph: KnowledgeGraph, provenance: object
-) -> None:
-    graph = knowledge_graph
-    graph.add_entity("Allowed", "concept", source_note="02-projects/project.md")
-    graph.add_entity("Hidden", "concept", source_note="02-projects/project.md")
-    graph._graph.nodes["hidden"]["source_notes"] = provenance
-    graph.add_relationship("Allowed", "Hidden", source_note="02-projects/project.md")
-    before = deepcopy(graph._graph)
-    result = _dispatch(
-        "graph_query",
-        {"entity": "Allowed", "depth": 3},
-        vault_root,
-        graph,
-        enforcer=_restricted(vault_root),
-    )
-    assert result["entity"]["label"] == "Allowed"
-    assert result["outgoing"] == result["incoming"] == result["neighbors"] == []
-    hidden = _dispatch(
-        "graph_query",
-        {"entity": "Hidden"},
-        vault_root,
-        graph,
-        enforcer=_restricted(vault_root),
-    )
-    assert hidden == {"entity": None, "outgoing": [], "incoming": [], "neighbors": []}
-    assert nx.utils.graphs_equal(before, graph._graph)
-
-
-def test_graph_filters_edges_before_shortest_path(
-    vault_root: Path, knowledge_graph: KnowledgeGraph
+@pytest.mark.parametrize("unknown_first", [True, False])
+def test_unknown_graph_contributions_deny_restricted_consumers(
+    vault_root: Path, knowledge_graph: KnowledgeGraph, unknown_first: bool
 ) -> None:
     graph = knowledge_graph
     source = "02-projects/project.md"
-    for label in ("A", "B", "C"):
-        graph.add_entity(label, "concept", source_note=source)
-    graph.add_relationship("A", "C", source_note=source)
-    graph.add_relationship("A", "C", source_note="00-inbox/note1.md")
-    graph.add_relationship("A", "B", source_note="./" + source)
-    graph.add_relationship("B", "C", source_note=str(vault_root / source))
-    args = {"source": "A", "target": "C"}
-    assert _dispatch("graph_path", args, vault_root, graph)["path"] == ["A", "C"]
-    result = _dispatch("graph_path", args, vault_root, graph, enforcer=_restricted(vault_root))
-    assert result == {"path": ["A", "B", "C"], "length": 2}
-    result = _dispatch("vault_stats", {}, vault_root, graph, enforcer=_restricted(vault_root))
-    assert result["graph"] == {"entities": 3, "edges": 2}
+    for origin in ("", source) if unknown_first else (source, ""):
+        confidence = 0.7 if origin else 0.95
+        for label in ("A", "B"):
+            graph.add_entity(
+                label,
+                "concept",
+                source_note=origin,
+                confidence=confidence,
+                **({} if origin else {"private_context": "UNPROVENANCED"}),
+            )
+        graph.add_relationship(
+            "A",
+            "B",
+            source_note=origin,
+            confidence=confidence,
+            relation="related_to" if origin else "depends_on",
+        )
+    # An all-allowed source list does not account for the retained unknown data.
+    full = _dispatch("graph_query", {"entity": "A"}, vault_root, graph)
+    assert full["entity"]["source_notes"] == [source]
+    assert full["entity"]["private_context"] == "UNPROVENANCED"
+    assert full["entity"]["confidence"] == 0.95
+    assert full["outgoing"] == [
+        {
+            "target": "B",
+            "relation": "depends_on" if unknown_first else "related_to",
+            "confidence": 0.95,
+        }
+    ]
+    assert _dispatch("graph_path", {"source": "A", "target": "B"}, vault_root, graph) == {
+        "path": ["A", "B"],
+        "length": 1,
+    }
+    assert _dispatch("vault_stats", {}, vault_root, graph)["graph"] == {"entities": 2, "edges": 1}
+    for tool, arguments in (
+        ("graph_query", {"entity": "A"}),
+        ("graph_path", {"source": "A", "target": "B"}),
+        ("vault_stats", {}),
+    ):
+        with pytest.raises(ProfileError, match="complete note provenance"):
+            _dispatch(tool, arguments, vault_root, graph, enforcer=_restricted(vault_root))
 
 
 def test_aggregate_notes_authorize_and_deduplicate_aliases(
@@ -480,13 +465,11 @@ def test_aggregate_notes_authorize_and_deduplicate_aliases(
     (allowed.parent / "alias.md").symlink_to(allowed)
     (allowed.parent / "private-alias.md").symlink_to(vault_root / "00-inbox" / "note1.md")
     (allowed.parent / "missing.md").symlink_to(vault_root / "missing.md")
-    stats = _dispatch(
-        "vault_stats", {}, vault_root, knowledge_graph, enforcer=_restricted(vault_root)
-    )
+    stats = _dispatch("vault_stats", {}, vault_root, knowledge_graph)
     assert stats == {
-        "total_notes": 1,
-        "by_type": {"permanent": 1},
-        "by_folder": {"02-projects": 1},
+        "total_notes": 3,
+        "by_type": {"fleeting": 1, "literature": 1, "permanent": 1},
+        "by_folder": {"00-inbox": 2, "02-projects": 1},
         "graph": {"entities": 0, "edges": 0},
     }
     activity = _dispatch(
@@ -500,7 +483,17 @@ def test_aggregate_notes_authorize_and_deduplicate_aliases(
     assert activity["created_count"] + activity["modified_count"] == 1
 
 
-@pytest.mark.parametrize("tool", ["episode_query", "workflow_suggest", "graph_evolution"])
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "graph_query",
+        "graph_path",
+        "vault_stats",
+        "episode_query",
+        "workflow_suggest",
+        "graph_evolution",
+    ],
+)
 def test_unscopable_capabilities_deny_before_dependency_lookup(
     tool: str, vault_root: Path, knowledge_graph: KnowledgeGraph
 ) -> None:
@@ -525,34 +518,3 @@ def test_derived_dispatch_without_enforcement_fails_closed(
 ) -> None:
     with pytest.raises(ProfileError, match="requires profile enforcement"):
         _dispatch(tool, {}, vault_root, knowledge_graph, enforcer=None)
-
-
-@pytest.mark.parametrize(
-    "provenance",
-    [
-        None,
-        [],
-        [False],
-        ["02-projects/missing.md"],
-        ["02-projects/project.md", "00-inbox/note1.md"],
-    ],
-)
-def test_graph_edge_provenance_is_independent_of_allowed_endpoints(
-    vault_root: Path, knowledge_graph: KnowledgeGraph, provenance: object
-) -> None:
-    graph = knowledge_graph
-    for label in ("A", "B"):
-        graph.add_entity(label, "concept", source_note="02-projects/project.md")
-    graph.add_relationship("A", "B", source_note="02-projects/project.md")
-    graph._graph.edges["a", "b"]["source_notes"] = provenance
-    scope = _restricted(vault_root)
-    result = _dispatch("graph_query", {"entity": "A"}, vault_root, graph, enforcer=scope)
-    assert result["entity"]["label"] == "A"
-    assert result["outgoing"] == []
-    assert _dispatch(
-        "graph_path", {"source": "A", "target": "B"}, vault_root, graph, enforcer=scope
-    ) == {"path": None, "message": "No path found between entities"}
-    assert _dispatch("vault_stats", {}, vault_root, graph, enforcer=scope)["graph"] == {
-        "entities": 2,
-        "edges": 0,
-    }

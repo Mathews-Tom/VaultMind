@@ -557,53 +557,17 @@ def _require_enforcer(name: str, enforcer: ProfileEnforcer | None) -> ProfileEnf
 
 
 def _require_global_provenance(name: str, enforcer: ProfileEnforcer | None) -> None:
-    """Deny global producers whose records cannot prove complete note ownership."""
+    """Deny producers without complete provenance before inspecting global data.
+
+    Graph source lists can omit unknown contributions to merged attributes.
+    Even a nonempty all-allowed list cannot authorize those records or aggregates.
+    """
     scope = _require_enforcer(name, enforcer)
     if not scope.policy.allows_all_folders:
         raise ProfileError(
             f"Tool '{name}' is unavailable for folder-restricted profiles: "
             "complete note provenance is unavailable"
         )
-
-
-def _result_graph(graph: KnowledgeGraph, scope: ProfileEnforcer) -> KnowledgeGraph:
-    """Authorize whole merged records before any graph traversal or aggregation.
-
-    A merged label, confidence or relation cannot be split back into per-note
-    contributions. Every source of each node AND edge must therefore be allowed.
-    The independent projection keeps query operations off the persistent graph.
-    Wildcard profiles retain the existing global graph semantics.
-    """
-    if scope.policy.allows_all_folders:
-        return graph
-    from copy import copy
-
-    def sources(data: dict[str, Any]) -> list[str] | None:
-        provenance = data.get("source_notes")
-        if not isinstance(provenance, list) or not provenance:
-            return None
-        paths: set[str] = set()
-        for source in provenance:
-            path = scope.note_path(source)
-            if path is None:
-                return None
-            paths.add(str(path))
-        return sorted(paths)
-
-    projected = graph._graph.__class__()
-    for node, data in graph._graph.nodes(data=True):
-        verified = sources(data)
-        if verified is not None:
-            projected.add_node(node, **{**data, "source_notes": verified})
-    for source, target, data in graph._graph.edges(data=True):
-        if source not in projected or target not in projected:
-            continue
-        verified = sources(data)
-        if verified is not None:
-            projected.add_edge(source, target, **{**data, "source_notes": verified})
-    result = copy(graph)
-    result._graph = projected
-    return result
 
 
 def _result_note_paths(scope: ProfileEnforcer) -> list[Path]:
@@ -838,12 +802,12 @@ def _dispatch_tool(
         }
 
     elif name == "graph_query":
-        scope = _require_enforcer(name, enforcer)
-        return _result_graph(graph, scope).get_neighbors(args["entity"], depth=args.get("depth", 1))
+        _require_global_provenance(name, enforcer)
+        return graph.get_neighbors(args["entity"], depth=args.get("depth", 1))
 
     elif name == "graph_path":
-        scope = _require_enforcer(name, enforcer)
-        path = _result_graph(graph, scope).find_path(args["source"], args["target"])
+        _require_global_provenance(name, enforcer)
+        path = graph.find_path(args["source"], args["target"])
         if path:
             return {"path": path, "length": len(path) - 1}
         return {"path": None, "message": "No path found between entities"}
@@ -1013,6 +977,7 @@ def _dispatch_tool(
         return {"status": "ok", "path": rel_path, "title": title}
 
     elif name == "vault_stats":
+        _require_global_provenance(name, enforcer)
         scope = _require_enforcer(name, enforcer)
         by_type: dict[str, int] = {}
         by_folder: dict[str, int] = {}
@@ -1036,7 +1001,7 @@ def _dispatch_tool(
                             break
             except Exception:
                 pass
-        graph_stats = _result_graph(graph, scope).stats
+        graph_stats = graph.stats
         graph_info = {"entities": graph_stats["nodes"], "edges": graph_stats["edges"]}
         return {
             "total_notes": total,
