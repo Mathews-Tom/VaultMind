@@ -37,7 +37,9 @@ def reviewed_clone(tmp_path: Path) -> Path:
     return clone
 
 
-def run_case(script: Path, directory: Path) -> tuple[subprocess.CompletedProcess[str], dict]:
+def run_case(
+    script: Path, directory: Path, *, case: str = "retrieval"
+) -> tuple[subprocess.CompletedProcess[str], dict]:
     receipt = directory / "receipt.json"
     env = dict(os.environ, HOME=str(directory), VAULTMIND_HOME=str(directory / "unused"))
     done = subprocess.run(
@@ -46,7 +48,7 @@ def run_case(script: Path, directory: Path) -> tuple[subprocess.CompletedProcess
             "-I",
             str(script),
             "--case",
-            "retrieval",
+            case,
             "--offline",
             "--receipt-out",
             str(receipt),
@@ -99,8 +101,35 @@ def test_retrieval_from_foreign_cwd_keeps_state_isolated(
     assert receipt["artifact"]["runtime"]["interpreter"]["executable"] == sys.executable
 
 
+def test_missing_reviewed_dependency_asset_fails(reviewed_clone: Path, tmp_path: Path) -> None:
+    (reviewed_clone / "uv.lock").unlink()
+    done, receipt = run_case(reviewed_clone / "scripts" / SCRIPT.name, tmp_path)
+    assert done.returncode != 0
+    assert receipt["result"] == "fail"
+    assert "uv.lock" in receipt["failure"]
+    assert receipt["checks"] == []
+
+
+def test_approval_without_committed_migration_history_fails(tmp_path: Path) -> None:
+    clone = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--depth", "1", ROOT.as_uri(), str(clone)],
+        check=True,
+        capture_output=True,
+    )
+    shutil.copyfile(SCRIPT, clone / "scripts" / SCRIPT.name)
+    done, receipt = run_case(clone / "scripts" / SCRIPT.name, tmp_path, case="approval")
+    assert done.returncode != 0
+    assert receipt["result"] == "fail"
+    assert "committed legacy review_proposals schema" in receipt["failure"]
+    outcomes = {check["id"]: check["actual"] for check in receipt["checks"]}
+    assert outcomes["cli.auto-tag-exit-code"] == 0
+    assert outcomes["cli.nothing-applied-while-pending"] == ["original"]
+
+
+@pytest.mark.parametrize("sibling_present", [True, False])
 def test_mcp_launcher_consumes_sibling_script_without_resolving_interpreter(
-    tmp_path: Path,
+    tmp_path: Path, sibling_present: bool
 ) -> None:
     spec = importlib.util.spec_from_file_location("acceptance_entrypoint", SCRIPT)
     assert spec is not None and spec.loader is not None
@@ -119,17 +148,25 @@ def test_mcp_launcher_consumes_sibling_script_without_resolving_interpreter(
     sibling = binary / "vaultmind"
     original = Path(sys.executable).parent / "vaultmind"
     # Change the *actual consumed script*: Click must see --version, not requested --help.
-    sibling.write_text('import sys\nsys.argv[1:] = ["--version"]\n' + original.read_text())
+    if sibling_present:
+        sibling.write_text('import sys\nsys.argv[1:] = ["--version"]\n' + original.read_text())
     state = tmp_path / "state"
     state.mkdir()
     done = subprocess.run(
         [str(python), "-I", "-c", verifier.MCP_LAUNCHER, str(state), "--help"],
         cwd=tmp_path,
-        env={"HOME": str(tmp_path), "ANONYMIZED_TELEMETRY": "False"},
+        env=verifier.offline_environment(tmp_path),
         capture_output=True,
         text=True,
         timeout=30,
     )
+    if not sibling_present:
+        assert done.returncode != 0
+        assert "FileNotFoundError" in done.stderr
+        assert str(sibling) in done.stderr
+        events = [json.loads(line) for line in (state / "launcher.jsonl").read_text().splitlines()]
+        assert not any(event["kind"] == "console-script" for event in events)
+        return
     from click.testing import CliRunner
 
     from vaultmind.cli import cli
