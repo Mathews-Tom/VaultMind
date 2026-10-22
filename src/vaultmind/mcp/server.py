@@ -556,6 +556,30 @@ def _require_enforcer(name: str, enforcer: ProfileEnforcer | None) -> ProfileEnf
     return enforcer
 
 
+def _require_global_provenance(name: str, enforcer: ProfileEnforcer | None) -> None:
+    """Deny producers without complete provenance before inspecting global data.
+
+    Graph source lists can omit unknown contributions to merged attributes.
+    Even a nonempty all-allowed list cannot authorize those records or aggregates.
+    """
+    scope = _require_enforcer(name, enforcer)
+    if not scope.policy.allows_all_folders:
+        raise ProfileError(
+            f"Tool '{name}' is unavailable for folder-restricted profiles: "
+            "complete note provenance is unavailable"
+        )
+
+
+def _result_note_paths(scope: ProfileEnforcer) -> list[Path]:
+    """Canonicalize verified notes before counts; aliases never inflate aggregates."""
+    paths: set[Path] = set()
+    for key in scope.note_paths():
+        path = scope.note_path(key)
+        if path is not None and not any(part.startswith(".") for part in path.parts):
+            paths.add(path)
+    return sorted(paths)
+
+
 def _capture_destination(scope: ProfileEnforcer, destination: Path, vault_path: Path) -> Path:
     """Authorize a computed destination without disclosing generated or resolved paths."""
     try:
@@ -778,10 +802,11 @@ def _dispatch_tool(
         }
 
     elif name == "graph_query":
-        result = graph.get_neighbors(args["entity"], depth=args.get("depth", 1))
-        return result
+        _require_global_provenance(name, enforcer)
+        return graph.get_neighbors(args["entity"], depth=args.get("depth", 1))
 
     elif name == "graph_path":
+        _require_global_provenance(name, enforcer)
         path = graph.find_path(args["source"], args["target"])
         if path:
             return {"path": path, "length": len(path) - 1}
@@ -952,15 +977,14 @@ def _dispatch_tool(
         return {"status": "ok", "path": rel_path, "title": title}
 
     elif name == "vault_stats":
+        _require_global_provenance(name, enforcer)
+        scope = _require_enforcer(name, enforcer)
         by_type: dict[str, int] = {}
         by_folder: dict[str, int] = {}
         total = 0
-        for md in vault_path.rglob("*.md"):
-            rel = md.relative_to(vault_path)
+        for rel in _result_note_paths(scope):
+            md = vault_path.resolve() / rel
             parts = rel.parts
-            # Skip excluded folders
-            if any(p.startswith(".") for p in parts):
-                continue
             total += 1
             folder_name = str(parts[0]) if len(parts) > 1 else "(root)"
             by_folder[folder_name] = by_folder.get(folder_name, 0) + 1
@@ -987,6 +1011,7 @@ def _dispatch_tool(
         }
 
     elif name == "episode_query":
+        _require_global_provenance(name, enforcer)
         if episode_store is None:
             return {"error": "Episodic memory is not configured"}
         from vaultmind.memory.store import EpisodeStore
@@ -1023,6 +1048,7 @@ def _dispatch_tool(
         }
 
     elif name == "workflow_suggest":
+        _require_global_provenance(name, enforcer)
         if procedural_memory is None:
             return {"error": "Procedural memory is not configured"}
         from vaultmind.memory.procedural import ProceduralMemory
@@ -1044,6 +1070,7 @@ def _dispatch_tool(
         }
 
     elif name == "graph_evolution":
+        _require_global_provenance(name, enforcer)
         if evolution_detector is None:
             return {"error": "Evolution detection is not configured"}
         from vaultmind.graph.evolution import EvolutionDetector
@@ -1071,15 +1098,15 @@ def _dispatch_tool(
     elif name == "recent_activity":
         from datetime import datetime
 
+        scope = _require_enforcer(name, enforcer)
+
         days = args.get("days", 7)
         cutoff = datetime.now().timestamp() - (days * 86400)
         created: list[str] = []
         modified: list[str] = []
-        for md in vault_path.rglob("*.md"):
-            rel_path_parts = md.relative_to(vault_path).parts
-            if any(p.startswith(".") for p in rel_path_parts):
-                continue
-            rel_str = str(md.relative_to(vault_path))
+        for rel in _result_note_paths(scope):
+            md = vault_path.resolve() / rel
+            rel_str = str(rel)
             stat = md.stat()
             # st_birthtime is macOS-only; fall back to st_ctime on Linux
             birth = getattr(stat, "st_birthtime", stat.st_ctime)

@@ -294,7 +294,7 @@ class TestDispatcherRequiresEnforcer:
         checks: list[dict] = []
         receipt = asyncio.run(
             acceptance.mcp_factory_none_handlers(
-                tmp_path.resolve() / "factory", acceptance.make_checker(checks)
+                tmp_path.resolve() / "factory", acceptance.make_checker(checks), all_calls={}
             )
         )
         assert set(receipt) == {"read_frontmatter", "list_folder_index", "follow_links"}

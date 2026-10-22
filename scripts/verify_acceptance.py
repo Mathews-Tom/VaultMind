@@ -407,6 +407,7 @@ MCP_ROOT_SCENARIOS = (
     "root-capture-symlink",
     "root-capture-size",
 )
+MCP_DERIVED_SCENARIOS = ("derived-scoped", "derived-full", "derived-writes")
 MCP_TRAVERSAL_TOOLS = ("read_frontmatter", "list_folder_index", "follow_links")
 MCP_HUB_SENTINEL = "HUB-BODY-SENTINEL-7f3a91"
 MCP_ISO = "<iso-datetime>"
@@ -651,6 +652,52 @@ if embedding_fixture.exists():
 
     Embedder._embed_texts_uncached = offline_embeddings
     emit(kind="embedding-fixture", dimensions=len(vector))
+
+# Read-only observation, not dependency injection: bind real producer entry and buffer
+# state to each dispatch. No arguments, return values or producer state are modified.
+if embedding_fixture.exists():
+    producer_methods = {
+        "vaultmind.memory.store": {"query_pending", "query_resolved", "search_by_entity"},
+        "vaultmind.memory.procedural": {"suggest_workflow"},
+        "vaultmind.graph.evolution": {"scan"},
+    }
+
+    def dispatch_state(frame):
+        result = {}
+        for name, attribute in (
+            ("duplicate_detector", "_results"),
+            ("note_suggester", "_results"),
+            ("evolution_detector", "_dismissed"),
+        ):
+            obj = frame.f_locals.get(name)
+            if obj is not None:
+                value = getattr(obj, attribute)
+                encoded = json.dumps(
+                    sorted(value) if isinstance(value, set) else value,
+                    sort_keys=True, default=str,
+                )
+                result[name] = {
+                    "count": len(value),
+                    "sha256": hashlib.sha256(encoded.encode()).hexdigest(),
+                }
+        graph = frame.f_locals["graph"]._graph
+        import networkx as nx
+        result["graph"] = hashlib.sha256(
+            json.dumps(nx.node_link_data(graph, edges="edges"), sort_keys=True).encode()
+        ).hexdigest()
+        return result
+
+    def observe(frame, event, arg):
+        module = frame.f_globals.get("__name__")
+        method = frame.f_code.co_name
+        if module == "vaultmind.mcp.server" and method == "_dispatch_tool":
+            if event in ("call", "return"):
+                emit(kind="dispatch-state", event=event,
+                     tool=frame.f_locals["name"], state=dispatch_state(frame))
+        elif event == "call" and method in producer_methods.get(module, ()):
+            emit(kind="producer-entry", module=module, method=method)
+
+    sys.setprofile(observe)
 
 code = 0
 try:
@@ -1365,6 +1412,8 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
 
 def mcp_root_snapshot(fixture: dict[str, Any]) -> dict[str, Any]:
     """Logical fixture state: include empty directories, symlinks and all indexed metadata."""
+    import subprocess
+
     trees: dict[str, Any] = {}
     for key in ("vault", "outside"):
         root = fixture[key]
@@ -1378,17 +1427,526 @@ def mcp_root_snapshot(fixture: dict[str, Any]) -> dict[str, Any]:
             )
             for p in sorted(root.rglob("*"))
         }
-    records = fixture["store"]._collection.get(include=["documents", "metadatas", "embeddings"])
-    trees["index"] = sorted(
-        [
-            chunk_id,
-            records["documents"][i],
-            records["metadatas"][i],
-            [float(value) for value in records["embeddings"][i]],
-        ]
-        for i, chunk_id in enumerate(records["ids"])
+    # A cached Chroma HNSW reader misses vectors committed by the stdio process.
+    # Read persisted records in a fresh process; never truncate or omit embeddings.
+    reader = r"""
+import json
+import sys
+
+attempts = []
+def guard(event, arguments):
+    if event in ("socket.connect", "socket.getaddrinfo", "socket.gethostbyname"):
+        attempts.append(event)
+        raise RuntimeError("Network forbidden in index snapshot: " + event)
+sys.addaudithook(guard)
+
+import chromadb
+from chromadb.config import Settings
+
+client = chromadb.PersistentClient(
+    path=sys.argv[1], settings=Settings(anonymized_telemetry=False)
+)
+collection = client.get_collection(sys.argv[2])
+records = collection.get(include=["documents", "metadatas", "embeddings"])
+rows = sorted(
+    [key, document, metadata, [float(value) for value in embedding]]
+    for key, document, metadata, embedding in zip(
+        records["ids"], records["documents"], records["metadatas"],
+        records["embeddings"], strict=True
     )
+)
+if attempts:
+    raise RuntimeError("Index snapshot attempted network access: " + repr(attempts))
+print(json.dumps(rows))
+"""
+    config = fixture["store"].config
+    snapshot = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            reader,
+            str(config.persist_dir),
+            config.collection_name,
+        ],
+        cwd=fixture["vault"].parent,
+        env={
+            "HOME": str(fixture["vault"].parent),
+            "PATH": os.environ["PATH"],
+            "ANONYMIZED_TELEMETRY": "False",
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    trees["index"] = json.loads(snapshot.stdout)
     return trees
+
+
+def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    """Persist adversarial provenance and substantive real optional producer data."""
+    import networkx as nx
+
+    from vaultmind.config import GraphConfig
+    from vaultmind.graph.knowledge_graph import KnowledgeGraph
+    from vaultmind.memory.models import OutcomeStatus
+    from vaultmind.memory.procedural import ProceduralMemory
+    from vaultmind.memory.store import EpisodeStore
+    from vaultmind.tracking.preferences import Interaction, InteractionType, PreferenceStore
+
+    full = name == "derived-full"
+    spec, fixture, config = mcp_root_fixture(root, "root-full" if full else "root-scoped")
+    vault = fixture["vault"]
+    source = next(path for path in fixture["corpus"] if path.endswith("/source.md"))
+    peer, private = "02-projects/peer.md", "03-private/closer-00.md"
+    for path in ("02-projects/typed.md", ".hidden/hidden.md", "02-projects/.hidden.md"):
+        content = "---\ntype: project\n---\n# Typed\n"
+        target = vault / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        fixture["corpus"][path] = digest(content.encode())
+    graph_path = root / "data" / "graph.json"
+    graph = KnowledgeGraph(GraphConfig(persist_path=graph_path))
+    # The real node-link loader supports multigraphs. Two parallel edges engage
+    # scan's confidence drift and relationship shift rather than an empty control.
+    graph._graph = nx.MultiDiGraph()
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[tuple[str, str, dict[str, Any]]] = []
+    missing = object()
+
+    def node(label: str, provenance: Any = missing) -> None:
+        attrs: dict[str, Any] = {"label": label, "type": "concept", "confidence": 1.0}
+        if provenance is not missing:
+            attrs["source_notes"] = provenance
+        nodes[label] = attrs
+        graph._graph.add_node(label.lower(), **attrs)
+
+    def edge(
+        a: str,
+        b: str,
+        provenance: Any = missing,
+        *,
+        relation: str = "related_to",
+        confidence: float = 1.0,
+    ) -> None:
+        attrs: dict[str, Any] = {"relation": relation, "confidence": confidence}
+        if provenance is not missing:
+            attrs["source_notes"] = provenance
+        edges.append((a, b, attrs))
+        graph._graph.add_edge(a.lower(), b.lower(), **attrs)
+
+    node("Start", [source])
+    node("Middle", ["./" + peer, str(vault / peer), "02-projects/allowed-alias.md"])
+    node("Finish", ["02-projects/typed.md"])
+    node("EdgeOnly", [peer])
+    edge("Start", "Middle", ["./" + source, source])
+    edge("Middle", "Finish", [peer])
+    bad_sources = [
+        missing,
+        [],
+        peer,
+        42,
+        None,
+        {"note": source},
+        [42],
+        [False],
+        [""],
+        [source, 42],
+        ["02-projects/missing.md"],
+        [source, "02-projects/missing.md"],
+        [source, private],
+        [private],
+        ["02-projects/private-alias.md"],
+        ["../outside/outside.md"],
+        [str(fixture["outside"] / "outside.md")],
+        ["02-projects/outside-alias.md"],
+        ["02-projects/broken-alias.md"],
+        ["02-projects/loop.md"],
+        ["02-projects/not-markdown.txt"],
+        ["02-projects"],
+    ]
+    for i, provenance in enumerate(bad_sources):
+        label = f"DERIVED-REJECTED-{i:02d}"
+        node(label, provenance)
+        edge("Start", label, [source])
+        # Two valid endpoints make edge authorization independently necessary.
+        edge("Start", "EdgeOnly", provenance)
+    edge("Start", "Finish", [source, private])
+    node("DriftA", [private])
+    node("DriftB", [private])
+    edge("DriftA", "DriftB", [source], relation="depends_on", confidence=0.1)
+    edge("DriftA", "DriftB", [private], relation="competes_with", confidence=0.9)
+    # Real producer merges omit unknown contributions from otherwise allowed source
+    # lists. Transfer their complete records into the persisted multigraph without
+    # changing attributes; retain the independent parallel-edge evolution controls.
+    producer = KnowledgeGraph(GraphConfig(persist_path=root / "merge-producer.json"))
+    for order in ("UnknownFirst", "AllowedFirst"):
+        a, b = order + "A", order + "B"
+        unknown_first = order == "UnknownFirst"
+        marker = "UNPROVENANCED-FIRST" if unknown_first else "UNPROVENANCED-SECOND"
+        for origin in ("", source) if unknown_first else (source, ""):
+            for label in (a, b):
+                producer.add_entity(
+                    label,
+                    "concept",
+                    source_note=origin,
+                    confidence=0.7 if origin else 0.95,
+                    **({} if origin else {"private_context": marker}),
+                )
+            producer.add_relationship(
+                a,
+                b,
+                relation="related_to" if origin else "depends_on",
+                source_note=origin,
+                confidence=0.7 if origin else 0.95,
+            )
+        for label in (a, b):
+            nodes[label] = {
+                "label": label,
+                "type": "concept",
+                "confidence": 0.95,
+                "source_notes": [source],
+                "private_context": marker,
+            }
+        edges.append(
+            (
+                a,
+                b,
+                {
+                    "relation": "depends_on" if unknown_first else "related_to",
+                    "confidence": 0.95,
+                    "source_notes": [source],
+                },
+            )
+        )
+    graph._graph.update(producer._graph)
+    graph.save()
+    dismissed = root / ".vaultmind" / "data" / "evolution_dismissed.json"
+    dismissed.parent.mkdir(parents=True, exist_ok=True)
+    dismissed.write_text('{"dismissed": ["fixture-unrelated-dismissal"]}\n', encoding="utf-8")
+    episodes_path, workflows_path, preferences_path = (
+        root / "data" / filename for filename in ("episodes.db", "procedural.db", "preferences.db")
+    )
+    episodes = EpisodeStore(episodes_path)
+    episode = episodes.create(
+        "DERIVED-PRIVATE-DECISION",
+        context="DERIVED-PRIVATE-CONTEXT",
+        entities=["DriftA"],
+        source_notes=[source, private],
+    )
+    episodes.resolve(
+        episode.episode_id,
+        "DERIVED-PRIVATE-OUTCOME",
+        OutcomeStatus.SUCCESS,
+        ["DERIVED-PRIVATE-LESSON"],
+    )
+    resolved = episodes.get(episode.episode_id)
+    assert resolved is not None
+    pending = episodes.create("DERIVED-PENDING", entities=["DriftA"])
+    workflows = ProceduralMemory(workflows_path)
+    workflow = workflows.create_workflow(
+        "DERIVED-PRIVATE-WORKFLOW",
+        "DERIVED-PRIVATE-DESCRIPTION",
+        ["DERIVED-PRIVATE-STEP"],
+        "harbor winter",
+        [episode.episode_id],
+    )
+    preferences = PreferenceStore(preferences_path)
+    preferences.record(Interaction(InteractionType.SEARCH, "DERIVED-PRIVATE-INTERACTION"))
+    for producer in (episodes, workflows, preferences):
+        producer.close()
+    fixture["business"] = [episodes_path, workflows_path, preferences_path]
+    fixture["immutable_files"] = [graph_path, dismissed]
+    derived_tools = [
+        "graph_query",
+        "graph_path",
+        "vault_stats",
+        "episode_query",
+        "workflow_suggest",
+        "graph_evolution",
+        "recent_activity",
+    ]
+    text = config.read_text(encoding="utf-8").replace(
+        '"read_frontmatter", "list_folder_index", "follow_links"]',
+        '"read_frontmatter", "list_folder_index", "follow_links", '
+        + ", ".join(json.dumps(tool) for tool in derived_tools)
+        + "]",
+    )
+    text += (
+        f"\n[episodic]\nenabled = true\ndb_path = {json.dumps(str(episodes_path))}\n"
+        f"[procedural]\nenabled = true\ndb_path = {json.dumps(str(workflows_path))}\n"
+        f"[tracking]\nenabled = true\ndb_path = {json.dumps(str(preferences_path))}\n"
+        "[evolution]\nenabled = true\nconfidence_drift_threshold = 0.3\n"
+    )
+    config.write_text(text, encoding="utf-8")
+    calls: list[dict[str, Any]] = []
+
+    def call(
+        tool: str, arguments: dict[str, Any], expected: dict[str, Any], policy: str = "filter"
+    ) -> None:
+        if not full and tool in {"graph_query", "graph_path", "vault_stats"}:
+            expected, policy = {"error": True}, "deny"
+        denied = policy == "deny"
+        calls.append(
+            {
+                "tool": tool,
+                "arguments": arguments,
+                "expected": expected,
+                "audit": "DENIED" if denied else "OK",
+                "kind": "denied" if denied else None,
+                "policy": "allow" if full and not denied else policy,
+            }
+        )
+
+    safe_labels = {"Start", "Middle", "Finish", "EdgeOnly"}
+
+    def neighborhood(label: str, depth: int = 1) -> dict[str, Any]:
+        if label not in nodes:
+            return {"entity": None, "outgoing": [], "incoming": [], "neighbors": []}
+        near = {label}
+        for _ in range(depth):
+            previous = set(near)
+            near |= {b for a, b, _ in edges if a in previous}
+            near |= {a for a, b, _ in edges if b in previous}
+        return {
+            "entity": {"id": label.lower(), **nodes[label]},
+            "outgoing": [
+                {"target": b, "relation": attrs["relation"], "confidence": attrs["confidence"]}
+                for a, b, attrs in edges
+                if a == label
+            ],
+            "incoming": [
+                {"source": a, "relation": attrs["relation"], "confidence": attrs["confidence"]}
+                for a, b, attrs in edges
+                if b == label
+            ],
+            "neighbors": [{"id": other.lower(), **nodes[other]} for other in sorted(near - {label})]
+            if depth > 1
+            else [],
+        }
+
+    call("graph_query", {"entity": "Start", "depth": 2}, neighborhood("Start", 2))
+    call("graph_query", {"entity": "Middle"}, neighborhood("Middle"))
+    for label in nodes:
+        if label not in safe_labels:
+            call("graph_query", {"entity": label}, neighborhood(label))
+    for order in ("UnknownFirst", "AllowedFirst"):
+        call(
+            "graph_path",
+            {"source": order + "A", "target": order + "B"},
+            {"path": [order + "A", order + "B"], "length": 1},
+        )
+    call(
+        "graph_path",
+        {"source": "Start", "target": "Finish"},
+        {"path": ["Start", "Finish"], "length": 1},
+    )
+    call(
+        "graph_path",
+        {"source": "Start", "target": "EdgeOnly"},
+        {"path": ["Start", "EdgeOnly"], "length": 1},
+    )
+    canonical_notes = sorted(
+        p
+        for p in fixture["corpus"]
+        if not any(part.startswith(".") for part in Path(p).parts)
+        and (full or p.startswith("02-projects/"))
+    )
+    call(
+        "vault_stats",
+        {},
+        {
+            "total_notes": len(canonical_notes),
+            "by_type": {"project": 1},
+            "by_folder": {"02-projects": 4, "03-private": 16},
+            "graph": {"entities": len(nodes), "edges": len(edges)},
+        },
+    )
+    for days in (7, 0):
+        created = canonical_notes if days else []
+        call(
+            "recent_activity",
+            {"days": days},
+            {
+                "days": days,
+                "created": created,
+                "modified": [],
+                "created_count": len(created),
+                "modified_count": 0,
+            },
+        )
+
+    def episode_payload(ep: Any) -> dict[str, Any]:
+        return {
+            "episode_id": ep.episode_id,
+            "decision": ep.decision,
+            "context": ep.context,
+            "outcome": ep.outcome,
+            "status": ep.outcome_status.value,
+            "lessons": ep.lessons,
+            "entities": ep.entities,
+            "created": ep.created.isoformat(),
+        }
+
+    for arguments, selected in (
+        ({"status": "resolved", "limit": 1}, [resolved]),
+        ({"status": "pending", "limit": 1}, [pending]),
+        ({"entity": "DriftA", "limit": 1}, [pending]),
+        ({"entity": "nonexistent", "limit": 1}, []),
+    ):
+        call(
+            "episode_query",
+            arguments,
+            {"episodes": [episode_payload(ep) for ep in selected], "count": len(selected)}
+            if full
+            else {"error": True},
+            "allow" if full else "deny",
+        )
+    call(
+        "workflow_suggest",
+        {"context": "harbor winter"},
+        {
+            "workflow": {
+                "workflow_id": workflow.workflow_id,
+                "name": workflow.name,
+                "description": workflow.description,
+                "steps": workflow.steps,
+                "trigger_pattern": workflow.trigger_pattern,
+                "success_rate": 0.0,
+                "usage_count": 0,
+            },
+        }
+        if full
+        else {"error": True},
+        "allow" if full else "deny",
+    )
+    call(
+        "workflow_suggest",
+        {"context": "no matching terms"},
+        {"workflow": None, "message": "No matching workflow found"} if full else {"error": True},
+        "allow" if full else "deny",
+    )
+    signals = []
+    for kind, detail, severity in (
+        ("confidence_drift", "Confidence ranges from 0.1 to 0.9 across 2 source(s)", 1.0),
+        ("relationship_shift", "Relationship changed: competes_with vs depends_on", 0.8),
+    ):
+        raw = f"DriftA:DriftB:{kind}:{':'.join(sorted([source, private]))}"
+        signals.append(
+            {
+                "evolution_id": digest(raw.encode())[:16],
+                "entity_a": "DriftA",
+                "entity_b": "DriftB",
+                "signal_type": kind,
+                "detail": detail,
+                "severity": severity,
+                "source_notes": [source, private],
+            }
+        )
+    for threshold in (0.0, 0.9):
+        selected_signals = [s for s in signals if s["severity"] >= threshold]
+        call(
+            "graph_evolution",
+            {"min_severity": threshold},
+            {"signals": selected_signals, "count": len(selected_signals)}
+            if full
+            else {"error": True},
+            "allow" if full else "deny",
+        )
+    spec.update(
+        {
+            "name": name,
+            "calls": calls,
+            "forbidden": []
+            if full
+            else [
+                "DERIVED-REJECTED",
+                "DERIVED-PRIVATE",
+                "UNPROVENANCED",
+                "DERIVED-PENDING",
+                "DriftA",
+                "DriftB",
+                "ROOT-PRIVATE",
+                "03-private",
+                "closer-",
+            ],
+        }
+    )
+    if name == "derived-writes":
+        config.write_text(
+            config.read_text(encoding="utf-8").replace(
+                'folder_scope = ["02-projects"]', 'folder_scope = ["02-projects", "00-inbox"]'
+            ),
+            encoding="utf-8",
+        )
+        spec["calls"] = []
+        for tool, arguments, expected in (
+            (
+                "vault_write",
+                {
+                    "path": "02-projects/bounded-write.md",
+                    "content": "# Bounded Write\n\nAcceptance bounded write.\n",
+                },
+                {"status": "ok", "path": "02-projects/bounded-write.md"},
+            ),
+            (
+                "capture",
+                {"content": "Acceptance bounded capture.", "title": "Bounded Capture"},
+                {"status": "ok", "path": "<generated>"},
+            ),
+            (
+                "capture_note",
+                {
+                    "content": "Acceptance bounded structured capture.",
+                    "title": "Bounded Structured",
+                    "folder": "02-projects",
+                },
+                {"status": "ok", "path": "<generated>", "title": "Bounded Structured"},
+            ),
+        ):
+            spec["calls"].append(
+                {
+                    "tool": tool,
+                    "arguments": arguments,
+                    "expected": expected,
+                    "audit": "OK",
+                    "kind": None,
+                    "policy": "allow",
+                }
+            )
+    return spec, fixture, config
+
+
+def mcp_derived_snapshot(fixture: dict[str, Any]) -> dict[str, Any]:
+    """Canonical bytes + SQL business rows; audit appends alone are exempt."""
+    import sqlite3
+    from contextlib import closing
+
+    result = mcp_root_snapshot(fixture)
+    result["note_mtimes"] = {
+        str(path.relative_to(fixture["vault"])): path.stat().st_mtime_ns
+        for path in fixture["vault"].rglob("*")
+        if not path.is_symlink() and path.is_file()
+    }
+    result["immutable_files"] = {
+        str(path): [digest(path.read_bytes()), path.stat().st_mtime_ns]
+        for path in fixture["immutable_files"]
+    }
+    result["business"] = {}
+    for path in fixture["business"]:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
+            result["business"][str(path)] = list(connection.iterdump())
+    # Reopening an unchanged SQLite WAL can touch its clock without changing bytes.
+    # Keep journal bytes, full SQL state, and main-database clocks under the guard.
+    result["business_files"] = {
+        str(candidate): digest(candidate.read_bytes())
+        for path in fixture["business"]
+        for candidate in (path, Path(str(path) + "-wal"))
+        if candidate.exists()
+    }
+    result["business_mtimes"] = {str(path): path.stat().st_mtime_ns for path in fixture["business"]}
+    return result
 
 
 def mcp_scenario(name: str, root: Path) -> dict[str, Any]:
@@ -1827,6 +2385,10 @@ def mcp_normalize(tool: str, payload: Any) -> Any:
                 out[key] = sorted(
                     out[key], key=lambda link: (str(link.get("path")), str(link.get("title")))
                 )
+    if tool == "graph_query":
+        for key in ("outgoing", "incoming", "neighbors"):
+            if isinstance(out.get(key), list):
+                out[key] = sorted(out[key], key=lambda row: json.dumps(row, sort_keys=True))
     return out
 
 
@@ -1834,8 +2396,12 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
     """One actual subprocess lifecycle with per-call, per-frame and per-origin assertions."""
     from mcp.types import JSONRPCMessage
 
-    root_notes = name in MCP_ROOT_SCENARIOS
-    if root_notes:
+    derived = name in MCP_DERIVED_SCENARIOS
+    root_notes = name in MCP_ROOT_SCENARIOS or derived
+    if derived:
+        spec, fixture, config = mcp_derived_fixture(root, name)
+        before = mcp_derived_snapshot(fixture)
+    elif root_notes:
         spec, fixture, config = mcp_root_fixture(root, name)
         before = mcp_root_snapshot(fixture)
     else:
@@ -1853,10 +2419,48 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
     finally:
         mcp_restore_permissions(fixture)
     if root_notes:
+        after = mcp_derived_snapshot(fixture) if derived else mcp_root_snapshot(fixture)
+        if name == "derived-writes":
+            new_paths = []
+            for call_spec, result in zip(calls, run["results"], strict=True):
+                payload = json.loads(result.content[0].text)
+                path = payload.get("path", "")
+                destination = fixture["vault"] / path
+                check(
+                    name + "." + call_spec["tool"] + ".bounded-existing-file",
+                    True,
+                    destination.is_file()
+                    and destination.is_relative_to(fixture["vault"])
+                    and path not in before["vault"],
+                )
+                content = destination.read_text(encoding="utf-8")
+                check(
+                    name + "." + call_spec["tool"] + ".exact-body-persisted",
+                    True,
+                    call_spec["arguments"]["content"] in content,
+                )
+                new_paths.append(path)
+            check(name + ".three-distinct-writes", 3, len(set(new_paths)))
+            new_records = [r for r in after["index"] if r[0] not in {r[0] for r in before["index"]}]
+            check(
+                name + ".writes-real-indexed-paths",
+                sorted(
+                    [
+                        "02-projects/bounded-write.md",
+                        next(p for p in new_paths if "structured" in p),
+                    ]
+                ),
+                sorted({r[2]["note_path"] for r in new_records}),
+            )
+            after["index"] = [r for r in after["index"] if r not in new_records]
+            for path in new_paths:
+                after["vault"].pop(path)
+                after["note_mtimes"].pop(path)
+            after["vault"].pop("00-inbox", None)
         check(
             name + ".read-only-and-denied-mutations-state-unchanged",
             before,
-            mcp_root_snapshot(fixture),
+            after,
         )
     state: Path = run["state"]
     events = [
@@ -1874,6 +2478,43 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
             any(c["tool"] == "vault_search" and c["expected"].get("results") for c in calls),
             "vault_search" in run["embedding_boundary_tools"],
         )
+        states = [event for event in events if event["kind"] == "dispatch-state"]
+        check(name + ".dispatch-state.paired", 0, len(states) % 2)
+        if derived:
+            check(name + ".dispatch-state.complete", len(calls) * 2, len(states))
+        for position in range(len(states) // 2):
+            entry, exit_event = states[position * 2 : position * 2 + 2]
+            check(
+                f"{name}.{position}.dispatch-state.lifecycle",
+                [("call", entry["tool"]), ("return", entry["tool"])],
+                [(entry["event"], entry["tool"]), (exit_event["event"], exit_event["tool"])],
+            )
+            check(
+                f"{name}.{position}.producer-buffers-and-graph-unchanged",
+                entry["state"],
+                exit_event["state"],
+            )
+        entries = [event for event in events if event["kind"] == "producer-entry"]
+        if derived:
+            expected_entries = (
+                [
+                    ("vaultmind.memory.store", "query_resolved"),
+                    ("vaultmind.memory.store", "query_pending"),
+                    ("vaultmind.memory.store", "search_by_entity"),
+                    ("vaultmind.memory.store", "search_by_entity"),
+                    ("vaultmind.memory.procedural", "suggest_workflow"),
+                    ("vaultmind.memory.procedural", "suggest_workflow"),
+                    ("vaultmind.graph.evolution", "scan"),
+                    ("vaultmind.graph.evolution", "scan"),
+                ]
+                if name == "derived-full"
+                else []
+            )
+            check(
+                name + ".real-producer-entry-or-pre-producer-denial",
+                expected_entries,
+                [(event["module"], event["method"]) for event in entries],
+            )
     raw = (state / "stdout.raw").read_bytes().decode("utf-8")
     stderr = mcp_trim((state / "stderr.txt").read_text(encoding="utf-8"))
     stderr_startup = mcp_trim(run["stderr_startup"])
@@ -1983,7 +2624,21 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
                 and bool(payload["error"]),
             )
         else:
-            check(label + ".payload", mcp_normalize(tool, expected_call["expected"]), actual)
+            expected_payload = expected_call["expected"]
+            if expected_payload.get("path") == "<generated>":
+                path = payload.get("path", "")
+                pattern = (
+                    r"00-inbox/\d{8}-\d{6}-bounded-capture\.md"
+                    if tool == "capture"
+                    else r"02-projects/bounded-structured-\d{8}-\d{6}\.md"
+                )
+                check(
+                    label + ".generated-path-bounded",
+                    True,
+                    isinstance(path, str) and re.fullmatch(pattern, path) is not None,
+                )
+                expected_payload = {**expected_payload, "path": path}
+            check(label + ".payload", mcp_normalize(tool, expected_payload), actual)
             if tool == "vault_search":
                 distances = [hit["distance"] for hit in payload["results"]]
                 check(label + ".raw-distance-order", sorted(distances), distances)
@@ -2014,6 +2669,14 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
             {
                 "tool": tool,
                 "arguments": arguments,
+                "policy": expected_call.get(
+                    "policy",
+                    "deny"
+                    if "error" in payload
+                    else "allow"
+                    if spec["profile"] == "full"
+                    else "filter",
+                ),
                 "kind": kind,
                 "actual": actual,
                 "embedding_boundary_count": run["embedding_boundary_counts"][position],
@@ -2190,6 +2853,8 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         "stderr": stderr,
         "audit": audit,
         "calls": observed_calls,
+        "listed_tools": names,
+        "schemas": schemas,
         "stderr_oracle": {
             "forbidden": spec["stderr_forbidden"],
             "startup_leaks": startup_leaks,
@@ -2268,7 +2933,9 @@ def mcp_direct_dispatcher(root: Path, check: Any) -> None:
     )
 
 
-async def mcp_factory_none_handlers(root: Path, check: Any) -> dict[str, Any]:
+async def mcp_factory_none_handlers(
+    root: Path, check: Any, all_calls: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
     """Real ``create_mcp_server(enforcer=None)`` SDK request handler: named tools fail closed.
 
     Each request goes through the SDK-registered ``CallToolRequest`` handler (the same
@@ -2366,6 +3033,27 @@ async def mcp_factory_none_handlers(root: Path, check: Any) -> dict[str, Any]:
         and set(root_payload) == {"error"}
         and bool(root_payload["error"]),
     )
+    for tool, arguments in sorted(all_calls.items()):
+        _, payload, text = await invoke(none_server, tool, arguments)
+        check(
+            "factory.all-tools." + tool + ".error-only",
+            True,
+            isinstance(payload, dict)
+            and set(payload) == {"error"}
+            and isinstance(payload["error"], str)
+            and bool(payload["error"]),
+        )
+        check(
+            "factory.all-tools." + tool + ".missing-enforcer-not-producer-failure",
+            True,
+            "requires profile enforcement but none was supplied" in payload["error"],
+        )
+        check(
+            "factory.all-tools." + tool + ".private-fields-absent",
+            [],
+            mcp_leaks(text, protected, arguments),
+        )
+        receipt.setdefault(tool, {})["all_inventory_none_response"] = payload
     return receipt
 
 
@@ -2373,7 +3061,7 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     home = home.resolve()
     check = make_checker(checks)
     scenarios: dict[str, Any] = {}
-    for name in (*MCP_SCENARIOS, *MCP_ROOT_SCENARIOS):
+    for name in (*MCP_SCENARIOS, *MCP_ROOT_SCENARIOS, *MCP_DERIVED_SCENARIOS):
         scenarios[name] = await run_mcp_scenario(name, home / name, check)
     check(
         "root-scoped.forbidden-chunk-population-does-not-change-authorized-results",
@@ -2389,7 +3077,84 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
         ],
     )
     mcp_direct_dispatcher(home / "direct-dispatcher", check)
-    factory = await mcp_factory_none_handlers(home / "factory-none", check)
+    listed = set(scenarios["derived-full"]["listed_tools"])
+    observations: dict[str, list[dict[str, Any]]] = {tool: [] for tool in sorted(listed)}
+    all_calls: dict[str, dict[str, Any]] = {}
+    for name, scenario in scenarios.items():
+        check(
+            "inventory." + name + ".actual-list-tools-consistent",
+            sorted(listed),
+            sorted(scenario["listed_tools"]),
+        )
+        for position, call in enumerate(scenario["calls"]):
+            check(
+                "inventory." + name + f".{position}.executed-tool-listed",
+                True,
+                call["tool"] in listed,
+            )
+            all_calls.setdefault(call["tool"], call["arguments"])
+            observations[call["tool"]].append(
+                {
+                    "scenario": name,
+                    "call_index": position,
+                    "profile": scenario["profile"],
+                    "policy": call["policy"],
+                    "arguments": call["arguments"],
+                    "actual": call["actual"],
+                    "audit_result": call["audit"]["result"],
+                }
+            )
+    check("inventory.all-listed-tools-executed", sorted(listed), sorted(all_calls))
+    check("inventory.actual-tool-count", 18, len(listed))
+    for tool, rows in observations.items():
+        check(
+            "inventory." + tool + ".substantive-allow-or-filter-control",
+            True,
+            any("error" not in row["actual"] and row["audit_result"] == "OK" for row in rows),
+        )
+        if tool in {
+            "graph_query",
+            "graph_path",
+            "vault_stats",
+            "episode_query",
+            "workflow_suggest",
+            "graph_evolution",
+            "suggest_links",
+        }:
+            check(
+                "inventory." + tool + ".restricted-denial-and-full-positive",
+                True,
+                any(
+                    row["policy"] == "deny"
+                    and row["profile"] != "full"
+                    and row["audit_result"] == "DENIED"
+                    for row in rows
+                )
+                and any(
+                    row["profile"] == "full"
+                    and "error" not in row["actual"]
+                    and row["audit_result"] == "OK"
+                    for row in rows
+                ),
+            )
+        if tool == "recent_activity":
+            check(
+                "inventory." + tool + ".scoped-filter-and-global-positive",
+                True,
+                any(
+                    row["scenario"] == "derived-scoped"
+                    and row["policy"] == "filter"
+                    and row["audit_result"] == "OK"
+                    for row in rows
+                )
+                and any(
+                    row["scenario"] == "derived-full"
+                    and "error" not in row["actual"]
+                    and row["audit_result"] == "OK"
+                    for row in rows
+                ),
+            )
+    factory = await mcp_factory_none_handlers(home / "factory-none", check, all_calls)
     origins = {s["import_origin"] for s in scenarios.values()}
     check("origin.consistent-across-launches", 1, len(origins))
     return {
@@ -2397,6 +3162,46 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
         "import_origin": origins.pop(),
         "factory_none_handlers": factory,
         "scenarios": scenarios,
+        "policy_inventory": {
+            "source": "actual SDK list_tools plus executed, asserted call observations",
+            "tools": {
+                tool: {
+                    "folder_restricted_policy": (
+                        "deny"
+                        if tool
+                        in {
+                            "graph_query",
+                            "graph_path",
+                            "vault_stats",
+                            "episode_query",
+                            "workflow_suggest",
+                            "graph_evolution",
+                            "suggest_links",
+                        }
+                        else "filter"
+                        if tool
+                        in {
+                            "vault_search",
+                            "vault_list",
+                            "list_folder_index",
+                            "follow_links",
+                            "find_duplicates",
+                            "recent_activity",
+                        }
+                        else "allow"
+                    ),
+                    "full_policy": "allow",
+                    "path_and_write_guards": (
+                        "Root confinement, authorized canonical note paths, write_enabled, "
+                        "serialized size and capture destination guards remain applicable."
+                    ),
+                    "executed_observations": rows,
+                }
+                for tool, rows in observations.items()
+            },
+            "schemas": scenarios["derived-full"]["schemas"],
+            "read_only_audit_exception": "mcp_audit.jsonl append receipts",
+        },
         "child_network_attempts": [
             attempt for s in scenarios.values() for attempt in s["child_network_attempts"]
         ],
@@ -4561,16 +5366,18 @@ def main() -> int:
                 "over stdio_client"
             ),
             boundary_substitutions=[
-                "temporary HOME/vault/Chroma/graph/audit paths and explicit fixture TOML",
+                "temporary HOME/vault/Chroma/graph/SQLite/audit paths and explicit fixture TOML",
                 "empty OpenAI API key for Embedder construction; no hosted provider use",
-                "root-note fixtures only: deterministic two-dimensional vectors at "
+                "root and derived fixtures: deterministic two-dimensional vectors at "
                 "Embedder._embed_texts_uncached; real persisted Chroma query/filter/ranking",
+                "read-only Python profiling of real dispatch/producers and in-memory buffers",
                 "launcher-side network guard (audit hook) with a blocked-lookup self-test",
             ],
             limitations=(
-                "No hosted embedding, model or Telegram evidence; synthetic root-note and "
-                "traversal fixtures, not a private vault. Derived/global graph, statistics, "
-                "memory and activity privacy is incomplete until M22 PR2; not checked here."
+                "No hosted embedding, model, watcher or Telegram evidence; synthetic "
+                "root-note, traversal, adversarial derived graph and SQLite fixtures, not "
+                "a private vault. Optional producers use real CLI-configured backing stores; "
+                "restricted denial controls are compared with substantive full-profile output."
             ),
             network_instrumentation={
                 "parent": "sys.addaudithook: socket.getaddrinfo, non-AF_UNIX socket.connect",

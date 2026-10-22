@@ -220,6 +220,8 @@ Vault health metrics: note counts by type and folder, knowledge graph size.
 
 Search episodic memory for past decisions and outcomes.
 
+The CLI opens the real episode store when `[episodic].enabled` is true, using its configured `db_path` or `~/.vaultmind/data/episodes.db`. Folder-restricted profiles are denied before querying it, including when an individual episode lists source notes: free-form decisions and linked entity names do not establish complete scoped ownership.
+
 **Parameters:**
 
 | Parameter | Type    | Required | Description                    |
@@ -234,6 +236,8 @@ Search episodic memory for past decisions and outcomes.
 
 Find a matching procedural workflow for a given context.
 
+Enable `[procedural].enabled` to open the real workflow store at its configured `db_path` or `~/.vaultmind/data/procedural.db`. Suggestions query existing workflows only; they do not synthesize workflows, call a model, increment usage, or update stored business state. Folder-restricted profiles are explicitly denied.
+
 **Parameters:**
 
 | Parameter | Type   | Required | Description                                        |
@@ -244,7 +248,7 @@ Find a matching procedural workflow for a given context.
 
 ### `graph_evolution`
 
-Belief evolution signals: confidence drift, relationship shifts, stale claims.
+Belief evolution signals from the existing graph-only scan: confidence drift and relationship shifts. This MCP tool does not run file-age/stale-claim scanning. The CLI assembles the real detector when `[evolution].enabled` is true; folder-restricted profiles are explicitly denied before scanning.
 
 **Parameters:**
 
@@ -345,9 +349,38 @@ write_enabled = false
 
 Note-backed tools validate vault containment and folder scope, including resolved symlink targets. Wildcard folder access bypasses folder restrictions, never vault containment. Config-defined profiles override built-ins and use the same result boundary.
 
-The shared `ProfileEnforcer` boundary covers `vault_search`, `vault_list`, `vault_read`, `vault_write`, `capture`, `capture_note`, `find_duplicates`, and the traversal tools (`read_frontmatter`, `list_folder_index`, `follow_links`). Direct dispatch of these tools requires an explicit enforcement context. For folder-restricted profiles, search and duplicate candidates are scoped before store truncation. Wildcard profiles preserve the original query filters and valid literal provenance. Both paths defensively verify candidates before returning content, paths, metadata, or counts. Missing, ill-typed, unresolvable, non-Markdown, and forbidden note provenance is omitted rather than treated as permission to disclose a result. Restricted `suggest_links` calls are denied rather than returning unscoped graph-derived scores.
+The shared `ProfileEnforcer` boundary covers every registered tool. Direct dispatch requires an explicit enforcement context. Tool allowlists, write permission, note size, and vault containment remain independent checks. For folder-restricted profiles, search and duplicate candidates are scoped before store truncation. Wildcard profiles preserve the original query filters and valid literal provenance. Both paths defensively verify note-backed candidates before returning content, paths, metadata, or counts. Missing, ill-typed, unresolvable, non-Markdown, and forbidden note provenance never grants access.
 
-**Derived/global privacy is not enforced:** This is a note-result boundary, not all-tool privacy. Derived/global tools — `vault_stats`, `graph_query`, `graph_path`, `episode_query`, `workflow_suggest`, `graph_evolution`, and `recent_activity` — are not secured by this change and may disclose out-of-scope information. Do not use planner or another folder-restricted profile as a whole-vault privacy sandbox. Denials can echo caller-supplied paths but must not disclose unknown resolved symlink targets.
+### Complete result policy
+
+The server registers 18 tools. The following policies apply after the profile's tool allowlist check; an allowlisted tool can still be explicitly denied when its producer cannot establish complete note provenance.
+
+| Tool | Folder-restricted result policy | Wildcard-folder behavior |
+| --- | --- | --- |
+| `vault_search` | Filter verified note candidates before top-k, then validate returned chunks and counts. | Global search filters and valid note-backed results. |
+| `vault_read` | Authorize the requested note before reading content. | Any contained note. |
+| `vault_write` | Authorize destination, write permission, and size before writing/indexing. | Any contained destination, subject to write and size policy. |
+| `vault_list` | List verified scoped notes; root input aggregates allowed roots only. | Contained vault listing. |
+| `read_frontmatter` | Authorize note before parsing or returning metadata. | Any contained note. |
+| `list_folder_index` | Authorize candidates before parsing metadata or counting. | Contained vault index. |
+| `follow_links` | Resolve outgoing links and backlinks only among allowed notes; omit forbidden/unresolved targets. | Global contained links, including unresolved titles with null paths. |
+| `find_duplicates` | Filter verified note candidates before ranking/truncation; do not update producer buffers. | Global valid note candidates; no producer-buffer writes. |
+| `suggest_links` | Deny before producer invocation: graph-derived scoring lacks complete scoped provenance. | Global valid note candidates and graph scores; no producer-buffer writes. |
+| `capture` | Authorize computed inbox destination, write permission, and size. | Contained inbox destination, subject to write and size policy. |
+| `capture_note` | Authorize computed inbox destination, write permission, and size. | Contained inbox destination, subject to write and size policy. |
+| `graph_query` | Deny before traversal: merged graph records lack complete contribution provenance. | Existing global graph query semantics. |
+| `graph_path` | Deny before shortest-path computation for the same provenance limitation. | Existing global shortest paths. |
+| `vault_stats` | Deny before aggregation because graph counts cannot be proved in scope; no partial or fabricated graph counts. | All verified canonical notes and existing global graph counts. |
+| `recent_activity` | Inspect timestamps only for verified canonical allowed notes. | All verified canonical notes. |
+| `episode_query` | Deny before store queries: free-form episode decisions, outcomes, lessons, and entities lack complete note ownership. | Configured global episodic queries. |
+| `workflow_suggest` | Deny before suggestion: workflow text and source-episode references do not establish complete note ownership. | Configured global read-only suggestions; usage counts are not incremented. |
+| `graph_evolution` | Deny before scanning: signal source lists do not establish complete provenance for merged entity labels and global relationships. | Configured global read-only evolution scan. |
+
+Graph records combine labels, confidence, attributes, and relationships from multiple sources. The producer's source lists do not record unknown contributions: adding an allowed source after an unknown contribution, or an unknown contribution after an allowed source, leaves retained data with an apparently all-allowed source list. Neither a nonempty list nor filtering both endpoint and edge lists proves complete ownership. Folder-restricted profiles therefore receive explicit policy denials for `graph_query`, `graph_path`, and `vault_stats`, including when every listed source is allowed. Wildcard-folder profiles retain global results; restricted note search, listing, metadata, traversal, and activity remain available under their own guards.
+
+Wildcard statistics and scoped activity deduplicate canonical note paths, so symlink aliases do not inflate counts. Hidden paths are excluded. Unconfigured optional dependencies still report their ordinary configuration errors to wildcard-folder profiles; restricted profiles receive policy denials first, not fabricated empty global results. These rules constrain MCP outputs; they do not provide a filesystem sandbox or atomicity guarantee. Denials can echo caller-supplied paths but must not disclose unknown resolved symlink targets.
+
+Read-only tools do not write notes, graph snapshots, episode/workflow business state, dismissed signals, or duplicate/suggestion buffers. Existing audit logging is the intentional exception: every call can append its profile, caller arguments, result summary, and denial reason to the configured JSONL/SQLite audit stores.
 
 Symlink loops fail closed with a caller-path-only error, on Python 3.12 and 3.13. Other strict-resolution filesystem errors fall back to ordinary non-strict lookup before containment and scope checks; allowed missing paths and children of files retain their normal not-found response. A genuine fallback-resolution failure remains an explicit caller-path-only error. Invalid or forbidden candidates do not contribute metadata or counts and do not prevent `list_folder_index` or `follow_links` from returning valid allowed notes. The offline receipt checks unknown targets on payloads, raw protocol frames, stderr, and audit reasons, and exercises each traversal tool through the registered SDK request handler with missing enforcement context and a valid-context control using the same arguments.
 

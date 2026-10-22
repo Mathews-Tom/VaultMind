@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path  # noqa: TC003 — used at runtime in tmp_path fixture signatures
 
+import networkx as nx
 import pytest
 
 from vaultmind.config import GraphConfig
 from vaultmind.graph.evolution import EvolutionDetector
 from vaultmind.graph.knowledge_graph import KnowledgeGraph
-from vaultmind.mcp.auth import ProfileEnforcer
+from vaultmind.mcp.auth import ProfileEnforcer, ProfileError, ProfilePolicy
 from vaultmind.mcp.profiles import load_profile
 from vaultmind.mcp.server import _dispatch_tool
 from vaultmind.memory.procedural import ProceduralMemory
@@ -96,7 +98,7 @@ def _dispatch(
         _StubStore(),  # type: ignore[arg-type]
         graph,
         _StubParser(),  # type: ignore[arg-type]
-        enforcer=ProfileEnforcer(load_profile("full"), vault_path),
+        enforcer=kwargs.pop("enforcer", ProfileEnforcer(load_profile("full"), vault_path)),
         **kwargs,
     )
 
@@ -344,54 +346,32 @@ class TestGraphEvolution:
         assert result["count"] == 0
         assert result["signals"] == []
 
-    def test_min_severity_filter(
-        self,
-        vault_root: Path,
-        knowledge_graph: KnowledgeGraph,
-        evolution_detector: EvolutionDetector,
-    ) -> None:
-        # No signals exist in an empty graph; just verify the filter doesn't error
-        result = _dispatch(
-            "graph_evolution",
-            {"min_severity": 0.5},
-            vault_root,
-            knowledge_graph,
-            evolution_detector=evolution_detector,
-        )
-        assert "signals" in result
-        assert "count" in result
-
-    def test_signal_fields_present_when_signals_exist(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Create a graph with drift conditions and verify signal field shape."""
-        config = GraphConfig(persist_path=tmp_path / "g2.json")
-        kg = KnowledgeGraph(config)
-        # Add two edges between same pair with different confidences to create drift
-        # We bypass add_relationship (which merges) and add directly to internal graph
+    def test_severity_filter_on_engaged_multisource_signals(self, tmp_path: Path) -> None:
+        kg = KnowledgeGraph(GraphConfig(persist_path=tmp_path / "graph.json"))
+        kg._graph = nx.MultiDiGraph()
         kg.add_entity("A", "concept")
         kg.add_entity("B", "concept")
-        kg._graph.add_edge(
-            "a",
-            "b",
-            relation="related_to",
-            confidence=0.9,
-            source_notes=["note1.md"],
-        )
-        # Add a second edge in the reverse direction to create a multi-edge scenario
-        # NetworkX DiGraph allows one edge per (src, tgt); use a MultiDiGraph approach
-        # Instead, just verify the empty-signals path works since DiGraph merges edges
+        kg._graph.add_edge("a", "b", relation="related_to", confidence=0.2, source_notes=["a.md"])
+        kg._graph.add_edge("a", "b", relation="depends_on", confidence=0.9, source_notes=["b.md"])
         detector = EvolutionDetector(kg, store_path=tmp_path / "dismissed.json")
-        result = _dispatch(
+        before = deepcopy(kg._graph)
+        result = _dispatch("graph_evolution", {}, tmp_path, kg, evolution_detector=detector)
+        assert {s["signal_type"] for s in result["signals"]} == {
+            "confidence_drift",
+            "relationship_shift",
+        }
+        assert result["count"] == 2
+        filtered = _dispatch(
             "graph_evolution",
-            {},
+            {"min_severity": 0.9},
             tmp_path,
             kg,
             evolution_detector=detector,
         )
-        assert "signals" in result
-        assert "count" in result
+        assert [s["signal_type"] for s in filtered["signals"]] == ["confidence_drift"]
+        assert filtered["count"] == 1
+        assert nx.utils.graphs_equal(before, kg._graph)
+        assert not (tmp_path / "dismissed.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -414,20 +394,127 @@ class TestRecentActivity:
         all_paths = result["created"] + result["modified"]
         assert not any(".obsidian" in p for p in all_paths)
 
-    def test_default_days_is_7(self, vault_root: Path, knowledge_graph: KnowledgeGraph) -> None:
-        result = _dispatch("recent_activity", {}, vault_root, knowledge_graph)
-        assert result["days"] == 7
-
-    def test_result_structure(self, vault_root: Path, knowledge_graph: KnowledgeGraph) -> None:
-        result = _dispatch("recent_activity", {"days": 30}, vault_root, knowledge_graph)
-        for key in ("days", "created", "modified", "created_count", "modified_count"):
-            assert key in result
-        assert isinstance(result["created"], list)
-        assert isinstance(result["modified"], list)
-
     def test_zero_days_returns_empty(
         self, vault_root: Path, knowledge_graph: KnowledgeGraph
     ) -> None:
         result = _dispatch("recent_activity", {"days": 0}, vault_root, knowledge_graph)
         assert result["created_count"] == 0
         assert result["modified_count"] == 0
+
+
+def _restricted(vault: Path) -> ProfileEnforcer:
+    return ProfileEnforcer(
+        ProfilePolicy("scoped", "Scoped", frozenset({"*"}), ("02-projects",), False),
+        vault,
+    )
+
+
+@pytest.mark.parametrize("unknown_first", [True, False])
+def test_unknown_graph_contributions_deny_restricted_consumers(
+    vault_root: Path, knowledge_graph: KnowledgeGraph, unknown_first: bool
+) -> None:
+    graph = knowledge_graph
+    source = "02-projects/project.md"
+    for origin in ("", source) if unknown_first else (source, ""):
+        confidence = 0.7 if origin else 0.95
+        for label in ("A", "B"):
+            graph.add_entity(
+                label,
+                "concept",
+                source_note=origin,
+                confidence=confidence,
+                **({} if origin else {"private_context": "UNPROVENANCED"}),
+            )
+        graph.add_relationship(
+            "A",
+            "B",
+            source_note=origin,
+            confidence=confidence,
+            relation="related_to" if origin else "depends_on",
+        )
+    # An all-allowed source list does not account for the retained unknown data.
+    full = _dispatch("graph_query", {"entity": "A"}, vault_root, graph)
+    assert full["entity"]["source_notes"] == [source]
+    assert full["entity"]["private_context"] == "UNPROVENANCED"
+    assert full["entity"]["confidence"] == 0.95
+    assert full["outgoing"] == [
+        {
+            "target": "B",
+            "relation": "depends_on" if unknown_first else "related_to",
+            "confidence": 0.95,
+        }
+    ]
+    assert _dispatch("graph_path", {"source": "A", "target": "B"}, vault_root, graph) == {
+        "path": ["A", "B"],
+        "length": 1,
+    }
+    assert _dispatch("vault_stats", {}, vault_root, graph)["graph"] == {"entities": 2, "edges": 1}
+    for tool, arguments in (
+        ("graph_query", {"entity": "A"}),
+        ("graph_path", {"source": "A", "target": "B"}),
+        ("vault_stats", {}),
+    ):
+        with pytest.raises(ProfileError, match="complete note provenance"):
+            _dispatch(tool, arguments, vault_root, graph, enforcer=_restricted(vault_root))
+
+
+def test_aggregate_notes_authorize_and_deduplicate_aliases(
+    vault_root: Path, knowledge_graph: KnowledgeGraph
+) -> None:
+    allowed = vault_root / "02-projects" / "project.md"
+    (allowed.parent / "alias.md").symlink_to(allowed)
+    (allowed.parent / "private-alias.md").symlink_to(vault_root / "00-inbox" / "note1.md")
+    (allowed.parent / "missing.md").symlink_to(vault_root / "missing.md")
+    stats = _dispatch("vault_stats", {}, vault_root, knowledge_graph)
+    assert stats == {
+        "total_notes": 3,
+        "by_type": {"fleeting": 1, "literature": 1, "permanent": 1},
+        "by_folder": {"00-inbox": 2, "02-projects": 1},
+        "graph": {"entities": 0, "edges": 0},
+    }
+    activity = _dispatch(
+        "recent_activity",
+        {"days": 365},
+        vault_root,
+        knowledge_graph,
+        enforcer=_restricted(vault_root),
+    )
+    assert activity["created"] + activity["modified"] == ["02-projects/project.md"]
+    assert activity["created_count"] + activity["modified_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "graph_query",
+        "graph_path",
+        "vault_stats",
+        "episode_query",
+        "workflow_suggest",
+        "graph_evolution",
+    ],
+)
+def test_unscopable_capabilities_deny_before_dependency_lookup(
+    tool: str, vault_root: Path, knowledge_graph: KnowledgeGraph
+) -> None:
+    with pytest.raises(ProfileError, match="complete note provenance"):
+        _dispatch(tool, {}, vault_root, knowledge_graph, enforcer=_restricted(vault_root))
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "graph_query",
+        "graph_path",
+        "vault_stats",
+        "recent_activity",
+        "episode_query",
+        "workflow_suggest",
+        "graph_evolution",
+    ],
+)
+def test_derived_dispatch_without_enforcement_fails_closed(
+    tool: str, vault_root: Path, knowledge_graph: KnowledgeGraph
+) -> None:
+    with pytest.raises(ProfileError, match="requires profile enforcement"):
+        _dispatch(tool, {}, vault_root, knowledge_graph, enforcer=None)
