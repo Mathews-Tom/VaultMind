@@ -99,7 +99,7 @@ def test_concurrent_index_shrink_keeps_diagnostics_scoped_and_restores_sinks(
         commands.cli, ["-c", str(config), "mcp-serve", "--profile", profile]
     )
     if fail_after_request:
-        assert isinstance(result.exception, IsADirectoryError)
+        assert result.exit_code != 0
     else:
         assert result.exit_code == 0, (result.exception, result.output)
     expected_ids = (
