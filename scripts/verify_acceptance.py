@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
@@ -24,6 +25,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from aiogram.types import Message as TelegramMessage
 
     from vaultmind.indexer.embedder import Embedder
@@ -44,6 +47,27 @@ BOUNDARIES = [
     ("mixed-strong", [None, 0.1], "strong"),
     ("empty", [], "weak"),
 ]
+
+
+def offline_environment(home: Path) -> dict[str, str]:
+    """Build fixture-only runtime inputs; absent PATH is an error, not optional history."""
+    path = os.environ.get("PATH")
+    if not path:
+        raise RuntimeError("Missing required offline runtime input: PATH")
+    return {"PATH": path, "HOME": str(home.absolute()), "ANONYMIZED_TELEMETRY": "False"}
+
+
+@contextmanager
+def offline_environment_scope(environment: dict[str, str]) -> Iterator[None]:
+    """Install one sequential consumer's environment and restore it even on failure."""
+    previous = dict(os.environ)
+    try:
+        os.environ.clear()
+        os.environ.update(environment)
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
 
 
 class DeterministicEmbedder:
@@ -149,7 +173,7 @@ def package_identity() -> dict[str, Any]:
     }
 
 
-def artifact_identity() -> dict[str, Any]:
+def artifact_identity(home: Path) -> dict[str, Any]:
     runtime = package_identity()
     reviewed = {
         str(path.relative_to(ROOT / "src" / "vaultmind")): digest(path.read_bytes())
@@ -159,9 +183,12 @@ def artifact_identity() -> dict[str, Any]:
         raise ValueError(f"Missing required reviewed package source: {ROOT / 'src' / 'vaultmind'}")
     hashes = {f"src/vaultmind/{name}": value for name, value in runtime["file_sha256"].items()}
     hashes["scripts/verify_acceptance.py"] = digest(Path(__file__).read_bytes())
-    head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+    environment = offline_environment(home)
+    head = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True, env=environment
+    ).strip()
     changes = subprocess.check_output(
-        ["git", "-C", str(ROOT), "status", "--porcelain"], text=True
+        ["git", "-C", str(ROOT), "status", "--porcelain"], text=True, env=environment
     ).splitlines()
     return {
         "head": head,
@@ -578,11 +605,14 @@ except RuntimeError:
 finally:
     probing[0] = False
 
-prefixes = ("VAULTMIND_", "PYTHONPATH", "OPENAI", "ANTHROPIC", "GEMINI", "VOYAGE", "TELEGRAM")
+allowed_environment = {"HOME", "PATH", "ANONYMIZED_TELEMETRY", "COLUMNS", "LC_CTYPE"}
+# Runtime locale fields can be created after exec, absent from the supplied map.
+if sys.platform == "darwin":
+    allowed_environment.add("__CF_USER_TEXT_ENCODING")
 emit(
     kind="environment",
     home=os.environ.get("HOME"),
-    forbidden=sorted(k for k in os.environ if k.upper().startswith(prefixes) or "API_KEY" in k),
+    forbidden=sorted(set(os.environ) - allowed_environment),
     keys=sorted(os.environ),
 )
 real_stdout = os.dup(1)
@@ -1013,10 +1043,12 @@ async def mcp_stdio_session(
         )
     # COLUMNS keeps Rich from wrapping a caller argument across log lines, so the per-call
     # scan can mask exactly that call's own strings without any substring exemption.
+    environment = offline_environment(root)
+    environment["COLUMNS"] = "2000"
     params = StdioServerParameters(
         command=sys.executable,
         args=["-I", "-c", MCP_LAUNCHER, str(state), *cli_args],
-        env={"HOME": str(root), "ANONYMIZED_TELEMETRY": "False", "COLUMNS": "2000"},
+        env=environment,
         cwd=str(root),
     )
     frames_in: list[dict[str, Any]] = []
@@ -1032,7 +1064,9 @@ async def mcp_stdio_session(
         data = stderr_path.read_bytes()
         return data[offset:], len(data)
 
-    with stderr_path.open("w", encoding="utf-8") as errlog:
+    # SDK stdio merges POSIX baseline variables from its parent before params.env.
+    # Direct callers bypass main, so bound that merge here for the entire lifecycle.
+    with offline_environment_scope(environment), stderr_path.open("w", encoding="utf-8") as errlog:
         with anyio.fail_after(deadline):
             async with sdk_stdio.stdio_client(params, errlog=errlog) as (read, write):
                 session = ClientSession(
@@ -1470,11 +1504,7 @@ print(json.dumps(rows))
             config.collection_name,
         ],
         cwd=fixture["vault"].parent,
-        env={
-            "HOME": str(fixture["vault"].parent),
-            "PATH": os.environ["PATH"],
-            "ANONYMIZED_TELEMETRY": "False",
-        },
+        env=offline_environment(fixture["vault"].parent),
         capture_output=True,
         text=True,
         check=True,
@@ -3514,9 +3544,15 @@ def approval_observe(world: SimpleNamespace, home_data: Path) -> dict[str, Any]:
     return {"queue": rows, "files": files, "pending_edits": pending}
 
 
-def approval_git_binding() -> dict[str, Any]:
-    def git(*argv: str) -> str | None:
-        done = subprocess.run(["git", "-C", str(ROOT), *argv], capture_output=True, text=True)
+def approval_git_binding(home: Path) -> dict[str, Any]:
+    environment = offline_environment(home)
+
+    def git(*argv: str, required: bool = False) -> str | None:
+        done = subprocess.run(
+            ["git", "-C", str(ROOT), *argv], capture_output=True, text=True, env=environment
+        )
+        if required:
+            done.check_returncode()
         return done.stdout.strip() if done.returncode == 0 else None
 
     refs: dict[str, Any] = {}
@@ -3525,23 +3561,26 @@ def approval_git_binding() -> dict[str, Any]:
         if commit:
             refs[ref] = {"commit": commit, "merge_base_with_head": git("merge-base", "HEAD", ref)}
     return {
-        "head": git("rev-parse", "HEAD"),
-        "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
-        "parents": (git("rev-list", "--parents", "-n1", "HEAD") or "").split()[1:],
-        "tree": git("rev-parse", "HEAD^{tree}"),
+        "head": git("rev-parse", "HEAD", required=True),
+        "branch": git("rev-parse", "--abbrev-ref", "HEAD", required=True),
+        "parents": cast("str", git("rev-list", "--parents", "-n1", "HEAD", required=True)).split()[
+            1:
+        ],
+        "tree": git("rev-parse", "HEAD^{tree}", required=True),
         "reference_commits": refs,
     }
 
 
-def approval_legacy_schema() -> tuple[str, str]:
+def approval_legacy_schema(home: Path) -> tuple[str, str]:
     """The newest committed review_proposals schema that predates the legacy_* columns."""
     path = "src/vaultmind/services/review_queue.py"
+    environment = offline_environment(home)
     log = subprocess.check_output(
-        ["git", "-C", str(ROOT), "log", "--format=%H", "--", path], text=True
+        ["git", "-C", str(ROOT), "log", "--format=%H", "--", path], text=True, env=environment
     ).split()
     for commit in log:
         source = subprocess.check_output(
-            ["git", "-C", str(ROOT), "show", f"{commit}:{path}"], text=True
+            ["git", "-C", str(ROOT), "show", f"{commit}:{path}"], text=True, env=environment
         )
         match = re.search(r'_SCHEMA = """(.*?)"""', source, re.S)
         if match and "legacy_status" not in match.group(1):
@@ -4181,7 +4220,7 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
         )
 
         # ---- 10. legacy schema migration, reopen, no automatic retry -----------------
-        legacy_commit, legacy_schema = approval_legacy_schema()
+        legacy_commit, legacy_schema = approval_legacy_schema(home)
         legacy_vault_note = "legacy-fail.md"
         statuses = ProposalStatus
         legacy_rows = [
@@ -4753,7 +4792,7 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
     receipt = {
         "import_origin": os.path.realpath(vaultmind.__file__),
         "interpreter": {"executable": sys.executable, "version": sys.version},
-        "git": approval_git_binding(),
+        "git": approval_git_binding(home),
         "cli": {
             "argv": ["--config", "<w>/config.toml", "auto-tag", "--apply"],
             "exit_code": cli.exit_code,
@@ -5421,20 +5460,13 @@ def main() -> int:
             "approval": "vm-m13-approval-",
             "config": "vm-m21-config-",
         }[args.case]
-        with tempfile.TemporaryDirectory(prefix=prefix) as directory:
+        with (
+            tempfile.TemporaryDirectory(prefix=prefix) as directory,
+            offline_environment_scope(offline_environment(Path(directory))),
+        ):
             home = Path(directory)
-            for key in list(os.environ):
-                if key.startswith("VAULTMIND_"):
-                    del os.environ[key]
-            if args.case == "approval":
-                secret = ("OPENAI", "ANTHROPIC", "GEMINI", "VOYAGE", "TELEGRAM")
-                for key in list(os.environ):
-                    if key.upper().startswith(secret) or "API_KEY" in key:
-                        del os.environ[key]
-            os.environ["HOME"] = str(home)
-            os.environ["ANONYMIZED_TELEMETRY"] = "False"
             os.chdir(home)
-            receipt["artifact"] = artifact_identity()
+            receipt["artifact"] = artifact_identity(home)
             if not receipt["artifact"]["runtime_matches_reviewed"]:
                 raise ValueError("Imported VaultMind code does not match the reviewed source")
             if args.case == "retrieval":
