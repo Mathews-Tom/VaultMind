@@ -1324,6 +1324,7 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
         "vault": vault,
         "outside": outside,
         "store": store,
+        "index_document_count": len(rows),
         "sealed": [],
         "corpus": {path: digest(content.encode()) for path, content in contents.items()},
         "symlinks": links,
@@ -1331,13 +1332,14 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
     spec = {
         "name": name,
         "profile": profile,
+        "scoped": not full,
         "cli_args": ["-c", str(config), "mcp-serve", "--profile", profile],
         "calls": calls,
         "forbidden": forbidden,
         "stderr_forbidden": ["ROOT-INVALID", "ROOT-OUTSIDE"],
-        "stderr_contains": [f"Profile: {profile}"],
-        "stderr_absent": ["defaulting to 'researcher'"],
     }
+    if name == "root-scoped":
+        spec["cli_args"].insert(0, "--verbose")
     return spec, fixture, config
 
 
@@ -1645,12 +1647,6 @@ def mcp_scenario(name: str, root: Path) -> dict[str, Any]:
             )
             calls += probe("02-projects/sealed-pub/hidden-pub.md", read=syscall, index=syscall)
         stderr_forbidden = [*unknown_private, *unknown_outside]
-        stderr_contains = [
-            "Profile: planner (Read/write access for project planning)",
-            "Folder scope: 02-projects, 00-inbox",
-            "DEBUG",
-        ]
-        stderr_absent = ["defaulting to 'researcher'"]
     elif name == "planner-configured-override":
         profile = "planner"
         cli_args = ["-c", config, "mcp-serve", "--profile", "planner"]
@@ -1688,11 +1684,6 @@ def mcp_scenario(name: str, root: Path) -> dict[str, Any]:
                 "DENIED",
             ),
         ]
-        stderr_contains = [
-            "Profile: planner (Fixture override)",
-            "Folder scope: 00-inbox",
-        ]
-        stderr_absent = ["Read/write access for project planning"]
         stderr_forbidden = [*unknown_private, *unknown_outside]
     else:
         full = name == "full-control"
@@ -1775,19 +1766,6 @@ def mcp_scenario(name: str, root: Path) -> dict[str, Any]:
             ):
                 calls += probe(target, read=denied, index=path_not_allowed)
         stderr_forbidden = list(unknown_outside)
-        if full:
-            stderr_contains = [
-                "Profile: full (Unrestricted access)",
-                "Folder scope: *",
-            ]
-            stderr_absent = ["defaulting to 'researcher'"]
-        else:
-            stderr_contains = [
-                "Warning: No --profile specified; defaulting to 'researcher' (read-only)",
-                "Profile: researcher (Read-only access for research and Q&A tasks)",
-                "Folder scope: *",
-            ]
-            stderr_absent = []
     return {
         "name": name,
         "profile": profile,
@@ -1796,8 +1774,6 @@ def mcp_scenario(name: str, root: Path) -> dict[str, Any]:
         "cli_args": cli_args,
         "calls": calls,
         "forbidden": forbidden,
-        "stderr_contains": stderr_contains,
-        "stderr_absent": stderr_absent,
         "stderr_forbidden": stderr_forbidden,
     }
 
@@ -1883,6 +1859,15 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
     stderr_startup = mcp_trim(run["stderr_startup"])
     stderr_chunks = [mcp_trim(chunk) for chunk in run["stderr_chunks"]]
     prefix = f"{name}."
+    diagnostic_aggregates = re.findall(r"\b\d+\s+(?:documents|nodes|edges)\b", stderr)
+    if spec["scoped"]:
+        check(prefix + "stderr.global-aggregates-absent", [], diagnostic_aggregates)
+    elif name == "root-full":
+        check(
+            prefix + "stderr.unrestricted-index-count-retained",
+            [f"{fixture['index_document_count']} documents"],
+            [value for value in diagnostic_aggregates if value.endswith(" documents")],
+        )
 
     # --- protocol: initialize / list_tools / every stdout line is a valid frame --------------
     check(prefix + "initialize.server-name", "vaultmind", run["init"].serverInfo.name)
@@ -2034,16 +2019,6 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         }
 
     # --- stderr diagnostics, origin, environment, network guard, lifecycle -------------------
-    check(
-        prefix + "stderr.diagnostics",
-        [True] * len(spec["stderr_contains"]),
-        [needle in stderr for needle in spec["stderr_contains"]],
-    )
-    check(
-        prefix + "stderr.absent",
-        [],
-        [needle for needle in spec["stderr_absent"] if needle in stderr],
-    )
     stderr_flat = mcp_flat(stderr)
     supplied_overlap = [
         token

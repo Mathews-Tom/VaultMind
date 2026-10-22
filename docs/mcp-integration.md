@@ -355,6 +355,8 @@ Run `uv run --extra dev --extra mcp python scripts/verify_acceptance.py --case m
 
 Embedding-boundary events are attributed to each completed tool call and recorded in the receipt. An allowed `vault_search` must exercise its own embedding boundary; events from `find_duplicates`, captures, or initialization cannot satisfy that check. The fixture replaces only the embedding provider's vector computation, not the search handler or returned results.
 
+Folder-restricted MCP sessions omit INFO/DEBUG diagnostics, including with `--verbose`, so startup logs cannot disclose global index or graph counts. Warnings, errors, explicit profile diagnostics, and audit receipts remain available. Logging-handler thresholds are restored when the command closes, including on failure; wildcard profiles and other commands retain their logging behavior. The stdio fixture checks restricted startup output with verbose logging requested and retains a substantive unrestricted index-count control.
+
 ### Audit logging
 
 Every MCP tool call is logged with:

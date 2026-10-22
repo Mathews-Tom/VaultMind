@@ -1730,6 +1730,8 @@ def synthesize_workflows(ctx: click.Context, min_episodes: int) -> None:
 @click.pass_context
 def mcp_serve(ctx: click.Context, profile: str | None) -> None:
     """Start the MCP server for agent integration."""
+    from functools import partial
+
     from vaultmind.config import load_settings
     from vaultmind.graph import KnowledgeGraph
     from vaultmind.indexer import Embedder, VaultStore
@@ -1758,6 +1760,12 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
 
     config_profiles = settings.mcp.profiles if settings.mcp.profiles else None
     policy = load_profile(profile_name, config_profiles=config_profiles)
+    if not policy.allows_all_folders:
+        # Startup INFO/DEBUG logs can disclose global index and graph counts.
+        # Keep warnings/errors and restore every sink when this command closes.
+        for handler in logging.getLogger().handlers:
+            ctx.call_on_close(partial(handler.setLevel, handler.level))
+            handler.setLevel(max(handler.level, logging.WARNING))
     enforcer = ProfileEnforcer(policy, settings.vault.path)
     audit_log = AuditLogger(VAULTMIND_HOME / "data" / "mcp_audit.jsonl")
 
