@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline acceptance: retrieval, MCP, approval and M21 configuration, real consumers."""
+"""Offline acceptance: retrieval, MCP note scope, approval and configuration consumers."""
 
 from __future__ import annotations
 
@@ -388,8 +388,9 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # mcp case: the actual registered vaultmind entry point, served as a subprocess over the
 # installed MCP SDK stdio transport. Fixture seams: temp HOME/vault/Chroma/graph/audit/TOML,
-# an empty OpenAI constructor key (never used: metadata tools make no embedding call) and a
-# launcher-side network guard. No fake transport, no source injection, no PYTHONPATH.
+# an empty OpenAI constructor key and a launcher-side network guard. Original traversal
+# fixtures never embed; root-note fixtures replace only provider embedding I/O with fixed
+# vectors. No fake transport, package shadowing, canned tool responses or PYTHONPATH.
 # ---------------------------------------------------------------------------
 
 MCP_SCENARIOS = (
@@ -397,6 +398,14 @@ MCP_SCENARIOS = (
     "planner-configured-override",
     "researcher-default-control",
     "full-control",
+)
+MCP_ROOT_SCENARIOS = (
+    "root-scoped",
+    "root-scoped-small",
+    "root-full",
+    "root-capture-scope",
+    "root-capture-symlink",
+    "root-capture-size",
 )
 MCP_TRAVERSAL_TOOLS = ("read_frontmatter", "list_folder_index", "follow_links")
 MCP_HUB_SENTINEL = "HUB-BODY-SENTINEL-7f3a91"
@@ -627,6 +636,21 @@ emit(
     python=sys.version.split()[0],
     sys_path=sys.path,
 )
+
+# Only the root-note fixtures opt in. Keep the real Embedder constructor, VaultStore,
+# Chroma filtering/ranking, registered tools and SDK transport; replace provider I/O only.
+embedding_fixture = Path(state) / "root-embedding.json"
+if embedding_fixture.exists():
+    from vaultmind.indexer.embedder import Embedder
+
+    vector = json.loads(embedding_fixture.read_text(encoding="utf-8"))["vector"]
+
+    def offline_embeddings(self, texts):
+        emit(kind="embedding-boundary", count=len(texts))
+        return [list(vector) for _ in texts]
+
+    Embedder._embed_texts_uncached = offline_embeddings
+    emit(kind="embedding-fixture", dimensions=len(vector))
 
 code = 0
 try:
@@ -926,6 +950,8 @@ async def mcp_stdio_session(
     cli_args: list[str],
     calls: list[tuple[str, dict[str, Any]]],
     deadline: float = 180.0,
+    *,
+    root_embeddings: bool = False,
 ) -> dict[str, Any]:
     """Spawn the registered CLI and drive initialize/list_tools/call_tool over SDK stdio."""
     import anyio
@@ -934,6 +960,10 @@ async def mcp_stdio_session(
 
     state = root / "launcher-state"
     state.mkdir()
+    if root_embeddings:
+        (state / "root-embedding.json").write_text(
+            json.dumps({"vector": [1.0, 0.0]}), encoding="utf-8"
+        )
     # COLUMNS keeps Rich from wrapping a caller argument across log lines, so the per-call
     # scan can mask exactly that call's own strings without any substring exemption.
     params = StdioServerParameters(
@@ -946,6 +976,8 @@ async def mcp_stdio_session(
     frames_out: list[dict[str, Any]] = []
     errors: list[str] = []
     results: list[Any] = []
+    embedding_boundary_tools: list[str] = []
+    embedding_boundary_counts: list[int] = []
     stderr_chunks: list[bytes] = []
     stderr_path = state / "stderr.txt"
 
@@ -969,10 +1001,18 @@ async def mcp_stdio_session(
                     # that call's own stderr (plus only post-response bookkeeping lines of
                     # the previous call, which never carry arguments).
                     startup, offset = stderr_since(0)
-                    for tool, arguments in calls:
-                        results.append(await session.call_tool(tool, arguments))
-                        chunk, offset = stderr_since(offset)
-                        stderr_chunks.append(chunk)
+                    with (state / "launcher.jsonl").open(encoding="utf-8") as boundary_log:
+                        boundary_log.seek(0, os.SEEK_END)
+                        for tool, arguments in calls:
+                            results.append(await session.call_tool(tool, arguments))
+                            chunk, offset = stderr_since(offset)
+                            stderr_chunks.append(chunk)
+                            count = 0
+                            for line in boundary_log:
+                                if json.loads(line)["kind"] == "embedding-boundary":
+                                    embedding_boundary_tools.append(tool)
+                                    count += 1
+                            embedding_boundary_counts.append(count)
                 closing = time.monotonic()
             shutdown_seconds = time.monotonic() - closing
     return {
@@ -987,7 +1027,368 @@ async def mcp_stdio_session(
         "state": state,
         "stderr_startup": startup.decode("utf-8", errors="replace"),
         "stderr_chunks": [chunk.decode("utf-8", errors="replace") for chunk in stderr_chunks],
+        "embedding_boundary_tools": embedding_boundary_tools,
+        "embedding_boundary_counts": embedding_boundary_counts,
     }
+
+
+def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    """Seed real Chroma with synthetic provenance, not replacement tool responses."""
+    from vaultmind.config import ChromaConfig
+    from vaultmind.indexer.store import VaultStore
+
+    vault, outside = root / "vault", root / "outside"
+    source = "02-projects/source.md"
+    peer = "02-projects/peer.md"
+    suggestion = "02-projects/suggestion.md"
+    private = [f"03-private/closer-{i:02d}.md" for i in range(16)]
+    small_index = name == "root-scoped-small"
+    contents: dict[str, str] = {
+        source: "# Source\n\n" + TEXT * 4 + "\n",
+        peer: "# Allowed Peer\n\n" + TEXT * 4 + "\n",
+        suggestion: "# Allowed Suggestion\n\nA neighboring subject.\n",
+        **{
+            path: f"# ROOT-PRIVATE-{i:02d}\n\nROOT-PRIVATE-BODY-{i:02d}\n"
+            for i, path in enumerate(private)
+        },
+    }
+    for rel, content in contents.items():
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    outside.mkdir()
+    (outside / "outside.md").write_text("# ROOT-OUTSIDE\n\nROOT-OUTSIDE-BODY\n", encoding="utf-8")
+    (vault / "02-projects" / "not-markdown.txt").write_text("ROOT-NONMARKDOWN", encoding="utf-8")
+    links = {
+        "02-projects/allowed-alias.md": "peer.md",
+        "02-projects/private-alias.md": "../03-private/closer-00.md",
+        "02-projects/outside-alias.md": str(outside / "outside.md"),
+        "02-projects/broken-alias.md": "missing.md",
+        "02-projects/loop.md": "loop.md",
+    }
+    for rel, target in links.items():
+        (vault / rel).symlink_to(target)
+    (vault / "02-projects" / "private-dir").symlink_to("../03-private", target_is_directory=True)
+    if name == "root-capture-symlink":
+        (vault / "00-inbox").symlink_to(outside, target_is_directory=True)
+
+    # Large and small scoped scenarios have identical files and authorized chunks.
+    # Only forbidden/unknown indexed rows differ. The large private population
+    # exceeds find_duplicates(max=1)'s candidate window of 11; the small TOTAL
+    # population is below 11, so that candidate query also exercises oversizing.
+    rows: list[dict[str, Any]] = []
+
+    def row(
+        key: str,
+        provenance: object,
+        title: str,
+        distance: float,
+        *,
+        valid: bool = True,
+        scoped: bool = False,
+        note_type: str = "permanent",
+    ) -> None:
+        metadata: dict[str, Any] = {"note_title": title, "note_type": note_type}
+        if provenance is not None:
+            metadata["note_path"] = provenance
+        rows.append(
+            {
+                "chunk_id": key,
+                "content": title + "-CONTENT",
+                "metadata": metadata,
+                "distance": distance,
+                "valid": valid,
+                "scoped": scoped,
+            }
+        )
+
+    for i, path in enumerate([] if small_index else private):
+        row(f"private-{i}", path, f"ROOT-PRIVATE-{i:02d}", 0.0001 * (i + 1))
+    row("allowed-peer", peer, "Allowed Peer", 0.01, scoped=True)
+    row("allowed-source", source, "Source", 0.02, scoped=True, note_type="project")
+    row("source-second", source, "Source Second", 0.021, scoped=True, note_type="project")
+    row("source-third", source, "Source Third", 0.022, scoped=True, note_type="project")
+    row("allowed-suggestion", suggestion, "Allowed Suggestion", 0.25, scoped=True)
+    row("safe-alias", "02-projects/allowed-alias.md", "Allowed Alias", 0.03, scoped=True)
+    row("dot-path", "./" + peer, "Allowed Dot Path", 0.04)
+    row("absolute-path", str(vault / peer), "Allowed Absolute Path", 0.05)
+    row("private-alias", "02-projects/private-alias.md", "ROOT-PRIVATE-ALIAS", 0.006)
+    invalid = [
+        None,
+        42,
+        False,
+        1.5,
+        "",
+        "02-projects/missing.md",
+        "02-projects/not-markdown.txt",
+        "02-projects",
+        "../outside/outside.md",
+        str(outside / "outside.md"),
+        "02-projects/outside-alias.md",
+        "02-projects/broken-alias.md",
+        "02-projects/loop.md",
+    ]
+    for i, provenance in enumerate(invalid[:1] if small_index else invalid):
+        row(f"invalid-{i}", provenance, f"ROOT-INVALID-{i:02d}", 0.007 + i * 0.00001, valid=False)
+
+    store = VaultStore(
+        ChromaConfig(persist_dir=root / "data" / "chroma"),
+        cast("Embedder", DeterministicEmbedder()),
+    )
+    store._collection.upsert(
+        ids=[r["chunk_id"] for r in rows],
+        documents=[r["content"] for r in rows],
+        metadatas=[r["metadata"] for r in rows],
+        embeddings=[[1 - r["distance"], math.sqrt(1 - (1 - r["distance"]) ** 2)] for r in rows],
+    )
+    config = root / "config.toml"
+    scopes = ["02-projects"]
+    if name in ("root-capture-size", "root-capture-symlink"):
+        scopes.append("00-inbox")
+    maximum = 256 if name == "root-capture-size" else 50000
+    profile = "full" if name == "root-full" else "root-scope"
+    config.write_text(
+        f"[vault]\npath = {json.dumps(str(vault))}\n"
+        f"[chroma]\npersist_dir = {json.dumps(str(root / 'data' / 'chroma'))}\n"
+        f"[graph]\npersist_path = {json.dumps(str(root / 'data' / 'graph.json'))}\n"
+        "[embedding]\ncache_enabled = false\ndimensions = 2\n"
+        '[mcp.profiles.root-scope]\ndescription = "Root note fixture"\n'
+        'allowed_tools = ["vault_search", "vault_read", "vault_write", "vault_list", '
+        '"find_duplicates", "suggest_links", "capture", "capture_note", '
+        '"read_frontmatter", "list_folder_index", "follow_links"]\n'
+        f"folder_scope = {json.dumps(scopes)}\nwrite_enabled = true\n"
+        f"max_note_size_bytes = {maximum}\n",
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def call(
+        tool: str, arguments: dict[str, Any], expected: dict[str, Any], audit: str = "OK"
+    ) -> None:
+        calls.append(
+            {
+                "tool": tool,
+                "arguments": arguments,
+                "expected": expected,
+                "audit": audit,
+                "kind": "denied" if audit == "DENIED" else None,
+            }
+        )
+
+    full = profile == "full"
+    visible = [r for r in rows if r["valid"] and (full or r["scoped"])]
+
+    def search_expected(selected: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "results": [
+                {k: r[k] for k in ("chunk_id", "content", "metadata", "distance")} for r in selected
+            ],
+            "count": len(selected),
+        }
+
+    if name in ("root-scoped", "root-scoped-small", "root-full"):
+        call("vault_search", {"query": TEXT, "n_results": 100}, search_expected(visible))
+        closest = min(visible, key=lambda r: r["distance"])
+        call("vault_search", {"query": TEXT, "n_results": 1}, search_expected([closest]))
+        call(
+            "vault_search",
+            {"query": TEXT, "note_type": "project", "n_results": 1},
+            search_expected([next(r for r in rows if r["chunk_id"] == "allowed-source")]),
+        )
+        call(
+            "vault_search",
+            {"query": TEXT, "note_type": "project", "n_results": 100},
+            search_expected([r for r in visible if r["metadata"]["note_type"] == "project"]),
+        )
+        call(
+            "vault_search",
+            {"query": TEXT, "note_type": "literature", "n_results": 100},
+            search_expected([]),
+        )
+        allowed_notes = [source, peer, suggestion, "02-projects/allowed-alias.md"]
+        listed = sorted(
+            allowed_notes + (private + ["02-projects/private-alias.md"] if full else [])
+        )
+        for folder in (None, "", ".", str(vault)):
+            call(
+                "vault_list",
+                {} if folder is None else {"folder": folder},
+                {"notes": listed, "count": len(listed)},
+            )
+        call(
+            "vault_list",
+            {"folder": "02-projects"},
+            {
+                "notes": sorted(allowed_notes + (["02-projects/private-alias.md"] if full else [])),
+                "count": len(allowed_notes) + int(full),
+            },
+        )
+        for path in (source, "./" + source, str(vault / source), "02-projects/allowed-alias.md"):
+            content_path = peer if path.endswith("allowed-alias.md") else source
+            call("vault_read", {"path": path}, {"path": path, "content": contents[content_path]})
+        if not full:
+            for path in (
+                private[0],
+                "02-projects/private-alias.md",
+                "02-projects/private-dir/closer-00.md",
+            ):
+                call("vault_read", {"path": path}, {"error": True}, "DENIED")
+            for folder in ("03-private", "02-projects/private-dir"):
+                call("vault_list", {"folder": folder}, {"error": True}, "DENIED")
+        for path in (
+            "02-projects/outside-alias.md",
+            str(outside / "outside.md"),
+            "../outside/outside.md",
+        ):
+            call("vault_read", {"path": path}, {"error": True}, "DENIED")
+        match_path, title, similarity = (
+            (private[0], "ROOT-PRIVATE-00", 0.9999) if full else (peer, "Allowed Peer", 0.99)
+        )
+        call(
+            "find_duplicates",
+            {"note_path": source, "max_results": 1},
+            {
+                "note_path": source,
+                "matches": [
+                    {
+                        "path": match_path,
+                        "title": title,
+                        "similarity": similarity,
+                        "type": "duplicate",
+                    }
+                ],
+                "count": 1,
+            },
+        )
+        call(
+            "suggest_links",
+            {"note_path": source, "max_results": 50},
+            {
+                "note_path": source,
+                "suggestions": [
+                    {
+                        "path": suggestion,
+                        "title": "Allowed Suggestion",
+                        "similarity": 0.75,
+                        "shared_entities": [],
+                        "graph_distance": None,
+                        "composite_score": 0.75,
+                    }
+                ],
+                "count": 1,
+            }
+            if full
+            else {"error": True},
+            "OK" if full else "DENIED",
+        )
+    elif name == "root-capture-size":
+        for tool in ("capture", "capture_note"):
+            # The raw content fits; the generated title/frontmatter pushes serialized bytes
+            # over policy. Inbox is absent so even mkdir is an observable forbidden mutation.
+            call(tool, {"content": "x", "title": "Long title " * 40}, {"error": True}, "DENIED")
+            call(
+                tool,
+                {"content": "x", "title": "small", "tags": ["界" * 120]},
+                {"error": True},
+                "DENIED",
+            )
+    else:
+        call(
+            "capture",
+            {"content": "ROOT-CAPTURE", "title": "Denied implicit destination"},
+            {"error": True},
+            "DENIED",
+        )
+        call(
+            "capture_note",
+            {"content": "ROOT-CAPTURE", "title": "Denied default"},
+            {"error": True},
+            "DENIED",
+        )
+        if name == "root-capture-scope":
+            call(
+                "capture",
+                {"content": "ROOT-CAPTURE", "title": "x/../../02-projects/y"},
+                {"error": True},
+                "DENIED",
+            )
+            for folder in (
+                "03-private/new-directory",
+                "02-projects/private-dir/new-directory",
+                "../outside/new-directory",
+            ):
+                call(
+                    "capture_note",
+                    {"content": "ROOT-CAPTURE", "folder": folder},
+                    {"error": True},
+                    "DENIED",
+                )
+            call(
+                "vault_write",
+                {"path": "03-private/new-directory/new.md", "content": "denied"},
+                {"error": True},
+                "DENIED",
+            )
+        else:
+            call(
+                "capture_note",
+                {"content": "ROOT-CAPTURE", "folder": "00-inbox/new-directory"},
+                {"error": True},
+                "DENIED",
+            )
+
+    forbidden = ["ROOT-INVALID", "ROOT-OUTSIDE", "ROOT-NONMARKDOWN"]
+    if not full:
+        forbidden += ["ROOT-PRIVATE", "closer-", "03-private"]
+    fixture = {
+        "vault": vault,
+        "outside": outside,
+        "store": store,
+        "index_document_count": len(rows),
+        "sealed": [],
+        "corpus": {path: digest(content.encode()) for path, content in contents.items()},
+        "symlinks": links,
+    }
+    spec = {
+        "name": name,
+        "profile": profile,
+        "scoped": not full,
+        "cli_args": ["-c", str(config), "mcp-serve", "--profile", profile],
+        "calls": calls,
+        "forbidden": forbidden,
+        "stderr_forbidden": ["ROOT-INVALID", "ROOT-OUTSIDE"],
+    }
+    if name in ("root-scoped", "root-scoped-small"):
+        spec["cli_args"].insert(0, "--verbose")
+    return spec, fixture, config
+
+
+def mcp_root_snapshot(fixture: dict[str, Any]) -> dict[str, Any]:
+    """Logical fixture state: include empty directories, symlinks and all indexed metadata."""
+    trees: dict[str, Any] = {}
+    for key in ("vault", "outside"):
+        root = fixture[key]
+        trees[key] = {
+            str(p.relative_to(root)): (
+                ["symlink", os.readlink(p)]
+                if p.is_symlink()
+                else ["directory"]
+                if p.is_dir()
+                else ["file", digest(p.read_bytes())]
+            )
+            for p in sorted(root.rglob("*"))
+        }
+    records = fixture["store"]._collection.get(include=["documents", "metadatas", "embeddings"])
+    trees["index"] = sorted(
+        [
+            chunk_id,
+            records["documents"][i],
+            records["metadatas"][i],
+            [float(value) for value in records["embeddings"][i]],
+        ]
+        for i, chunk_id in enumerate(records["ids"])
+    )
+    return trees
 
 
 def mcp_scenario(name: str, root: Path) -> dict[str, Any]:
@@ -1266,12 +1667,6 @@ def mcp_scenario(name: str, root: Path) -> dict[str, Any]:
             )
             calls += probe("02-projects/sealed-pub/hidden-pub.md", read=syscall, index=syscall)
         stderr_forbidden = [*unknown_private, *unknown_outside]
-        stderr_contains = [
-            "Profile: planner (Read/write access for project planning)",
-            "Folder scope: 02-projects, 00-inbox",
-            "DEBUG",
-        ]
-        stderr_absent = ["defaulting to 'researcher'"]
     elif name == "planner-configured-override":
         profile = "planner"
         cli_args = ["-c", config, "mcp-serve", "--profile", "planner"]
@@ -1309,11 +1704,6 @@ def mcp_scenario(name: str, root: Path) -> dict[str, Any]:
                 "DENIED",
             ),
         ]
-        stderr_contains = [
-            "Profile: planner (Fixture override)",
-            "Folder scope: 00-inbox",
-        ]
-        stderr_absent = ["Read/write access for project planning"]
         stderr_forbidden = [*unknown_private, *unknown_outside]
     else:
         full = name == "full-control"
@@ -1396,19 +1786,6 @@ def mcp_scenario(name: str, root: Path) -> dict[str, Any]:
             ):
                 calls += probe(target, read=denied, index=path_not_allowed)
         stderr_forbidden = list(unknown_outside)
-        if full:
-            stderr_contains = [
-                "Profile: full (Unrestricted access)",
-                "Folder scope: *",
-            ]
-            stderr_absent = ["defaulting to 'researcher'"]
-        else:
-            stderr_contains = [
-                "Warning: No --profile specified; defaulting to 'researcher' (read-only)",
-                "Profile: researcher (Read-only access for research and Q&A tasks)",
-                "Folder scope: *",
-            ]
-            stderr_absent = []
     return {
         "name": name,
         "profile": profile,
@@ -1417,8 +1794,6 @@ def mcp_scenario(name: str, root: Path) -> dict[str, Any]:
         "cli_args": cli_args,
         "calls": calls,
         "forbidden": forbidden,
-        "stderr_contains": stderr_contains,
-        "stderr_absent": stderr_absent,
         "stderr_forbidden": stderr_forbidden,
     }
 
@@ -1436,6 +1811,16 @@ def mcp_normalize(tool: str, payload: Any) -> Any:
         out["modified"] = MCP_ISO
     if tool == "list_folder_index" and isinstance(out.get("notes"), list):
         out["notes"] = sorted(out["notes"], key=lambda e: str(e.get("path")))
+    if tool == "vault_search" and isinstance(out.get("results"), list):
+        out["results"] = sorted(
+            [
+                {**hit, "distance": round(hit["distance"], 4)}
+                if isinstance(hit.get("distance"), (int, float))
+                else hit
+                for hit in out["results"]
+            ],
+            key=lambda hit: hit["chunk_id"],
+        )
     if tool == "follow_links":
         for key in ("out_links", "backlinks"):
             if isinstance(out.get(key), list):
@@ -1449,26 +1834,77 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
     """One actual subprocess lifecycle with per-call, per-frame and per-origin assertions."""
     from mcp.types import JSONRPCMessage
 
-    spec = mcp_scenario(name, root)
-    fixture = mcp_build_fixture(root, spec["scoped"], consumer=True)
-    config = mcp_write_config(root, spec["override"])
+    root_notes = name in MCP_ROOT_SCENARIOS
+    if root_notes:
+        spec, fixture, config = mcp_root_fixture(root, name)
+        before = mcp_root_snapshot(fixture)
+    else:
+        spec = mcp_scenario(name, root)
+        fixture = mcp_build_fixture(root, spec["scoped"], consumer=True)
+        config = mcp_write_config(root, spec["override"])
     calls = spec["calls"]
     try:
         run = await mcp_stdio_session(
-            root, spec["cli_args"], [(c["tool"], c["arguments"]) for c in calls]
+            root,
+            spec["cli_args"],
+            [(c["tool"], c["arguments"]) for c in calls],
+            root_embeddings=root_notes,
         )
     finally:
         mcp_restore_permissions(fixture)
+    if root_notes:
+        check(
+            name + ".read-only-and-denied-mutations-state-unchanged",
+            before,
+            mcp_root_snapshot(fixture),
+        )
     state: Path = run["state"]
     events = [
         json.loads(line)
         for line in (state / "launcher.jsonl").read_text(encoding="utf-8").splitlines()
     ]
+    if root_notes:
+        check(
+            name + ".embedding.provider-boundary-only",
+            [{"kind": "embedding-fixture", "dimensions": 2}],
+            [event for event in events if event["kind"] == "embedding-fixture"],
+        )
+        check(
+            name + ".embedding.root-search-exercised",
+            any(c["tool"] == "vault_search" and c["expected"].get("results") for c in calls),
+            "vault_search" in run["embedding_boundary_tools"],
+        )
     raw = (state / "stdout.raw").read_bytes().decode("utf-8")
     stderr = mcp_trim((state / "stderr.txt").read_text(encoding="utf-8"))
     stderr_startup = mcp_trim(run["stderr_startup"])
     stderr_chunks = [mcp_trim(chunk) for chunk in run["stderr_chunks"]]
     prefix = f"{name}."
+    # Inspect complete stderr, including warnings emitted after startup. Rich's
+    # source-location column can interrupt a wrapped diagnostic phrase.
+    diagnostics = re.sub(r"\w+\.py:\d+", "", stderr)
+    diagnostic_aggregates = re.findall(
+        r"\b(?:\d+\s+(?:documents|nodes|edges)|elements\s+in\s+index\s+\d+|"
+        r"(?:updating\s+)?n_results\s*=\s*\d+)\b",
+        diagnostics,
+        flags=re.IGNORECASE,
+    )
+    if spec["scoped"]:
+        check(prefix + "stderr.global-aggregates-absent", [], diagnostic_aggregates)
+    elif name == "root-full":
+        check(
+            prefix + "stderr.unrestricted-index-count-retained",
+            [f"{fixture['index_document_count']} documents"],
+            [value for value in diagnostic_aggregates if value.endswith(" documents")],
+        )
+        for diagnostic, pattern in (
+            ("elements-in-index", r"\belements\s+in\s+index\s+(\d+)\b"),
+            ("bounded-n-results", r"\bn_results\s*=\s*(\d+)\b"),
+        ):
+            check(
+                prefix + f"stderr.unrestricted-{diagnostic}-retained",
+                [fixture["index_document_count"]],
+                sorted({int(value) for value in re.findall(pattern, diagnostics)}),
+            )
 
     # --- protocol: initialize / list_tools / every stdout line is a valid frame --------------
     check(prefix + "initialize.server-name", "vaultmind", run["init"].serverInfo.name)
@@ -1548,6 +1984,21 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
             )
         else:
             check(label + ".payload", mcp_normalize(tool, expected_call["expected"]), actual)
+            if tool == "vault_search":
+                distances = [hit["distance"] for hit in payload["results"]]
+                check(label + ".raw-distance-order", sorted(distances), distances)
+        if root_notes and tool in ("vault_search", "find_duplicates"):
+            expected = expected_call["expected"]
+            # Empty filtered results legitimately avoid embedding; another tool's
+            # provider event must not make this call appear to have embedded.
+            embeds = bool(
+                expected.get("results") if tool == "vault_search" else expected.get("matches")
+            )
+            check(
+                label + ".embedding.provider-boundary",
+                int(embeds),
+                run["embedding_boundary_counts"][position],
+            )
         # Independent fixture-target oracle on both surfaces; only complete, boundary-delimited
         # caller-supplied argument strings of THIS call are masked (see mcp_leaks).
         oracle: dict[str, Any] = {"forbidden_tokens": len(spec["forbidden"])}
@@ -1565,6 +2016,7 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
                 "arguments": arguments,
                 "kind": kind,
                 "actual": actual,
+                "embedding_boundary_count": run["embedding_boundary_counts"][position],
                 "oracle": oracle,
             }
         )
@@ -1620,16 +2072,6 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         }
 
     # --- stderr diagnostics, origin, environment, network guard, lifecycle -------------------
-    check(
-        prefix + "stderr.diagnostics",
-        [True] * len(spec["stderr_contains"]),
-        [needle in stderr for needle in spec["stderr_contains"]],
-    )
-    check(
-        prefix + "stderr.absent",
-        [],
-        [needle for needle in spec["stderr_absent"] if needle in stderr],
-    )
     stderr_flat = mcp_flat(stderr)
     supplied_overlap = [
         token
@@ -1742,6 +2184,8 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         "import_origin": entry["module_file"],
         "distribution": {"version": entry["dist_version"], "direct_url": entry["direct_url"]},
         "launcher_events": events,
+        "embedding_boundary_tools": run["embedding_boundary_tools"],
+        "embedding_boundary_counts": run["embedding_boundary_counts"],
         "stdout_lines": lines,
         "stderr": stderr,
         "audit": audit,
@@ -1914,13 +2358,13 @@ async def mcp_factory_none_handlers(root: Path, check: Any) -> dict[str, Any]:
             "real_enforcer_response_bytes": len(allowed_text),
             "real_enforcer_positive": positive(allowed_payload),
         }
-    _unused, unrelated_payload, _text = await invoke(
-        none_server, "vault_list", {"folder": "00-inbox"}
-    )
+    _unused, root_payload, _text = await invoke(none_server, "vault_list", {"folder": "00-inbox"})
     check(
-        "factory.unrelated-tool-without-enforcer-unchanged",
-        {"notes": ["00-inbox/inbox-note.md"], "count": 1},
-        unrelated_payload,
+        "factory.root-note-tool-without-enforcer-denied",
+        True,
+        isinstance(root_payload, dict)
+        and set(root_payload) == {"error"}
+        and bool(root_payload["error"]),
     )
     return receipt
 
@@ -1929,8 +2373,21 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     home = home.resolve()
     check = make_checker(checks)
     scenarios: dict[str, Any] = {}
-    for name in MCP_SCENARIOS:
+    for name in (*MCP_SCENARIOS, *MCP_ROOT_SCENARIOS):
         scenarios[name] = await run_mcp_scenario(name, home / name, check)
+    check(
+        "root-scoped.forbidden-chunk-population-does-not-change-authorized-results",
+        [
+            (c["tool"], c["arguments"], c["actual"])
+            for c in scenarios["root-scoped"]["calls"]
+            if c["tool"] in ("vault_search", "find_duplicates")
+        ],
+        [
+            (c["tool"], c["arguments"], c["actual"])
+            for c in scenarios["root-scoped-small"]["calls"]
+            if c["tool"] in ("vault_search", "find_duplicates")
+        ],
+    )
     mcp_direct_dispatcher(home / "direct-dispatcher", check)
     factory = await mcp_factory_none_handlers(home / "factory-none", check)
     origins = {s["import_origin"] for s in scenarios.values()}
@@ -4105,13 +4562,15 @@ def main() -> int:
             ),
             boundary_substitutions=[
                 "temporary HOME/vault/Chroma/graph/audit paths and explicit fixture TOML",
-                "empty OpenAI API key for Embedder construction only; metadata tools make no "
-                "embedding request",
+                "empty OpenAI API key for Embedder construction; no hosted provider use",
+                "root-note fixtures only: deterministic two-dimensional vectors at "
+                "Embedder._embed_texts_uncached; real persisted Chroma query/filter/ranking",
                 "launcher-side network guard (audit hook) with a blocked-lookup self-test",
             ],
             limitations=(
-                "No hosted embedding, model or Telegram evidence; read-only traversal tools "
-                "only; fixture vault, not a private vault."
+                "No hosted embedding, model or Telegram evidence; synthetic root-note and "
+                "traversal fixtures, not a private vault. Derived/global graph, statistics, "
+                "memory and activity privacy is incomplete until M22 PR2; not checked here."
             ),
             network_instrumentation={
                 "parent": "sys.addaudithook: socket.getaddrinfo, non-AF_UNIX socket.connect",

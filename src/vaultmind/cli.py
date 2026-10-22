@@ -1730,9 +1730,13 @@ def synthesize_workflows(ctx: click.Context, min_episodes: int) -> None:
 @click.pass_context
 def mcp_serve(ctx: click.Context, profile: str | None) -> None:
     """Start the MCP server for agent integration."""
+    from functools import partial
+
     from vaultmind.config import load_settings
     from vaultmind.graph import KnowledgeGraph
     from vaultmind.indexer import Embedder, VaultStore
+    from vaultmind.indexer.duplicate_detector import DuplicateDetector
+    from vaultmind.indexer.note_suggester import NoteSuggester
     from vaultmind.mcp.server import create_mcp_server
     from vaultmind.vault import VaultParser
 
@@ -1756,6 +1760,33 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
 
     config_profiles = settings.mcp.profiles if settings.mcp.profiles else None
     policy = load_profile(profile_name, config_profiles=config_profiles)
+    if not policy.allows_all_folders:
+        import re
+
+        def scope_index_warning(record: logging.LogRecord) -> bool | logging.LogRecord:
+            # Concurrent deletes can invalidate a filtered query's bounded preflight.
+            # Retain the warning without exposing Chroma's global population.
+            if record.name.startswith("chromadb.segment.impl.vector.") and re.fullmatch(
+                r"Number of requested results \d+ is greater than number of elements "
+                r"in index \d+, updating n_results = \d+",
+                record.getMessage(),
+            ):
+                return logging.makeLogRecord(
+                    record.__dict__
+                    | {
+                        "msg": "Search index availability changed; returning matching results",
+                        "args": (),
+                    }
+                )
+            return True
+
+        # Startup INFO/DEBUG logs can disclose global index and graph counts.
+        # Restore levels and the count-safe warning filter when this command closes.
+        for handler in logging.getLogger().handlers:
+            ctx.call_on_close(partial(handler.setLevel, handler.level))
+            handler.setLevel(max(handler.level, logging.WARNING))
+            handler.addFilter(scope_index_warning)
+            ctx.call_on_close(partial(handler.removeFilter, scope_index_warning))
     enforcer = ProfileEnforcer(policy, settings.vault.path)
     audit_log = AuditLogger(VAULTMIND_HOME / "data" / "mcp_audit.jsonl")
 
@@ -1772,11 +1803,24 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
     store = VaultStore(settings.chroma, embedder)
     graph = KnowledgeGraph(settings.graph)
 
+    detector = (
+        DuplicateDetector(settings.duplicate_detection, store)
+        if settings.duplicate_detection.enabled
+        else None
+    )
+    suggester = (
+        NoteSuggester(settings.note_suggestions, store, graph=graph)
+        if settings.note_suggestions.enabled
+        else None
+    )
+
     server = create_mcp_server(
         settings.vault.path,
         store,
         graph,
         parser,
+        duplicate_detector=detector,
+        note_suggester=suggester,
         enforcer=enforcer,
         audit_logger=audit_log,
     )

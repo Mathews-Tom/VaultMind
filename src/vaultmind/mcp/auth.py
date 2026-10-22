@@ -7,10 +7,11 @@ import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from vaultmind.indexer.store import VaultStore
 
 from vaultmind.errors import VaultMindError
 from vaultmind.vault.security import (
@@ -103,6 +104,67 @@ class ProfileEnforcer:
                 f"Path '{target_path}' outside folder scope for profile "
                 f"'{self._policy.name}'. Allowed: {', '.join(self._policy.folder_scope)}"
             )
+
+    def note_path(self, provenance: object) -> Path | None:
+        """Verify existing Markdown provenance and return its canonical relative path.
+
+        Metadata is not authority by itself. Missing, malformed, unresolvable and
+        forbidden paths cannot authorize a result, including for wildcard profiles.
+        """
+        if not isinstance(provenance, str) or not provenance or "\x00" in provenance:
+            return None
+        try:
+            target = validate_vault_path(provenance, self._vault_root)
+            self.check_path(Path(provenance))
+            if target.suffix != ".md" or not target.is_file():
+                return None
+            return target.relative_to(self._vault_root.resolve())
+        except (ProfileError, PathTraversalError, PathResolutionError, OSError, ValueError):
+            return None
+
+    def note_paths(self) -> list[str]:
+        """Enumerate verified note keys for filtering before a store's top-k limit."""
+        root = self._vault_root.resolve()
+        roots = (
+            [root]
+            if self._policy.allows_all_folders
+            else [root / folder for folder in dict.fromkeys(self._policy.folder_scope)]
+        )
+        paths: set[str] = set()
+        for folder in roots:
+            try:
+                self.check_path(folder)
+            except ProfileError:
+                continue
+            for candidate in folder.rglob("*.md"):
+                rel = self.note_path(str(candidate))
+                if rel is not None:
+                    paths.add(str(candidate.relative_to(root)))
+                    paths.add(str(rel))
+        return sorted(paths)
+
+    def search(
+        self,
+        store: VaultStore,
+        query: str,
+        n_results: int = 5,
+        where: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Authorize note-backed search before retrieval truncation and serialization."""
+        scoped_where = where
+        if not self._policy.allows_all_folders:
+            paths = self.note_paths()
+            if not paths:
+                return []
+            path_filter = {"note_path": {"$in": paths}}
+            scoped_where = {"$and": [where, path_filter]} if where else path_filter
+        hits = store.search(query, n_results=n_results, where=scoped_where)
+        results = []
+        for hit in hits:
+            metadata = hit.get("metadata")
+            if isinstance(metadata, dict) and self.note_path(metadata.get("note_path")) is not None:
+                results.append(hit)
+        return results
 
     def check_size(self, content: str) -> None:
         """Raise ProfileError if content exceeds size limit."""

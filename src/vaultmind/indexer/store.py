@@ -7,6 +7,7 @@ import math
 from typing import TYPE_CHECKING, Any, cast
 
 import chromadb
+from chromadb.api.types import validate_n_results
 from chromadb.config import Settings as ChromaSettings
 
 if TYPE_CHECKING:
@@ -176,7 +177,21 @@ class VaultStore:
 
         Returns:
             List of dicts with keys: chunk_id, content, metadata, distance.
+
+        With a nonempty metadata filter, bound the backend limit by matching chunks
+        using an ID-only lookup capped at the requested limit. This avoids Chroma's
+        global-index-size warning without truncating multi-chunk notes. No matches
+        returns an empty list without embedding or querying. Invalid limits retain
+        Chroma's validation errors even when the filter matches nothing. Unfiltered
+        search and its cache retain their existing behavior.
         """
+        if where:
+            validate_n_results(n_results)
+            matching = self._collection.get(where=where, include=[], limit=n_results)
+            n_results = len(matching["ids"])
+            if not n_results:
+                return []
+
         query_embedding = self.embedder.embed_query(query)
 
         # Check search cache (only for unfiltered queries)

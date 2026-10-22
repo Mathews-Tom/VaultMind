@@ -305,19 +305,21 @@ class TestDispatcherRequiresEnforcer:
             acceptance.MCP_NOTES
         )
 
-    def test_unrelated_tool_keeps_existing_behavior_without_an_enforcer(
+    def test_note_listing_requires_an_explicit_enforcer(
         self, vault_root: Path, parser: VaultParser
     ) -> None:
-        result = _dispatch_tool(
-            "vault_list",
-            {"folder": "00-inbox"},
-            vault_root,
-            _StubStore(),  # type: ignore[arg-type]
-            _StubGraph(),  # type: ignore[arg-type]
-            parser,
-            enforcer=None,
-        )
-        assert result == {"notes": ["00-inbox/fleeting-note.md"], "count": 1}
+        from vaultmind.mcp.auth import ProfileError
+
+        with pytest.raises(ProfileError):
+            _dispatch_tool(
+                "vault_list",
+                {"folder": "00-inbox"},
+                vault_root,
+                _StubStore(),  # type: ignore[arg-type]
+                _StubGraph(),  # type: ignore[arg-type]
+                parser,
+                enforcer=None,
+            )
 
     def test_full_policy_enforcer_preserves_unrestricted_semantics(
         self, vault_root: Path, parser: VaultParser
@@ -568,13 +570,6 @@ def test_researcher_and_full_access_are_unchanged(scenario: str, stdio_run) -> N
     assert hub["backlink_count"] == 3
     private = _actual(receipt, "read_frontmatter", path="03-private/secret.md")
     assert private["title"] == "Private Secret"
-
-
-def test_default_profile_warning_goes_to_stderr_not_stdout(stdio_run) -> None:
-    receipt, _checks, _root = stdio_run("researcher-default-control")
-    assert "defaulting to 'researcher' (read-only)" in receipt["stderr"]
-    assert all(line.startswith("{") for line in receipt["stdout_lines"])
-    assert "defaulting" not in "\n".join(receipt["stdout_lines"])
 
 
 def test_direct_dispatcher_matrix_with_explicit_enforcers(

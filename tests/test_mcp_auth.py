@@ -429,3 +429,464 @@ class TestTraversalResultScopes:
         assert hub["out_link_count"] == 3
         assert [b["title"] for b in hub["backlinks"]] == ["Private Secret"]
         assert hub["backlink_count"] == 1
+
+
+def _matches_where(metadata: dict, where: dict | None) -> bool:
+    """Implement the store's metadata predicate before applying its result limit."""
+    if not where:
+        return True
+    if "$and" in where:
+        return all(_matches_where(metadata, clause) for clause in where["$and"])
+    for key, expected in where.items():
+        actual = metadata.get(key)
+        if isinstance(expected, dict):
+            if "$in" in expected and actual not in expected["$in"]:
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+class _RankedStore:
+    def __init__(self, hits: list[dict]) -> None:
+        self.hits = hits
+        self.calls: list[tuple[str, int, dict | None]] = []
+
+    def search(self, query: str, n_results: int = 5, where: dict | None = None) -> list[dict]:
+        self.calls.append((query, n_results, where))
+        matches = [hit for hit in self.hits if _matches_where(hit.get("metadata", {}), where)]
+        return matches[:n_results]
+
+
+def _hit(path: object, *, distance: float = 0.01, note_type: str = "permanent") -> dict:
+    return {
+        "content": f"Chunk for {path}",
+        "distance": distance,
+        "metadata": {"note_path": path, "note_title": str(path), "note_type": note_type},
+    }
+
+
+def _note_dispatch(
+    name: str,
+    args: dict,
+    root: Path,
+    enforcer: ProfileEnforcer | None,
+    store: object | None = None,
+    **kwargs: object,
+) -> dict:
+    return _dispatch_tool(
+        name,
+        args,
+        root,
+        store if store is not None else _Unused(),  # type: ignore[arg-type]
+        _Unused(),  # type: ignore[arg-type]
+        VaultParser(VaultConfig(path=root)),  # type: ignore[arg-type]
+        enforcer=enforcer,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+class TestNoteResultBoundary:
+    @pytest.mark.parametrize(
+        "provenance",
+        [
+            None,
+            7,
+            True,
+            {},
+            [],
+            Path("02-projects/open-note.md"),
+            "",
+            "02-projects/missing.md",
+            "02-projects",
+            "04-resources/private-secret.md",
+            "../outside.md",
+            "02-projects/bad\x00.md",
+        ],
+    )
+    def test_unknown_or_forbidden_provenance_is_not_a_note(
+        self, linked_vault: Path, planner_policy: ProfilePolicy, provenance: object
+    ) -> None:
+        scope = ProfileEnforcer(planner_policy, linked_vault)
+        assert scope.note_path(provenance) is None
+
+    def test_allowed_provenance_and_inventory(
+        self, linked_vault: Path, planner_policy: ProfilePolicy
+    ) -> None:
+        (linked_vault / "02-projects" / "not-a-note.txt").write_text("text")
+        scope = ProfileEnforcer(planner_policy, linked_vault)
+        assert scope.note_path("02-projects/open-note.md") == Path("02-projects/open-note.md")
+        assert scope.note_path("02-projects/not-a-note.txt") is None
+        assert sorted(scope.note_paths()) == ["02-projects/hub.md", "02-projects/open-note.md"]
+
+    @pytest.mark.parametrize("profile", ["planner", "full"])
+    def test_symlink_escape_and_unresolvable_provenance_are_omitted(
+        self, linked_vault: Path, tmp_path: Path, profile: str
+    ) -> None:
+        outside = tmp_path.parent / f"{tmp_path.name}-outside"
+        outside.mkdir()
+        _write_note(outside / "external.md", "External", "Outside content")
+        (linked_vault / "02-projects" / "escape.md").symlink_to(outside / "external.md")
+        (linked_vault / "02-projects" / "loop.md").symlink_to("loop.md")
+        scope = ProfileEnforcer(load_profile(profile), linked_vault)
+        assert scope.note_path("02-projects/escape.md") is None
+        assert scope.note_path("02-projects/loop.md") is None
+        assert "02-projects/escape.md" not in scope.note_paths()
+        assert "02-projects/loop.md" not in scope.note_paths()
+
+    def test_search_filters_before_top_k_and_preserves_note_type(
+        self, linked_vault: Path, planner_policy: ProfilePolicy
+    ) -> None:
+        store = _RankedStore(
+            [
+                *[_hit("04-resources/private-secret.md") for _ in range(30)],
+                _hit("02-projects/hub.md", note_type="project"),
+                _hit("02-projects/open-note.md"),
+            ]
+        )
+        result = _note_dispatch(
+            "vault_search",
+            {"query": "query", "n_results": 1, "note_type": "permanent"},
+            linked_vault,
+            ProfileEnforcer(planner_policy, linked_vault),
+            store,
+        )
+        assert result == {"results": [_hit("02-projects/open-note.md")], "count": 1}
+
+    @pytest.mark.parametrize("profile", ["planner", "full"])
+    def test_search_defensively_omits_invalid_store_provenance(
+        self, linked_vault: Path, profile: str
+    ) -> None:
+        class IgnoringFilterStore(_RankedStore):
+            def search(
+                self, query: str, n_results: int = 5, where: dict | None = None
+            ) -> list[dict]:
+                return self.hits
+
+        valid = _hit("02-projects/open-note.md")
+        store = IgnoringFilterStore(
+            [
+                _hit(None),
+                _hit(5),
+                _hit({}),
+                _hit("02-projects/missing.md"),
+                _hit("../outside.md"),
+                {"content": "Unknown source"},
+                valid,
+            ]
+        )
+        result = _note_dispatch(
+            "vault_search",
+            {"query": "query"},
+            linked_vault,
+            ProfileEnforcer(load_profile(profile), linked_vault),
+            store,
+        )
+        assert result == {"results": [valid], "count": 1}
+
+    def test_full_search_retains_valid_private_hits_and_scores(self, linked_vault: Path) -> None:
+        hits = [_hit("04-resources/private-secret.md"), _hit("02-projects/hub.md", distance=0.12)]
+        result = _note_dispatch(
+            "vault_search",
+            {"query": "query"},
+            linked_vault,
+            ProfileEnforcer(load_profile("full"), linked_vault),
+            _RankedStore(hits),
+        )
+        assert result == {"results": hits, "count": 2}
+
+    @pytest.mark.parametrize("folder", [None, "", "."])
+    def test_list_is_virtual_allowed_root_aggregate(
+        self, linked_vault: Path, planner_policy: ProfilePolicy, folder: str | None
+    ) -> None:
+        result = _note_dispatch(
+            "vault_list",
+            {} if folder is None else {"folder": folder},
+            linked_vault,
+            ProfileEnforcer(planner_policy, linked_vault),
+        )
+        assert result == {
+            "notes": ["02-projects/hub.md", "02-projects/open-note.md"],
+            "count": 2,
+        }
+
+    @pytest.mark.parametrize("folder", ["04-resources", "09-missing"])
+    def test_explicit_forbidden_list_is_denied(
+        self, linked_vault: Path, planner_policy: ProfilePolicy, folder: str
+    ) -> None:
+        with pytest.raises(ProfileError):
+            _note_dispatch(
+                "vault_list",
+                {"folder": folder},
+                linked_vault,
+                ProfileEnforcer(planner_policy, linked_vault),
+            )
+
+    @pytest.mark.parametrize(
+        ("name", "args"),
+        [
+            ("vault_search", {"query": "query"}),
+            ("vault_list", {}),
+            ("vault_read", {"path": "02-projects/hub.md"}),
+            ("vault_write", {"path": "02-projects/new.md", "content": "body"}),
+            ("find_duplicates", {"note_path": "02-projects/hub.md"}),
+            ("suggest_links", {"note_path": "02-projects/hub.md"}),
+            ("capture", {"content": "body"}),
+            ("capture_note", {"content": "body"}),
+        ],
+    )
+    def test_note_dispatch_requires_enforcer(
+        self, linked_vault: Path, name: str, args: dict
+    ) -> None:
+        with pytest.raises(ProfileError):
+            _note_dispatch(name, args, linked_vault, None)
+
+    def test_direct_read_scope_and_full_control(
+        self, linked_vault: Path, planner_policy: ProfilePolicy
+    ) -> None:
+        scope = ProfileEnforcer(planner_policy, linked_vault)
+        allowed = _note_dispatch(
+            "vault_read", {"path": "02-projects/open-note.md"}, linked_vault, scope
+        )
+        assert "Open body." in allowed["content"]
+        with pytest.raises(ProfileError):
+            _note_dispatch(
+                "vault_read", {"path": "04-resources/private-secret.md"}, linked_vault, scope
+            )
+        full = _note_dispatch(
+            "vault_read",
+            {"path": "04-resources/private-secret.md"},
+            linked_vault,
+            ProfileEnforcer(load_profile("full"), linked_vault),
+        )
+        assert "Back to [[Hub]]." in full["content"]
+
+    def test_restricted_duplicates_find_allowed_hit_below_private_top_k(
+        self, linked_vault: Path, planner_policy: ProfilePolicy
+    ) -> None:
+        from vaultmind.config import DuplicateDetectionConfig
+        from vaultmind.indexer.duplicate_detector import DuplicateDetector
+
+        store = _RankedStore(
+            [
+                *[_hit("04-resources/private-secret.md") for _ in range(30)],
+                _hit("02-projects/open-note.md"),
+            ]
+        )
+        detector = DuplicateDetector(
+            DuplicateDetectionConfig(min_content_length=1),
+            store,  # type: ignore[arg-type]
+        )
+        result = _note_dispatch(
+            "find_duplicates",
+            {"note_path": "02-projects/hub.md", "max_results": 1},
+            linked_vault,
+            ProfileEnforcer(planner_policy, linked_vault),
+            store,
+            duplicate_detector=detector,
+        )
+        assert result["count"] == 1
+        assert [match["path"] for match in result["matches"]] == ["02-projects/open-note.md"]
+        assert "private-secret" not in str(result)
+
+    def test_restricted_suggestions_are_denied_before_producer_access(
+        self, linked_vault: Path, planner_policy: ProfilePolicy
+    ) -> None:
+        with pytest.raises(ProfileError):
+            _note_dispatch(
+                "suggest_links",
+                {"note_path": "02-projects/hub.md"},
+                linked_vault,
+                ProfileEnforcer(planner_policy, linked_vault),
+                note_suggester=_Unused(),
+            )
+
+    def test_full_duplicate_and_suggestion_controls(self, linked_vault: Path) -> None:
+        from vaultmind.config import DuplicateDetectionConfig, NoteSuggestionsConfig
+        from vaultmind.indexer.duplicate_detector import DuplicateDetector
+        from vaultmind.indexer.note_suggester import NoteSuggester
+
+        scope = ProfileEnforcer(load_profile("full"), linked_vault)
+        duplicate_store = _RankedStore([_hit("04-resources/private-secret.md")])
+        duplicates = _note_dispatch(
+            "find_duplicates",
+            {"note_path": "02-projects/hub.md"},
+            linked_vault,
+            scope,
+            duplicate_store,
+            duplicate_detector=DuplicateDetector(
+                DuplicateDetectionConfig(min_content_length=1),
+                duplicate_store,  # type: ignore[arg-type]
+            ),
+        )
+        assert duplicates["count"] == 1
+        assert duplicates["matches"][0]["path"] == "04-resources/private-secret.md"
+        suggestion_store = _RankedStore([_hit("04-resources/private-secret.md", distance=0.25)])
+        suggestions = _note_dispatch(
+            "suggest_links",
+            {"note_path": "02-projects/hub.md"},
+            linked_vault,
+            scope,
+            suggestion_store,
+            note_suggester=NoteSuggester(
+                NoteSuggestionsConfig(min_content_length=1),
+                suggestion_store,  # type: ignore[arg-type]
+            ),
+        )
+        assert suggestions["count"] == 1
+        assert suggestions["suggestions"][0] == {
+            "path": "04-resources/private-secret.md",
+            "title": "04-resources/private-secret.md",
+            "similarity": 0.75,
+            "shared_entities": [],
+            "graph_distance": None,
+            "composite_score": 0.75,
+        }
+
+    def test_explicit_vault_root_list_is_scoped(
+        self, linked_vault: Path, planner_policy: ProfilePolicy
+    ) -> None:
+        result = _note_dispatch(
+            "vault_list",
+            {"folder": str(linked_vault.resolve())},
+            linked_vault,
+            ProfileEnforcer(planner_policy, linked_vault),
+        )
+        assert result == {
+            "notes": ["02-projects/hub.md", "02-projects/open-note.md"],
+            "count": 2,
+        }
+
+    def test_full_list_retains_private_notes(self, linked_vault: Path) -> None:
+        result = _note_dispatch(
+            "vault_list",
+            {},
+            linked_vault,
+            ProfileEnforcer(load_profile("full"), linked_vault),
+        )
+        assert result == {
+            "notes": [
+                "02-projects/hub.md",
+                "02-projects/open-note.md",
+                "04-resources/open-note.md",
+                "04-resources/private-secret.md",
+            ],
+            "count": 4,
+        }
+
+    def test_direct_write_denial_preserves_existing_note(
+        self, linked_vault: Path, planner_policy: ProfilePolicy
+    ) -> None:
+        path = linked_vault / "04-resources/private-secret.md"
+        before = path.read_bytes()
+        with pytest.raises(ProfileError):
+            _note_dispatch(
+                "vault_write",
+                {"path": "04-resources/private-secret.md", "content": "replacement"},
+                linked_vault,
+                ProfileEnforcer(planner_policy, linked_vault),
+            )
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("write,limit", [(False, None), (True, 1)])
+    def test_direct_write_permissions_and_size_precede_directory_creation(
+        self, linked_vault: Path, write: bool, limit: int | None
+    ) -> None:
+        scope = ProfileEnforcer(
+            ProfilePolicy(
+                name="write-test",
+                description="Write limits",
+                allowed_tools=frozenset({"*"}),
+                folder_scope=("*",),
+                write_enabled=write,
+                max_note_size_bytes=limit,
+            ),
+            linked_vault,
+        )
+        with pytest.raises(ProfileError):
+            _note_dispatch(
+                "vault_write",
+                {"path": "02-projects/new/note.md", "content": "é"},
+                linked_vault,
+                scope,
+            )
+        assert not (linked_vault / "02-projects/new").exists()
+
+    @pytest.mark.parametrize("profile", ["planner", "full"])
+    def test_direct_write_allowed_and_indexed(self, linked_vault: Path, profile: str) -> None:
+        class IndexStore:
+            def __init__(self) -> None:
+                self.paths: list[str] = []
+
+            def index_single_note(self, note: object, parser: VaultParser) -> None:
+                self.paths.append(str(note.path))  # type: ignore[attr-defined]
+
+        store = IndexStore()
+        result = _note_dispatch(
+            "vault_write",
+            {"path": "02-projects/new/note.md", "content": "# Written\n\nbody"},
+            linked_vault,
+            ProfileEnforcer(load_profile(profile), linked_vault),
+            store,
+        )
+        assert result == {"status": "ok", "path": "02-projects/new/note.md"}
+        assert (linked_vault / result["path"]).read_text() == "# Written\n\nbody"
+        assert store.paths == ["02-projects/new/note.md"]
+
+    def test_full_search_retains_valid_literal_provenance(self, linked_vault: Path) -> None:
+        (linked_vault / "02-projects/alias.md").symlink_to("open-note.md")
+        hits = [
+            _hit("./02-projects/open-note.md"),
+            _hit(str(linked_vault / "02-projects/open-note.md")),
+            _hit("02-projects/alias.md"),
+        ]
+        result = _note_dispatch(
+            "vault_search",
+            {"query": "query"},
+            linked_vault,
+            ProfileEnforcer(load_profile("full"), linked_vault),
+            _RankedStore(hits),
+        )
+        assert result == {"results": hits, "count": 3}
+
+    def test_restricted_search_defensively_rejects_private_hits(self, linked_vault: Path) -> None:
+        class IgnoringFilterStore(_RankedStore):
+            def search(
+                self, query: str, n_results: int = 5, where: dict | None = None
+            ) -> list[dict]:
+                return self.hits
+
+        valid = _hit("02-projects/open-note.md")
+        result = _note_dispatch(
+            "vault_search",
+            {"query": "query"},
+            linked_vault,
+            ProfileEnforcer(load_profile("planner"), linked_vault),
+            IgnoringFilterStore([_hit("04-resources/private-secret.md"), valid]),
+        )
+        assert result == {"results": [valid], "count": 1}
+
+    def test_full_suggestion_omits_unverified_provenance(self, linked_vault: Path) -> None:
+        from vaultmind.config import NoteSuggestionsConfig
+        from vaultmind.indexer.note_suggester import NoteSuggester
+
+        store = _RankedStore(
+            [
+                _hit("02-projects/missing.md", distance=0.25),
+                _hit("../outside.md", distance=0.25),
+                _hit("02-projects/open-note.md", distance=0.25),
+            ]
+        )
+        result = _note_dispatch(
+            "suggest_links",
+            {"note_path": "02-projects/hub.md"},
+            linked_vault,
+            ProfileEnforcer(load_profile("full"), linked_vault),
+            store,
+            note_suggester=NoteSuggester(
+                NoteSuggestionsConfig(min_content_length=1),
+                store,  # type: ignore[arg-type]
+            ),
+        )
+        assert result["count"] == 1
+        assert result["suggestions"][0]["path"] == "02-projects/open-note.md"
