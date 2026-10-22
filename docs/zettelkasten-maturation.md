@@ -24,12 +24,14 @@ Identified clusters are presented as a digest — a summary of which notes group
 
 ### 3. Synthesis
 
-When you approve a cluster, the LLM synthesizes the constituent notes into a single permanent note:
+Successful synthesis creates a single permanent note from the constituent notes:
 
 - The permanent note includes `[[wikilinks]]` back to the source fleeting notes
 - Frontmatter is set to `type: permanent` with tags derived from the source notes
 - The synthesis uses `maturation.synthesis_model` (default: `llm.thinking_model`)
 - Max output: `maturation.synthesis_max_tokens` (default: 1500)
+
+Missing source notes, invalid generated frontmatter, or unresolved wikilinks fail synthesis rather than recording completion. A failed synthesis does not add the cluster fingerprint to the completed set. Direct `/mature synthesize <id>` requests report the error; scheduled review proposals use the failure/retry flow below.
 
 ### 4. Dismissal
 
@@ -43,28 +45,32 @@ Clusters you dismiss are tracked and won't resurface until `maturation.dismissed
 /mature
 ```
 
-Shows the top clusters ready for maturation (up to `maturation.max_clusters_per_digest`, default: 3). Each cluster shows its constituent notes and a synthesis preview.
+Shows the top clusters ready for maturation (up to `maturation.max_clusters_per_digest`, default: 3), with note-title samples and an ID prefix. Discovery does not generate an LLM synthesis preview. An authorized user can run `/mature synthesize <id>` to synthesize directly, or `/mature dismiss <id>` to dismiss a cluster. The direct synthesis command is an explicit user action, not a scheduled queue proposal.
+
+### Scheduled Proposal Review and Recovery
+
+With `[autonomy].enabled = true`, scheduled discovery creates `MATURATION_SYNTHESIS` proposals in the shared review queue. They default to **SKIM**; `[autonomy].force_block = true` routes them to **BLOCK**. Review SKIM items through `/review`, or resolve individual BLOCK items through their Approve/Reject buttons. BLOCK notification delivery requires an enabled, available bot delivery path; undelivered pending proposals remain in `/review`.
+
+Approval re-discovers the cluster by its fingerprint before calling the real synthesis operation. A cluster that has disappeared, been dismissed, or already been synthesized fails the operation instead of becoming `applied`. Successful operations record `applied` with the generated note path. Failed operations record `failed`, not a human rejection or a completed mutation.
+
+Inspect the error and any partial effects before using the explicit Retry button in the failure response or `/review`'s failed-operation section. Failed proposals persist across bot restarts; approve-all does not retry them. A successful synthesis records its cluster fingerprint so discovery does not offer it again. No automatic retry service runs. Queue migration and rollback instructions are in the [Telegram review guide](telegram-bot.md#queue-migration-and-rollback).
 
 ### Scheduling
 
-The maturation pipeline runs on a configurable schedule:
+The bot registers a `maturation_digest` job at a seven-day interval while the maturation pipeline is enabled. A job without retained scheduler state is due on the next scheduler check; later runs use persisted last-run state. The process must be running for a job to execute.
 
-- **Day:** `maturation.schedule_day` (default: `sunday`)
-- **Hour:** `maturation.schedule_hour` (default: 9, UTC)
-- **Timezone:** `maturation.timezone` (default: `UTC`)
-
-The scheduler (`services/scheduler.py`) is asyncio-native and runs within the bot process.
+`maturation.schedule_day`, `schedule_hour`, and `timezone` are parsed settings, but the current bot assembly does not use them to schedule this job. Their defaults (`sunday`, `9`, `UTC`) are not an enforced Sunday-at-09:00 schedule. The scheduler (`services/scheduler.py`) is asyncio-native and runs within the bot process.
 
 ## Configuration
 
-All settings live in `[maturation]` section of `config/default.toml`:
+The pipeline's settings live in `[maturation]`; the defaults below include the three reserved calendar fields. Scheduled proposal routing uses `[autonomy]`, and scheduler persistence uses `[scheduler]`.
 
 ```toml
 [maturation]
 enabled = true
-schedule_day = "sunday"
-schedule_hour = 9
-timezone = "UTC"
+schedule_day = "sunday"                      # Parsed only; not used by the bot job
+schedule_hour = 9                            # Parsed only
+timezone = "UTC"                             # Parsed only
 min_cluster_size = 3
 max_clusters_per_digest = 3
 cluster_eps = 0.25
@@ -95,4 +101,4 @@ The `MaturationPipeline` in `pipeline/maturation.py` coordinates the flow:
 4. Presents digest (via `/mature` command or scheduled notification)
 5. On approval, synthesizes via `pipeline/synthesis.py`
 
-The scheduler in `services/scheduler.py` tracks last-run timestamps persistently, ensuring the pipeline runs at the configured interval even across bot restarts.
+The scheduler in `services/scheduler.py` retains last-run timestamps across bot restarts. This preserves progress for the assembled seven-day job; it does not activate the reserved calendar fields or execute jobs while the process is stopped.

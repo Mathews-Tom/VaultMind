@@ -118,7 +118,7 @@ The thinking partner draws context from both ChromaDB (semantic search) and the 
 | Command   | Usage     | Description                                                                                        |
 | --------- | --------- | --------------------------------------------------------------------------------------------------- |
 | `/review` | `/review` | Weekly review with graph insights, trending topics, connection suggestions, and a "Pending Review" section listing SKIM-lane autonomy proposals with a one-tap approve-all button |
-| `/health` | `/health` | System health check — reports status of ChromaDB, graph, watcher, and LLM                           |
+| `/health` | `/health` | On-demand vector-store, graph, vault, LLM-key configuration, and graph-file status; not a live provider-authentication or watcher-liveness check |
 | `/stats`  | `/stats`  | Vault and graph statistics (note counts, types, entities, relationships)                             |
 | `/help`   | `/help`   | Quick reference for all commands                                                                     |
 

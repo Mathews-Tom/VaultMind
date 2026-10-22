@@ -8,19 +8,19 @@ Configuration precedence, highest priority first:
 4. **TOML** — the explicit `--config PATH` file, or `config/default.toml` relative to the current working directory.
 5. **Model defaults** — used for keys absent from all higher-priority sources.
 
-Nested keys use `__`, for example `VAULTMIND_VAULT__PATH=/absolute/vault` and `VAULTMIND_SEARCH__HYBRID_ENABLED=false`. Overrides merge by nested key: changing the vault path does not discard a TOML `inbox_folder`. Lists use JSON syntax, for example `VAULTMIND_TELEGRAM__ALLOWED_USER_IDS='[123,456]'`. Invalid selected values raise a configuration error; they do not fall back to a valid lower-priority value.
+Nested keys use `__`, for example `VAULTMIND_VAULT__PATH=/absolute/vault` and `VAULTMIND_SEARCH__HYBRID_ENABLED=false`. Overrides merge by nested key: changing the vault path does not discard a TOML `inbox_folder`. Lists use JSON syntax, for example `VAULTMIND_TELEGRAM__ALLOWED_USER_IDS='[123,456]'`. Values rejected by model field types or validators raise a configuration error; they do not fall back to a valid lower-priority value. Loop schedule strings are checked later, when jobs are assembled; see [Compound Loops](#compound-loops).
 
 MCP profile names are dictionary keys, including names that match policy fields such as `allowed_tools`, `description`, or `write_enabled`. For example, `VAULTMIND_MCP__PROFILES__ALLOWED_TOOLS__FOLDER_SCOPE='["00-inbox"]'` changes the `allowed_tools` profile's folder scope without changing its allowed tools or write policy. The same JSON-list syntax applies in cwd `.env`.
 
 Settings loading requires `pydantic-settings>=2.13.1,<3`. The environment/dotenv source adapter preserves that API's resolved per-load controls; older settings-library releases do not expose all of those controls.
 
-All CLI, bot, and MCP assemblies use [`load_settings`](../src/vaultmind/config.py), which delegates to `Settings.from_toml`. TOML is a separate lower-priority Pydantic source, not a dictionary of constructor overrides. Plain `Settings(...)` reads environment/`.env` and defaults without implicitly selecting a TOML file. A missing TOML file retains the established environment/default loading behavior; malformed TOML and unreadable files fail.
+All CLI, bot, and MCP assemblies use [`load_settings`](../src/vaultmind/config.py), which delegates to `Settings.from_toml`. TOML is a separate lower-priority Pydantic source, not a dictionary of constructor overrides. Plain `Settings(...)` reads environment/`.env` and defaults without implicitly selecting a TOML file. Direct `Settings.from_toml` and `load_settings` calls retain environment/default loading when a TOML file is missing; the CLI rejects an explicitly missing `--config` path before loading. Malformed TOML and unreadable files fail.
 
 For an isolated run, set `HOME`, use a working directory without a personal `.env`, pass an explicit temporary TOML file, and configure every persistent component the command uses. Overriding `vault.path` alone does not relocate `chroma.persist_dir`, `graph.persist_path`, or `search.bm25_db_path`. The offline `scripts/verify_acceptance.py --case config --offline` case exercises temporary targets through runtime consumers with deterministic external embeddings; it is not hosted-provider qualification.
 
 ## Declared versus consumed controls
 
-The five sections below are **dormant schema**, not operational capabilities. Their values are parsed and validated, but enabling them does not start jobs, enforce approval policy, create identity notes, send drafts, or connect adapters. Table descriptions in these sections describe reserved intent only.
+The following sections are **not wired into the shipped CLI/bot assemblies**. Their values are parsed and validated, but changing them does not activate the described runtime behavior. The first five reserve future capabilities; the remaining three have standalone library implementations without a settings-driven assembly. Field descriptions for these sections describe declared intent, not operational guarantees.
 
 | Section | Declaration in [`config.py`](../src/vaultmind/config.py) | Runtime status |
 | --- | --- | --- |
@@ -29,8 +29,11 @@ The five sections below are **dormant schema**, not operational capabilities. Th
 | `heartbeat` | `HeartbeatConfig`, `Settings.heartbeat` | Dormant; no heartbeat orchestrator |
 | `drafts` | `DraftsConfig`, `Settings.drafts` | Dormant; no draft lifecycle consumer |
 | `integrations` | `IntegrationsConfig`, `Settings.integrations` | Dormant; no integration-policy consumer |
+| `consolidation` | `ConsolidationConfig`, `Settings.consolidation` | No assembled consolidation job; `MemoryConsolidator` requires explicit construction |
+| `health` | `HealthConfig`, `Settings.health` | No assembled periodic monitor; bot `/health` uses separate on-demand checks |
+| `mcp_retry` | `MCPRetryConfig`, `Settings.mcp_retry` | CLI `mcp-serve` does not construct or pass a retry executor |
 
-Consumer inventory: [`cli.py`](../src/vaultmind/cli.py) assembles CLI commands, bot jobs, and MCP dependencies; [`mcp/server.py`](../src/vaultmind/mcp/server.py) implements MCP tools. Neither reads these five settings sections. Existing `autonomy` review queues, `sources` connectors, scheduler jobs, and MCP profiles use their own consumed controls; they do not make these five sections active.
+Consumer inventory: [`cli.py`](../src/vaultmind/cli.py) assembles CLI commands, bot jobs, and MCP dependencies; [`mcp/server.py`](../src/vaultmind/mcp/server.py) implements MCP tools. The CLI does not consume the eight sections above. The MCP server accepts an explicitly supplied `ToolRetryExecutor`, but does not load `[mcp_retry]` itself. Existing `autonomy` review queues, `sources` connectors, scheduler jobs, and MCP profiles use their own consumed controls.
 
 ---
 
@@ -316,12 +319,14 @@ Activation-based note decay — notes that are accessed, edited, or referenced s
 
 Zettelkasten maturation pipeline — clusters fleeting/literature notes for synthesis into permanent notes.
 
+The bot currently registers maturation discovery at a seven-day interval using persistent scheduler state. `schedule_day`, `schedule_hour`, and `timezone` are parsed but not consumed by that assembly; they do not set its calendar schedule. See the [maturation guide](zettelkasten-maturation.md#scheduling) for scheduled review and explicit retry behavior.
+
 | Key                             | Type   | Default                      | Description                                        |
 | ------------------------------- | ------ | ---------------------------- | -------------------------------------------------- |
 | `enabled`                       | bool   | `true`                       | Enable maturation pipeline                         |
-| `schedule_day`                  | string | `sunday`                     | Day of the week for scheduled maturation           |
-| `schedule_hour`                 | int    | `9`                          | Hour (UTC) for scheduled maturation                |
-| `timezone`                      | string | `UTC`                        | Timezone for scheduling                            |
+| `schedule_day`                  | string | `sunday`                     | Reserved calendar day; not consumed by the bot job |
+| `schedule_hour`                 | int    | `9`                          | Reserved calendar hour; not consumed by the bot job |
+| `timezone`                      | string | `UTC`                        | Reserved calendar timezone; not consumed by the bot job |
 | `min_cluster_size`              | int    | `3`                          | Minimum notes per cluster                          |
 | `max_clusters_per_digest`       | int    | `3`                          | Max clusters per maturation digest                 |
 | `cluster_eps`                   | float  | `0.25`                       | DBSCAN epsilon (distance threshold)                |
@@ -507,9 +512,20 @@ Procedural memory — self-evolving workflow patterns mined from episodic memory
 | Key                        | Type   | Default | Description                                             |
 | -------------------------- | ------ | ------- | ------------------------------------------------------- |
 | `enabled`                  | bool   | `false` | Enable procedural memory (experimental)                 |
-| `db_path`                  | string | `""`    | SQLite path (empty = `~/.vaultmind/data/workflows.db`)  |
+| `db_path`                  | string | `""`    | SQLite path (empty = `~/.vaultmind/data/procedural.db`) |
 | `min_episodes_for_pattern` | int    | `3`     | Minimum resolved episodes to form a workflow            |
 | `synthesis_model`          | string | `""`    | Model for workflow synthesis (empty = `llm.fast_model`) |
+
+## `[consolidation]`
+
+Parsed configuration only in the shipped assemblies. [`MemoryConsolidator`](../src/vaultmind/memory/consolidation.py) can be constructed explicitly by library callers; `enabled = true` does not register it with the bot scheduler, and `schedule` does not schedule a job.
+
+| Key | Type | Default | Declared intent |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Reserve opt-in consolidation |
+| `retention_days` | int | `365` | Episode archival age |
+| `min_references_for_promotion` | int | `3` | Promotion reference threshold |
+| `schedule` | string | `"0 0 1 * *"` | Monthly cron expression; not consumed by the shipped scheduler |
 
 ## Compound Loops
 
@@ -517,13 +533,16 @@ Procedural memory — self-evolving workflow patterns mined from episodic memory
 [loops]
 insight_enabled = true        # Usage pattern analysis loop
 insight_interval_days = 7
+insight_schedule = ""         # Cron expression; empty derives it from interval_days
 evolution_enabled = true       # Belief evolution tracking loop
 evolution_interval_days = 7
+evolution_schedule = ""
 procedural_enabled = false     # Workflow synthesis loop (requires [procedural].enabled)
 procedural_interval_days = 7
+procedural_schedule = ""
 ```
 
-Per-loop enable flags and schedule intervals. The procedural loop additionally requires `[procedural].enabled = true`. All loops are state-aware — each run reads and extends its prior-run state, enabling cross-cycle pattern recognition.
+Per-loop enable flags, schedule strings, and fallback intervals are consumed by the bot assembly. Loop schedule strings are not cron-validated during settings loading. During job assembly, a valid nonempty cron expression is used directly and a recognized natural-language schedule is converted to cron. An empty or invalid schedule derives a cron expression from `interval_days`; invalid nonempty schedules also log a warning. The procedural loop additionally requires `[procedural].enabled = true`. All loops are state-aware — each run reads and extends its prior-run state, enabling cross-cycle pattern recognition.
 
 ## `[mcp]`
 
@@ -568,3 +587,35 @@ Profile values are validated during settings loading, before the MCP server star
 The environment example narrows the scope of a planner already defined in TOML. Without a `[mcp.profiles.planner]` table, that variable alone creates a custom `planner` with the defaults below: it allows no tools and replaces, rather than inherits, the built-in planner policy.
 
 A configured profile replaces the same-named built-in profile rather than inheriting its policy. Omitted profile fields retain the established custom-profile defaults: empty description, no allowed tools, folder scope `["*"]`, writes disabled, no note-size limit, and confirmation disabled. Built-in researcher, planner, and full policies remain unchanged when no same-named profile is configured.
+
+## `[health]`
+
+Parsed configuration only in the shipped assemblies. [`HealthMonitor`](../src/vaultmind/services/health.py) is available for explicit library construction, but the bot does not create or periodically run it from this section. The on-demand `/health` command reports vector-store, graph, vault, configured LLM-key, and graph-file status independently; it does not test live provider authentication or consume these flags.
+
+| Key | Type | Default | Declared intent |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Reserve periodic health monitoring |
+| `check_interval_seconds` | int | `60` | Periodic check interval |
+| `check_chromadb` | bool | `true` | Vector-store checks |
+| `check_sqlite` | bool | `true` | SQLite checks |
+| `check_graph_file` | bool | `true` | Graph-file checks |
+| `check_llm` | bool | `true` | LLM checks |
+| `check_bot` | bool | `true` | Bot checks |
+| `check_vault_access` | bool | `true` | Vault-access checks |
+| `chromadb_latency_warn_ms` | int | `1000` | Vector-store latency warning threshold |
+| `retention_days` | int | `30` | Health-history retention |
+
+## `[mcp_retry]`
+
+Parsed configuration only in the shipped CLI. `mcp-serve` does not construct or pass [`ToolRetryExecutor`](../src/vaultmind/mcp/retry.py), so these settings do not enable automatic tool retries or LLM correction. Library callers can explicitly supply an executor to `create_mcp_server`; tool authorization and result-scope policy remain separate requirements.
+
+| Key | Type | Default | Declared intent |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Reserve MCP correction/retry behavior |
+| `max_retries` | int | `1` | Intended retry limit |
+| `use_llm_correction` | bool | `true` | Permit correction when an executor and LLM are supplied |
+| `correction_model` | string | `""` | Intended correction-model selection |
+| `timeout_seconds` | int | `30` | Intended execution timeout |
+| `retryable_errors` | list[string] | `["ValueError", "LLMError", "TimeoutError", "ConnectionError"]` | Error class names considered for correction |
+
+The standalone executor performs at most one corrected dispatch. It does not consume `max_retries`, `timeout_seconds`, or `correction_model`; the caller supplies its `llm_model` separately. These fields are not enforced retry, timeout, or model-selection controls.

@@ -52,6 +52,8 @@ Returns the entity's neighbors, relationships, and connection metadata within th
 - `graph_query` — entity neighbors and relationships (configurable depth)
 - `graph_path` — shortest path between two entities
 
+Both tools require a profile with wildcard folder access (`folder_scope = ["*"]`) as well as the appropriate tool allowlist. Folder-restricted profiles, including the built-in planner, receive an explicit denial before graph traversal: merged labels, attributes, and relationships do not carry complete contribution provenance. Listing an allowed source note on a graph record does not prove all contributions are in scope. Do not widen a profile merely to bypass a denial; use scoped note search and traversal when global graph disclosure is not authorized. See the [complete MCP result policy](mcp-integration.md#complete-result-policy).
+
 ### CLI
 
 ```bash
