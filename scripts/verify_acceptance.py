@@ -975,6 +975,7 @@ async def mcp_stdio_session(
     frames_out: list[dict[str, Any]] = []
     errors: list[str] = []
     results: list[Any] = []
+    embedding_boundary_tools: list[str] = []
     stderr_chunks: list[bytes] = []
     stderr_path = state / "stderr.txt"
 
@@ -998,10 +999,15 @@ async def mcp_stdio_session(
                     # that call's own stderr (plus only post-response bookkeeping lines of
                     # the previous call, which never carry arguments).
                     startup, offset = stderr_since(0)
-                    for tool, arguments in calls:
-                        results.append(await session.call_tool(tool, arguments))
-                        chunk, offset = stderr_since(offset)
-                        stderr_chunks.append(chunk)
+                    with (state / "launcher.jsonl").open(encoding="utf-8") as boundary_log:
+                        boundary_log.seek(0, os.SEEK_END)
+                        for tool, arguments in calls:
+                            results.append(await session.call_tool(tool, arguments))
+                            chunk, offset = stderr_since(offset)
+                            stderr_chunks.append(chunk)
+                            for line in boundary_log:
+                                if json.loads(line)["kind"] == "embedding-boundary":
+                                    embedding_boundary_tools.append(tool)
                 closing = time.monotonic()
             shutdown_seconds = time.monotonic() - closing
     return {
@@ -1016,6 +1022,7 @@ async def mcp_stdio_session(
         "state": state,
         "stderr_startup": startup.decode("utf-8", errors="replace"),
         "stderr_chunks": [chunk.decode("utf-8", errors="replace") for chunk in stderr_chunks],
+        "embedding_boundary_tools": embedding_boundary_tools,
     }
 
 
@@ -1866,11 +1873,10 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
             [{"kind": "embedding-fixture", "dimensions": 2}],
             [event for event in events if event["kind"] == "embedding-fixture"],
         )
-        embedding_calls = [event for event in events if event["kind"] == "embedding-boundary"]
         check(
             name + ".embedding.root-search-exercised",
-            name in ("root-scoped", "root-full"),
-            bool(embedding_calls),
+            any(c["tool"] == "vault_search" and c["audit"] == "OK" for c in calls),
+            "vault_search" in run["embedding_boundary_tools"],
         )
     raw = (state / "stdout.raw").read_bytes().decode("utf-8")
     stderr = mcp_trim((state / "stderr.txt").read_text(encoding="utf-8"))
@@ -2150,6 +2156,7 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         "import_origin": entry["module_file"],
         "distribution": {"version": entry["dist_version"], "direct_url": entry["direct_url"]},
         "launcher_events": events,
+        "embedding_boundary_tools": run["embedding_boundary_tools"],
         "stdout_lines": lines,
         "stderr": stderr,
         "audit": audit,

@@ -353,6 +353,8 @@ Symlink loops fail closed with a caller-path-only error, on Python 3.12 and 3.13
 
 Run `uv run --extra dev --extra mcp python scripts/verify_acceptance.py --case mcp --offline` to exercise the installed CLI entrypoint and MCP SDK transport against temporary synthetic vaults. The receipt records per-call expected and actual results, stdout protocol validation, scope counts, package origins, and network-denial instrumentation. No hosted embeddings, model calls, private vault input, or Telegram delivery are involved.
 
+Embedding-boundary events are attributed to each completed tool call and recorded in the receipt. An allowed `vault_search` must exercise its own embedding boundary; events from `find_duplicates`, captures, or initialization cannot satisfy that check. The fixture replaces only the embedding provider's vector computation, not the search handler or returned results.
+
 ### Audit logging
 
 Every MCP tool call is logged with:
