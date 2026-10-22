@@ -41,6 +41,8 @@ review lanes, background source connectors, and non-destructive edit lineage.
 - **Smart caching** — SQLite-backed embedding cache eliminates redundant API calls during re-indexing
 - **Your data, your infra** — self-hosted, local-first, no cloud dependency
 
+**Delivery limits:** Non-destructive edit history is implemented, but consistent exclusion of retired or superseded text after full/watch reindexing and the original native-watcher notification failure remain unresolved; [PR96](https://github.com/Mathews-Tom/VaultMind/pull/96) is held. SQLite/Chroma batching does not provide cross-index atomicity. Offline fixture checks are not native-provider, private-vault, or real Telegram qualification.
+
 ## Quick Start
 
 ### Prerequisites
@@ -253,8 +255,9 @@ Set `capture_all = true` in `[routing]` config to restore old behavior (all text
 | `/episodes [entity]`            | List episodes, optionally filtered by entity                    |
 | `/workflows`                    | List active workflow patterns with success rates                |
 | `/workflow <id>`                | Show workflow steps and details                                 |
-| `/health`                       | System health check                                             |
+| `/health`                       | On-demand component/configuration status, not live provider qualification |
 | `/stats`                        | Vault and graph statistics                                      |
+| `/help`                         | Quick reference for registered bot commands                     |
 | `/distill`                      | Distill the current thinking session into a `qa-artifact` note  |
 | `/gaps`                         | List open knowledge gaps by age                                 |
 | Send voice message              | Transcribe via Whisper and route as capture or question         |
@@ -319,8 +322,10 @@ Profiles control per-agent access. Activate with `--profile <name>`:
 | Profile                | Access                                                          | Folders                   |
 | ---------------------- | --------------------------------------------------------------- | ------------------------- |
 | `researcher` (default) | Read-only: search, read, list, graph, introspection tools       | All                       |
-| `planner`              | Read/write: + capture, capture_note, vault_write, introspection | `02-projects`, `00-inbox` |
+| `planner`              | Scoped note reads/writes and capture; derived tools restricted | `02-projects`, `00-inbox` |
 | `full`                 | Unrestricted (requires explicit opt-in)                         | All                       |
+
+Tool allowlisting does not override result policy. Folder-restricted profiles, including the built-in planner, cannot use `graph_query`, `graph_path`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, or `suggest_links`: their producers cannot prove complete in-scope provenance. Note-backed results are checked before returning content, metadata, and counts. See the [complete MCP result policy](docs/mcp-integration.md#complete-result-policy) for per-tool behavior and read-only/audit boundaries.
 
 ## Vault Structure
 
@@ -353,17 +358,15 @@ status: active
 
 ## Configuration
 
-Layered config system:
+Precedence, highest priority first: deliberate constructor/call-site overrides → `VAULTMIND_*` environment variables → cwd `.env` → selected TOML → model defaults. `--config PATH` selects TOML; it does not promote TOML above environment variables. Nested overrides use `__`, and list values use JSON arrays. Invalid selected values fail configuration validation rather than falling back.
 
-| Layer     | File                  | Purpose                                           |
-| --------- | --------------------- | ------------------------------------------------- |
-| Settings  | `config/default.toml` | All non-secret config (paths, models, thresholds) |
-| Secrets   | `.env`                | API keys, bot token                               |
-| Overrides | Environment variables | `VAULTMIND_*` prefix overrides any setting        |
+Keep credentials in `.env` or the process environment, not in TOML. To isolate a run, configure all persistent paths; changing `vault.path` does not relocate ChromaDB, BM25, graph, or other stores.
 
-Config sections: `[vault]`, `[llm]`, `[telegram]`, `[routing]`, `[embedding]`, `[chroma]`, `[graph]`, `[watch]`, `[duplicate_detection]`, `[note_suggestions]`, `[search]`, `[ranking]`, `[bench]`, `[activation]`, `[maturation]`, `[evolution]`, `[digest]`, `[auto_tag]`, `[voice]`, `[ingest]`, `[research]`, `[distill]`, `[tracking]`, `[image]`, `[episodic]`, `[gaps]`, `[contradiction]`, `[autonomy]`, `[sources]`, `[procedural]`, `[mcp]`.
+Sections with runtime consumers: `[vault]`, `[llm]`, `[telegram]`, `[routing]`, `[embedding]`, `[chroma]`, `[graph]`, `[watch]`, `[duplicate_detection]`, `[note_suggestions]`, `[search]`, `[ranking]`, `[bench]`, `[activation]`, `[maturation]`, `[evolution]`, `[digest]`, `[auto_tag]`, `[voice]`, `[ingest]`, `[research]`, `[distill]`, `[tracking]`, `[image]`, `[episodic]`, `[gaps]`, `[contradiction]`, `[autonomy]`, `[sources]`, `[procedural]`, `[mcp]`, `[scheduler]`, `[loops]`. A consumed section does not imply that every declared field is wired.
 
-See [Configuration Reference](docs/configuration.md) for details on every section.
+Additional parsed sections are not wired into the shipped CLI/bot assemblies: `[memory_profile]`, `[proactivity]`, `[heartbeat]`, `[drafts]`, `[integrations]`, `[consolidation]`, `[health]`, `[mcp_retry]`. Enabling them does not activate jobs, outbound policy, periodic health monitoring, or MCP retries. Standalone library components and the bot's on-demand `/health` command do not make these settings operational.
+
+See the [Configuration Reference](docs/configuration.md) for defaults, consumed-versus-declared controls, profile replacement semantics, and isolation requirements.
 
 ## Docker
 
@@ -380,11 +383,11 @@ docker compose --profile mcp up -d   # Optional MCP server on port 8765
 ## Development
 
 ```bash
-uv sync --extra dev
-uv run pytest -v
-uv run mypy src/ --ignore-missing-imports
-uv run ruff check src/ tests/
-uv run ruff format src/ tests/
+uv sync --extra dev --extra mcp
+uv run --extra dev --extra mcp ruff check .
+uv run --extra dev --extra mcp ruff format --check .
+uv run --extra dev --extra mcp mypy --strict src/ --ignore-missing-imports
+uv run --extra dev --extra mcp pytest -v
 ```
 
 ### Retrieval confidence and the acceptance smoke
