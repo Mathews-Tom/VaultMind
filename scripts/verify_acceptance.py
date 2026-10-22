@@ -1212,16 +1212,18 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
     for i, provenance in enumerate(invalid[:1] if small_index else invalid):
         row(f"invalid-{i}", provenance, f"ROOT-INVALID-{i:02d}", 0.007 + i * 0.00001, valid=False)
 
-    store = VaultStore(
-        ChromaConfig(persist_dir=root / "data" / "chroma"),
-        cast("Embedder", DeterministicEmbedder()),
-    )
-    store._collection.upsert(
-        ids=[r["chunk_id"] for r in rows],
-        documents=[r["content"] for r in rows],
-        metadatas=[r["metadata"] for r in rows],
-        embeddings=[[1 - r["distance"], math.sqrt(1 - (1 - r["distance"]) ** 2)] for r in rows],
-    )
+    # Cold Chroma/PostHog OS discovery can spawn Linux helpers before SDK startup.
+    with offline_environment_scope(offline_environment(root)):
+        store = VaultStore(
+            ChromaConfig(persist_dir=root / "data" / "chroma"),
+            cast("Embedder", DeterministicEmbedder()),
+        )
+        store._collection.upsert(
+            ids=[r["chunk_id"] for r in rows],
+            documents=[r["content"] for r in rows],
+            metadatas=[r["metadata"] for r in rows],
+            embeddings=[[1 - r["distance"], math.sqrt(1 - (1 - r["distance"]) ** 2)] for r in rows],
+        )
     config = root / "config.toml"
     scopes = ["02-projects"]
     if name in ("root-capture-size", "root-capture-symlink"):

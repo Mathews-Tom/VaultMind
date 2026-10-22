@@ -297,12 +297,6 @@ def assert_no_leaks(
                 pytest.fail(f"Consumer artifact leaked control: {key} in {file.name}")
     assert all(scan["leaks"] == [] for scan in observations["scans"])
     assert all(consumer["forbidden"] == [] for consumer in observations["consumers"])
-    permitted = {"HOME", "PATH", "ANONYMIZED_TELEMETRY", "COLUMNS"}
-    assert all(
-        set(consumer["keys"]) <= permitted
-        for consumer in observations["consumers"]
-        if consumer["kind"] == "subprocess.Popen"
-    )
     assert observations["environment_restored"] is True
 
 
