@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -188,3 +190,88 @@ class TestUpsertBatching:
         assert dict(zip(remaining["ids"], remaining_documents, strict=True)) == {
             chunk.chunk_id: chunk.content for chunk in parser.chunk_note(unrelated)
         }
+
+
+class TestFilteredSearch:
+    @pytest.mark.parametrize("n_results", [2, 100])
+    def test_combined_filter_keeps_ranked_chunks_without_global_diagnostics(
+        self, store: VaultStore, caplog: pytest.LogCaptureFixture, n_results: int
+    ) -> None:
+        query = FakeEmbedder().embed_query("scope")
+        # Several eligible chunks belong to ONE note; note-count clamping loses hits.
+        rows = [
+            ("source-0", "allowed/source.md", "project", query),
+            ("source-1", "allowed/source.md", "project", [0.1, 0.2, 0.3, 0.3]),
+            ("source-2", "allowed/source.md", "project", [0.1, 0.2, 0.2, 0.2]),
+            ("peer", "allowed/peer.md", "project", [0.1, 0.1, 0.1, 0.1]),
+            ("other-type", "allowed/peer.md", "permanent", query),
+            ("hidden", "private/hidden.md", "project", query),
+            ("unknown", None, "project", query),
+        ]
+        metadatas = [
+            {"note_type": kind, **({"note_path": path} if path is not None else {})}
+            for _, path, kind, _ in rows
+        ]
+        store._collection.upsert(
+            ids=[key for key, _, _, _ in rows],
+            documents=[f"body-{key}" for key, _, _, _ in rows],
+            metadatas=metadatas,
+            embeddings=[vector for _, _, _, vector in rows],
+        )
+        where = {
+            "$and": [
+                {"note_path": {"$in": ["allowed/source.md", "allowed/peer.md"]}},
+                {"note_type": "project"},
+            ]
+        }
+        with caplog.at_level(logging.WARNING):
+            hits = store.search("scope", n_results=n_results, where=where)
+        expected = []
+        for (key, path, kind, vector), metadata in zip(rows, metadatas, strict=True):
+            if path not in ("allowed/source.md", "allowed/peer.md") or kind != "project":
+                continue
+            distance = 1 - sum(a * b for a, b in zip(query, vector, strict=True)) / math.sqrt(
+                sum(a * a for a in query) * sum(b * b for b in vector)
+            )
+            expected.append((distance, key, metadata))
+        expected.sort(key=lambda row: row[0])
+        assert [hit["chunk_id"] for hit in hits] == [key for _, key, _ in expected[:n_results]]
+        for hit, (distance, key, metadata) in zip(hits, expected[:n_results], strict=True):
+            assert hit["content"] == f"body-{key}"
+            assert hit["metadata"] == metadata
+            assert hit["distance"] == pytest.approx(distance, abs=1e-6)
+        assert not any(
+            "Number of requested results" in record.getMessage() for record in caplog.records
+        )
+
+    def test_empty_filter_result_does_not_disclose_global_index_size(
+        self, store: VaultStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        store._collection.upsert(
+            ids=["hidden"],
+            documents=["hidden body"],
+            metadatas=[{"note_path": "private/hidden.md"}],
+            embeddings=[FakeEmbedder().embed_query("scope")],
+        )
+        with caplog.at_level(logging.WARNING):
+            assert (
+                store.search("scope", n_results=100, where={"note_path": "allowed/empty.md"}) == []
+            )
+        assert not any(
+            "Number of requested results" in record.getMessage() for record in caplog.records
+        )
+
+    @pytest.mark.parametrize("n_results", [0, -1, 1.5, "2", None])
+    @pytest.mark.parametrize("matching", [False, True])
+    def test_invalid_limits_fail_even_without_matching_chunks(
+        self, store: VaultStore, n_results: Any, matching: bool
+    ) -> None:
+        store._collection.upsert(
+            ids=["source"],
+            documents=["source body"],
+            metadatas=[{"note_path": "allowed/source.md"}],
+            embeddings=[FakeEmbedder().embed_query("scope")],
+        )
+        path = "allowed/source.md" if matching else "allowed/empty.md"
+        with pytest.raises((TypeError, ValueError)):
+            store.search("scope", n_results=n_results, where={"note_path": path})

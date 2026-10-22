@@ -78,6 +78,8 @@ Semantic search over the vault using ChromaDB embeddings.
 
 Folder-restricted profiles search only verified existing Markdown notes in their allowed folders. The note-path whitelist is applied together with `note_type` before the store selects its top results; forbidden high-ranking chunks cannot crowd out allowed matches. Returned chunks are checked again for valid in-scope note provenance, and `count` includes only returned chunks.
 
+For any nonempty metadata filter, the store first retrieves at most the requested number of matching chunk IDs, without documents, metadata, or embeddings. The backend query limit is bounded by that matching chunk population, not the number of notes or the global collection size. This prevents oversized scoped search and duplicate-candidate queries from triggering Chroma's global `elements in index` / `updating n_results` warning while retaining multiple matching chunks from one note and their distance ordering. A filter with no matches returns an empty result without embedding or issuing a zero-limit query; invalid requested limits still fail. This lookup and the vector query are not a transactional snapshot across concurrent index mutations.
+
 ### `vault_read`
 
 Read the full content of a note.
@@ -353,9 +355,9 @@ Symlink loops fail closed with a caller-path-only error, on Python 3.12 and 3.13
 
 Run `uv run --extra dev --extra mcp python scripts/verify_acceptance.py --case mcp --offline` to exercise the installed CLI entrypoint and MCP SDK transport against temporary synthetic vaults. The receipt records per-call expected and actual results, stdout protocol validation, scope counts, package origins, and network-denial instrumentation. No hosted embeddings, model calls, private vault input, or Telegram delivery are involved.
 
-Embedding-boundary events are attributed to each completed tool call and recorded in the receipt. An allowed `vault_search` must exercise its own embedding boundary; events from `find_duplicates`, captures, or initialization cannot satisfy that check. The fixture replaces only the embedding provider's vector computation, not the search handler or returned results.
+Embedding-boundary events are attributed to each completed tool call and recorded in the receipt. A `vault_search` with matching indexed chunks must exercise its own embedding boundary; an empty filtered search legitimately makes no provider call. Events from `find_duplicates`, captures, or initialization cannot satisfy another call's check. The fixture replaces only the embedding provider's vector computation, not the search handler or returned results.
 
-Folder-restricted MCP sessions omit INFO/DEBUG diagnostics, including with `--verbose`, so startup logs cannot disclose global index or graph counts. Warnings, errors, explicit profile diagnostics, and audit receipts remain available. Logging-handler thresholds are restored when the command closes, including on failure; wildcard profiles and other commands retain their logging behavior. The stdio fixture checks restricted startup output with verbose logging requested and retains a substantive unrestricted index-count control.
+Folder-restricted MCP sessions omit INFO/DEBUG diagnostics, including with `--verbose`, so startup logs cannot disclose global index or graph counts. Filtered search bounds backend requests before querying rather than hiding Chroma warnings. Warnings, errors, explicit profile diagnostics, and audit receipts remain available. Logging-handler thresholds are restored when the command closes, including on failure; wildcard profiles and unfiltered queries retain their logging behavior, including global index diagnostics. The stdio fixture scans complete stderr, including `elements in index` and `n_results` warnings, compares authorized search and duplicate results with fixed allowed chunks and different forbidden indexed populations, and retains seeded unrestricted global-count controls. Raw result distances must remain nondecreasing; exact-distance ties are not ordered by chunk ID.
 
 ### Audit logging
 

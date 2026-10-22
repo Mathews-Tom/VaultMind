@@ -401,6 +401,7 @@ MCP_SCENARIOS = (
 )
 MCP_ROOT_SCENARIOS = (
     "root-scoped",
+    "root-scoped-small",
     "root-full",
     "root-capture-scope",
     "root-capture-symlink",
@@ -976,6 +977,7 @@ async def mcp_stdio_session(
     errors: list[str] = []
     results: list[Any] = []
     embedding_boundary_tools: list[str] = []
+    embedding_boundary_counts: list[int] = []
     stderr_chunks: list[bytes] = []
     stderr_path = state / "stderr.txt"
 
@@ -1005,9 +1007,12 @@ async def mcp_stdio_session(
                             results.append(await session.call_tool(tool, arguments))
                             chunk, offset = stderr_since(offset)
                             stderr_chunks.append(chunk)
+                            count = 0
                             for line in boundary_log:
                                 if json.loads(line)["kind"] == "embedding-boundary":
                                     embedding_boundary_tools.append(tool)
+                                    count += 1
+                            embedding_boundary_counts.append(count)
                 closing = time.monotonic()
             shutdown_seconds = time.monotonic() - closing
     return {
@@ -1023,6 +1028,7 @@ async def mcp_stdio_session(
         "stderr_startup": startup.decode("utf-8", errors="replace"),
         "stderr_chunks": [chunk.decode("utf-8", errors="replace") for chunk in stderr_chunks],
         "embedding_boundary_tools": embedding_boundary_tools,
+        "embedding_boundary_counts": embedding_boundary_counts,
     }
 
 
@@ -1036,6 +1042,7 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
     peer = "02-projects/peer.md"
     suggestion = "02-projects/suggestion.md"
     private = [f"03-private/closer-{i:02d}.md" for i in range(16)]
+    small_index = name == "root-scoped-small"
     contents: dict[str, str] = {
         source: "# Source\n\n" + TEXT * 4 + "\n",
         peer: "# Allowed Peer\n\n" + TEXT * 4 + "\n",
@@ -1065,8 +1072,10 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
     if name == "root-capture-symlink":
         (vault / "00-inbox").symlink_to(outside, target_is_directory=True)
 
-    # The 16 private hits precede every allowed hit, exceeding find_duplicates(max=1)'s
-    # candidate window of 11. Post-truncation filtering cannot pass the scoped control.
+    # Large and small scoped scenarios have identical files and authorized chunks.
+    # Only forbidden/unknown indexed rows differ. The large private population
+    # exceeds find_duplicates(max=1)'s candidate window of 11; the small TOTAL
+    # population is below 11, so that candidate query also exercises oversizing.
     rows: list[dict[str, Any]] = []
 
     def row(
@@ -1093,10 +1102,12 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
             }
         )
 
-    for i, path in enumerate(private):
+    for i, path in enumerate([] if small_index else private):
         row(f"private-{i}", path, f"ROOT-PRIVATE-{i:02d}", 0.0001 * (i + 1))
     row("allowed-peer", peer, "Allowed Peer", 0.01, scoped=True)
     row("allowed-source", source, "Source", 0.02, scoped=True, note_type="project")
+    row("source-second", source, "Source Second", 0.021, scoped=True, note_type="project")
+    row("source-third", source, "Source Third", 0.022, scoped=True, note_type="project")
     row("allowed-suggestion", suggestion, "Allowed Suggestion", 0.25, scoped=True)
     row("safe-alias", "02-projects/allowed-alias.md", "Allowed Alias", 0.03, scoped=True)
     row("dot-path", "./" + peer, "Allowed Dot Path", 0.04)
@@ -1117,7 +1128,7 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
         "02-projects/broken-alias.md",
         "02-projects/loop.md",
     ]
-    for i, provenance in enumerate(invalid):
+    for i, provenance in enumerate(invalid[:1] if small_index else invalid):
         row(f"invalid-{i}", provenance, f"ROOT-INVALID-{i:02d}", 0.007 + i * 0.00001, valid=False)
 
     store = VaultStore(
@@ -1175,7 +1186,7 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
             "count": len(selected),
         }
 
-    if name in ("root-scoped", "root-full"):
+    if name in ("root-scoped", "root-scoped-small", "root-full"):
         call("vault_search", {"query": TEXT, "n_results": 100}, search_expected(visible))
         closest = min(visible, key=lambda r: r["distance"])
         call("vault_search", {"query": TEXT, "n_results": 1}, search_expected([closest]))
@@ -1184,7 +1195,16 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
             {"query": TEXT, "note_type": "project", "n_results": 1},
             search_expected([next(r for r in rows if r["chunk_id"] == "allowed-source")]),
         )
-        call("vault_search", {"query": TEXT, "note_type": "literature"}, search_expected([]))
+        call(
+            "vault_search",
+            {"query": TEXT, "note_type": "project", "n_results": 100},
+            search_expected([r for r in visible if r["metadata"]["note_type"] == "project"]),
+        )
+        call(
+            "vault_search",
+            {"query": TEXT, "note_type": "literature", "n_results": 100},
+            search_expected([]),
+        )
         allowed_notes = [source, peer, suggestion, "02-projects/allowed-alias.md"]
         listed = sorted(
             allowed_notes + (private + ["02-projects/private-alias.md"] if full else [])
@@ -1338,7 +1358,7 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
         "forbidden": forbidden,
         "stderr_forbidden": ["ROOT-INVALID", "ROOT-OUTSIDE"],
     }
-    if name == "root-scoped":
+    if name in ("root-scoped", "root-scoped-small"):
         spec["cli_args"].insert(0, "--verbose")
     return spec, fixture, config
 
@@ -1851,7 +1871,7 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         )
         check(
             name + ".embedding.root-search-exercised",
-            any(c["tool"] == "vault_search" and c["audit"] == "OK" for c in calls),
+            any(c["tool"] == "vault_search" and c["expected"].get("results") for c in calls),
             "vault_search" in run["embedding_boundary_tools"],
         )
     raw = (state / "stdout.raw").read_bytes().decode("utf-8")
@@ -1859,7 +1879,15 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
     stderr_startup = mcp_trim(run["stderr_startup"])
     stderr_chunks = [mcp_trim(chunk) for chunk in run["stderr_chunks"]]
     prefix = f"{name}."
-    diagnostic_aggregates = re.findall(r"\b\d+\s+(?:documents|nodes|edges)\b", stderr)
+    # Inspect complete stderr, including warnings emitted after startup. Rich's
+    # source-location column can interrupt a wrapped diagnostic phrase.
+    diagnostics = re.sub(r"\w+\.py:\d+", "", stderr)
+    diagnostic_aggregates = re.findall(
+        r"\b(?:\d+\s+(?:documents|nodes|edges)|elements\s+in\s+index\s+\d+|"
+        r"(?:updating\s+)?n_results\s*=\s*\d+)\b",
+        diagnostics,
+        flags=re.IGNORECASE,
+    )
     if spec["scoped"]:
         check(prefix + "stderr.global-aggregates-absent", [], diagnostic_aggregates)
     elif name == "root-full":
@@ -1868,6 +1896,15 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
             [f"{fixture['index_document_count']} documents"],
             [value for value in diagnostic_aggregates if value.endswith(" documents")],
         )
+        for diagnostic, pattern in (
+            ("elements-in-index", r"\belements\s+in\s+index\s+(\d+)\b"),
+            ("bounded-n-results", r"\bn_results\s*=\s*(\d+)\b"),
+        ):
+            check(
+                prefix + f"stderr.unrestricted-{diagnostic}-retained",
+                [fixture["index_document_count"]],
+                sorted({int(value) for value in re.findall(pattern, diagnostics)}),
+            )
 
     # --- protocol: initialize / list_tools / every stdout line is a valid frame --------------
     check(prefix + "initialize.server-name", "vaultmind", run["init"].serverInfo.name)
@@ -1947,6 +1984,21 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
             )
         else:
             check(label + ".payload", mcp_normalize(tool, expected_call["expected"]), actual)
+            if tool == "vault_search":
+                distances = [hit["distance"] for hit in payload["results"]]
+                check(label + ".raw-distance-order", sorted(distances), distances)
+        if root_notes and tool in ("vault_search", "find_duplicates"):
+            expected = expected_call["expected"]
+            # Empty filtered results legitimately avoid embedding; another tool's
+            # provider event must not make this call appear to have embedded.
+            embeds = bool(
+                expected.get("results") if tool == "vault_search" else expected.get("matches")
+            )
+            check(
+                label + ".embedding.provider-boundary",
+                int(embeds),
+                run["embedding_boundary_counts"][position],
+            )
         # Independent fixture-target oracle on both surfaces; only complete, boundary-delimited
         # caller-supplied argument strings of THIS call are masked (see mcp_leaks).
         oracle: dict[str, Any] = {"forbidden_tokens": len(spec["forbidden"])}
@@ -1964,6 +2016,7 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
                 "arguments": arguments,
                 "kind": kind,
                 "actual": actual,
+                "embedding_boundary_count": run["embedding_boundary_counts"][position],
                 "oracle": oracle,
             }
         )
@@ -2132,6 +2185,7 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         "distribution": {"version": entry["dist_version"], "direct_url": entry["direct_url"]},
         "launcher_events": events,
         "embedding_boundary_tools": run["embedding_boundary_tools"],
+        "embedding_boundary_counts": run["embedding_boundary_counts"],
         "stdout_lines": lines,
         "stderr": stderr,
         "audit": audit,
@@ -2321,6 +2375,19 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     scenarios: dict[str, Any] = {}
     for name in (*MCP_SCENARIOS, *MCP_ROOT_SCENARIOS):
         scenarios[name] = await run_mcp_scenario(name, home / name, check)
+    check(
+        "root-scoped.forbidden-chunk-population-does-not-change-authorized-results",
+        [
+            (c["tool"], c["arguments"], c["actual"])
+            for c in scenarios["root-scoped"]["calls"]
+            if c["tool"] in ("vault_search", "find_duplicates")
+        ],
+        [
+            (c["tool"], c["arguments"], c["actual"])
+            for c in scenarios["root-scoped-small"]["calls"]
+            if c["tool"] in ("vault_search", "find_duplicates")
+        ],
+    )
     mcp_direct_dispatcher(home / "direct-dispatcher", check)
     factory = await mcp_factory_none_handlers(home / "factory-none", check)
     origins = {s["import_origin"] for s in scenarios.values()}
