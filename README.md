@@ -358,7 +358,7 @@ status: active
 
 ## Configuration
 
-Precedence, highest priority first: deliberate constructor/call-site overrides → `VAULTMIND_*` environment variables → cwd `.env` → selected TOML → model defaults. `--config PATH` selects TOML; it does not promote TOML above environment variables. Nested overrides use `__`, and list values use JSON arrays. Invalid selected values fail configuration validation rather than falling back.
+Precedence, highest priority first: deliberate constructor/call-site overrides → `VAULTMIND_*` environment variables → cwd `.env` → selected TOML → model defaults. `--config PATH` selects TOML; it does not promote TOML above environment variables. Nested overrides use `__`, and list values use JSON arrays. Values rejected by model field types or validators raise a configuration error rather than falling back to lower-priority sources. Loop schedule strings (`insight_schedule`, `evolution_schedule`, `procedural_schedule`) are not cron-validated during settings loading: job assembly accepts valid cron expressions or converts recognized natural-language schedules, while an invalid nonempty schedule logs a warning and uses the cron expression derived from its corresponding `*_interval_days` setting.
 
 Keep credentials in `.env` or the process environment, not in TOML. To isolate a run, configure all persistent paths; changing `vault.path` does not relocate ChromaDB, BM25, graph, or other stores.
 

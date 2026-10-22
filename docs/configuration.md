@@ -8,13 +8,13 @@ Configuration precedence, highest priority first:
 4. **TOML** — the explicit `--config PATH` file, or `config/default.toml` relative to the current working directory.
 5. **Model defaults** — used for keys absent from all higher-priority sources.
 
-Nested keys use `__`, for example `VAULTMIND_VAULT__PATH=/absolute/vault` and `VAULTMIND_SEARCH__HYBRID_ENABLED=false`. Overrides merge by nested key: changing the vault path does not discard a TOML `inbox_folder`. Lists use JSON syntax, for example `VAULTMIND_TELEGRAM__ALLOWED_USER_IDS='[123,456]'`. Invalid selected values raise a configuration error; they do not fall back to a valid lower-priority value.
+Nested keys use `__`, for example `VAULTMIND_VAULT__PATH=/absolute/vault` and `VAULTMIND_SEARCH__HYBRID_ENABLED=false`. Overrides merge by nested key: changing the vault path does not discard a TOML `inbox_folder`. Lists use JSON syntax, for example `VAULTMIND_TELEGRAM__ALLOWED_USER_IDS='[123,456]'`. Values rejected by model field types or validators raise a configuration error; they do not fall back to a valid lower-priority value. Loop schedule strings are checked later, when jobs are assembled; see [Compound Loops](#compound-loops).
 
 MCP profile names are dictionary keys, including names that match policy fields such as `allowed_tools`, `description`, or `write_enabled`. For example, `VAULTMIND_MCP__PROFILES__ALLOWED_TOOLS__FOLDER_SCOPE='["00-inbox"]'` changes the `allowed_tools` profile's folder scope without changing its allowed tools or write policy. The same JSON-list syntax applies in cwd `.env`.
 
 Settings loading requires `pydantic-settings>=2.13.1,<3`. The environment/dotenv source adapter preserves that API's resolved per-load controls; older settings-library releases do not expose all of those controls.
 
-All CLI, bot, and MCP assemblies use [`load_settings`](../src/vaultmind/config.py), which delegates to `Settings.from_toml`. TOML is a separate lower-priority Pydantic source, not a dictionary of constructor overrides. Plain `Settings(...)` reads environment/`.env` and defaults without implicitly selecting a TOML file. A missing TOML file retains the established environment/default loading behavior; malformed TOML and unreadable files fail.
+All CLI, bot, and MCP assemblies use [`load_settings`](../src/vaultmind/config.py), which delegates to `Settings.from_toml`. TOML is a separate lower-priority Pydantic source, not a dictionary of constructor overrides. Plain `Settings(...)` reads environment/`.env` and defaults without implicitly selecting a TOML file. Direct `Settings.from_toml` and `load_settings` calls retain environment/default loading when a TOML file is missing; the CLI rejects an explicitly missing `--config` path before loading. Malformed TOML and unreadable files fail.
 
 For an isolated run, set `HOME`, use a working directory without a personal `.env`, pass an explicit temporary TOML file, and configure every persistent component the command uses. Overriding `vault.path` alone does not relocate `chroma.persist_dir`, `graph.persist_path`, or `search.bm25_db_path`. The offline `scripts/verify_acceptance.py --case config --offline` case exercises temporary targets through runtime consumers with deterministic external embeddings; it is not hosted-provider qualification.
 
@@ -542,7 +542,7 @@ procedural_interval_days = 7
 procedural_schedule = ""
 ```
 
-Per-loop enable flags, cron expressions, and fallback intervals are consumed by the bot assembly. A nonempty schedule selects its cron expression; an empty schedule derives one from `interval_days`. The procedural loop additionally requires `[procedural].enabled = true`. All loops are state-aware — each run reads and extends its prior-run state, enabling cross-cycle pattern recognition.
+Per-loop enable flags, schedule strings, and fallback intervals are consumed by the bot assembly. Loop schedule strings are not cron-validated during settings loading. During job assembly, a valid nonempty cron expression is used directly and a recognized natural-language schedule is converted to cron. An empty or invalid schedule derives a cron expression from `interval_days`; invalid nonempty schedules also log a warning. The procedural loop additionally requires `[procedural].enabled = true`. All loops are state-aware — each run reads and extends its prior-run state, enabling cross-cycle pattern recognition.
 
 ## `[mcp]`
 
