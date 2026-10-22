@@ -6,6 +6,9 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited, ready_for_review]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -20,6 +23,20 @@ jobs:
         with:
           # Consumer regressions reconstruct the legacy schema from committed history.
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checkout authentication is absent
+        shell: bash
+        run: |
+          if git config --local --name-only --get-regexp '^http(\..*)?\.extraheader$' >/dev/null 2>&1; then
+            echo "Checkout authentication persistence check failed" >&2
+            exit 1
+          else
+            case $? in
+              1) echo "Checkout authentication persistence: absent" ;;
+              *) echo "Checkout authentication persistence check failed" >&2; exit 1 ;;
+            esac
+          fi
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
@@ -54,6 +71,19 @@ jobs:
         with:
           # Approval reconstructs the legacy migration schema from committed history.
           fetch-depth: 0
+          persist-credentials: false
+      - name: Verify checkout authentication is absent
+        shell: bash
+        run: |
+          if git config --local --name-only --get-regexp '^http(\..*)?\.extraheader$' >/dev/null 2>&1; then
+            echo "Checkout authentication persistence check failed" >&2
+            exit 1
+          else
+            case $? in
+              1) echo "Checkout authentication persistence: absent" ;;
+              *) echo "Checkout authentication persistence check failed" >&2; exit 1 ;;
+            esac
+          fi
       - uses: astral-sh/setup-uv@v4
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -71,6 +101,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify checkout authentication is absent
+        shell: bash
+        run: |
+          if git config --local --name-only --get-regexp '^http(\..*)?\.extraheader$' >/dev/null 2>&1; then
+            echo "Checkout authentication persistence check failed" >&2
+            exit 1
+          else
+            case $? in
+              1) echo "Checkout authentication persistence: absent" ;;
+              *) echo "Checkout authentication persistence check failed" >&2; exit 1 ;;
+            esac
+          fi
       - uses: astral-sh/setup-uv@v4
       - run: uv python install 3.12
       - run: uv sync --extra dev --extra mcp
