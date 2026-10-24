@@ -43,6 +43,77 @@ review lanes, background source connectors, and non-destructive edit lineage.
 
 **Delivery limits:** Non-destructive edit history is implemented, but consistent exclusion of retired or superseded text after full/watch reindexing and the original native-watcher notification failure remain unresolved; [PR96](https://github.com/Mathews-Tom/VaultMind/pull/96) is held. SQLite/Chroma batching does not provide cross-index atomicity. Offline fixture checks are not native-provider, private-vault, or real Telegram qualification.
 
+## Manual source-backed wiki
+
+`wiki add`, `propose`, `review`, and `apply` maintain a selected Markdown page without starting the bot, watcher, graph or retrieval indexes. Preserved sources, pending proposals and prior versions live under `_wiki`; configure that folder as excluded before using any wiki command. This explicit draft workflow needs no model or embedding key. Run from a normal SOURCE checkout environment (`uv sync --extra dev --extra mcp`), not as proof of an independently installed wheel.
+
+Use a disposable vault for this example. Create `/tmp/wiki-demo.toml` with an absolute, existing vault path:
+
+```toml
+[vault]
+path = "/absolute/path/to/synthetic-vault"
+excluded_folders = [".obsidian", ".git", ".trash", "_wiki"]
+```
+
+Save `source-a.md` outside the vault with a project note recommending 30-day report-cache retention. Preserve it:
+
+```bash
+uv run vaultmind --config /tmp/wiki-demo.toml wiki add source-a.md --id source-a --uri urn:example:project-note
+```
+
+In a Markdown editor, create `draft-a.md` outside the vault, without frontmatter:
+
+```markdown
+# Report cache policy
+
+## Current understanding
+
+The project note recommends retaining cached reports for 30 days. [[_wiki/sources/source-a]]
+```
+
+```bash
+uv run vaultmind --config /tmp/wiki-demo.toml wiki propose --page wiki/report-cache.md --source source-a --draft-file draft-a.md
+uv run vaultmind --config /tmp/wiki-demo.toml wiki review PROPOSAL_ID
+uv run vaultmind --config /tmp/wiki-demo.toml wiki apply PROPOSAL_ID --expect REVIEWED_SHA256
+```
+
+Replace `PROPOSAL_ID` with the exact `Proposal:` output and `REVIEWED_SHA256` with the full `SHA256:` from review. Inspect the source hashes and complete plain diff before approving. Propose/review do not create or change the current page. After apply, open the vault in Obsidian or your editor and follow the source link from `wiki/report-cache.md` to the preserved source.
+
+For an update, save `source-b.md` with an operations note recommending 7 days, whose scope relative to the project note is unresolved, then add it:
+
+```bash
+uv run vaultmind --config /tmp/wiki-demo.toml wiki add source-b.md --id source-b --uri urn:example:operations-note
+```
+
+Create `draft-b.md` in your editor:
+
+```markdown
+# Report cache policy
+
+## Current understanding
+
+Retention duration is unresolved across the two sources.
+
+## Conflicting information
+
+- The project note recommends 30 days. [[_wiki/sources/source-a]]
+- The operations note recommends 7 days; its scope relative to the project note is unresolved. [[_wiki/sources/source-b]]
+
+Do not infer that either source silently supersedes the other. A later human decision must state the chosen scope and reason.
+```
+
+```bash
+uv run vaultmind --config /tmp/wiki-demo.toml wiki propose --page wiki/report-cache.md --source source-a --source source-b --draft-file draft-b.md
+uv run vaultmind --config /tmp/wiki-demo.toml wiki review NEW_PROPOSAL_ID
+uv run vaultmind --config /tmp/wiki-demo.toml wiki apply NEW_PROPOSAL_ID --expect NEW_REVIEWED_SHA256
+```
+
+The same page is updated; both original source byte sequences remain intact, and the prior complete page is preserved under `_wiki/history`. Repeating an identical source addition or completed apply is a no-op (unless the accepted state has since changed). Changing source bytes under the same ID is rejected. New-source updates retain earlier provenance even when only the new ID is passed. Structural citation checks do **not** establish truth or automatically detect semantic disagreements: read both sources and preserve attributed uncertainty, or supply an explicit reviewed `Resolution` with its reason.
+
+A wrong digest, changed source/metadata, tampered payload or stale page fails explicitly without overwriting accepted content. Failed proposals are never retried automatically. If no operation record was prepared, correct the underlying problem and prepare a fresh reviewed proposal. A prepared but unconfirmed operation holds the entire page: new proposals and applies are refused, and this command set has no supported in-place recovery command. Stop maintenance on that page and preserve its current bytes, sources, history, queue and operation evidence for manual diagnosis; do not edit control records or create another proposal to bypass the hold. The wiki lock coordinates wiki commands, not Obsidian, external scripts or every OS writer; a noncooperating writer can still race the final replacement.
+
+Omit `--draft-file` only when deliberately requesting one bounded completion from the configured LLM provider. This requires the normal provider key and sends selected/retained sources and the current page to that provider; errors are not converted into a draft fallback. The scripted offline consumer exercises this adapter, not live-model factual quality or native/private-vault operation. See [architecture](docs/architecture.md#manual-wiki-boundary) and [configuration](docs/configuration.md#manual-wiki-configuration) for limits.
+
 ## Quick Start
 
 ### Prerequisites

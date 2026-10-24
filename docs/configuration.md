@@ -51,6 +51,26 @@ Vault filesystem paths and behavior.
 | `sync_interval_seconds` | int    | `300`                             | Full re-sync interval (seconds)      |
 | `excluded_folders`      | list   | `[".obsidian", ".git", ".trash"]` | Folders to skip during indexing      |
 
+## Manual wiki configuration
+
+Wiki commands use the existing settings loader and root `--config` option; there is no separate wiki policy runtime or automatic config rewrite. Explicitly add `_wiki` to `[vault].excluded_folders` before any wiki persistence:
+
+```toml
+[vault]
+path = "/absolute/path/to/vault"
+excluded_folders = [".obsidian", ".git", ".trash", "_wiki"]
+```
+
+This keeps preserved sources, pending proposals and prior versions outside legacy indexing. Wiki commands themselves do not initialize or mutate Chroma, FTS, graph, scheduler or Telegram. An existing vault path is required. Use a synthetic HOME/cwd and explicit TOML for offline examples so personal `.env` and higher-priority environment overrides cannot select unintended state.
+
+`wiki add FILE --id ID [--uri URI]`, `wiki review ID`, `wiki apply ID --expect SHA256`, and `wiki propose --page wiki/SLUG.md --source ID --draft-file FILE` require no provider key. Draft input is explicit, not a model-error fallback. Omitting `--draft-file` uses `[llm].provider`, `thinking_model` and `max_tokens` through the existing client factory and normal provider-key validation. That request sends selected and retained source content plus the current page to the configured provider; no implicit network request occurs in the other commands.
+
+Inputs must be local UTF-8 Markdown/text. Preserve IDs and page paths as safe ASCII identifiers; only one-level `wiki/SLUG.md` current pages are accepted. Sources, drafts and current pages are limited to 256 KiB each, generation context to 1 MiB and retained/selected sources to 32; oversized inputs fail instead of silently truncating. These are implementation bounds, not new TOML settings. Any draft frontmatter is rejected because identity/provenance is wiki-controlled.
+
+For source inputs that must not be retained, use YAML frontmatter with either `do_not_retain: true` or `retention: do-not-retain`. Such inputs are rejected before body/proposal persistence; malformed retention values fail rather than being coerced. Do not use this as a secret scanner: only add data you are authorized to preserve and, for generated proposals, send to the provider.
+
+The [manual procedure](../README.md#manual-source-backed-wiki) covers editor drafts, exact reviewed digests and same-page conflicts. Wrong/stale identities, failed or incomplete operations require explicit intervention, not a retry daemon. Configuration does not eliminate noncooperating editor races or turn scripted SOURCE/offline checks into installed or live-provider qualification.
+
 ## `[memory_profile]`
 
 Reserved identity-memory layout and promotion settings; dormant, with no always-available context or daily-log pipeline driven by this section.
