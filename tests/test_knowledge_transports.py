@@ -71,6 +71,15 @@ def delivered(message: Any) -> str:
         ("cmd_think", "/think critique: What is the cache retention policy?"),
         ("handle_text", "What is the cache\nretention policy?"),
         ("cmd_think", "/think What is the cache\nretention policy?"),
+        ("handle_text", "What is the cache retention policy?\n"),
+        ("handle_text", "What is the cache retention policy?\r"),
+        ("handle_text", "What is the cache retention policy?\t"),
+        ("cmd_think", "/think What is the cache retention policy?\n"),
+        ("cmd_think", "/think What is the cache retention policy?\r"),
+        ("cmd_think", "/think What is the cache retention policy?\t"),
+        ("cmd_think", "/think critique: What is the cache retention policy?\n"),
+        ("cmd_think", "/think critique: What is the cache retention policy?\r"),
+        ("cmd_think", "/think critique: What is the cache retention policy?\t"),
     ],
 )
 async def test_registered_answers_share_actual_outcome_and_do_not_mutate_knowledge(
@@ -84,9 +93,8 @@ async def test_registered_answers_share_actual_outcome_and_do_not_mutate_knowled
     message = make_message(text)
     callback = registered_callback(t.handlers, route, monkeypatch)
     await callback(message)
-    if "\n" in text:
-        selected_question = text.removeprefix("/think ")
-        assert json.loads(t.provider.calls[0][0].content)["question"] == selected_question
+    selected_question = text.removeprefix("/think ").removeprefix("critique: ")
+    assert json.loads(t.provider.calls[0][0].content)["question"] == selected_question
     result = query_knowledge(
         t.corpus.settings, "What is the cache retention policy?", llm_factory=lambda: t.provider
     )
@@ -98,6 +106,21 @@ async def test_registered_answers_share_actual_outcome_and_do_not_mutate_knowled
     t.handlers._ctx.graph.assert_not_called()
     assert t.thinking.has_active_session(42) is (route == "cmd_think")
     assert "section_mapping" in t.handlers._last_exchanges[42].response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["/think", "/think ", "/think \n\r\t"])
+async def test_registered_empty_think_does_not_start_a_query_or_session(
+    transport: Transport, monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    t = transport
+    before = snapshot(t.corpus.vault)
+    await registered_callback(t.handlers, "cmd_think", monkeypatch)(make_message(text))
+    assert t.provider.calls == []
+    assert not t.thinking.has_active_session(42)
+    assert t.sessions.load(42) is None
+    assert t.handlers._last_exchanges == {}
+    assert snapshot(t.corpus.vault) == before
 
 
 @pytest.mark.asyncio
