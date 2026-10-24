@@ -705,10 +705,14 @@ class WikiWorkspace:
             raise WikiError("Wiki proposal not found")
         if proposal.lane is not Lane.BLOCK or _proposal_id(proposal.payload) != proposal_id:
             raise WikiError("Stored proposal identity changed; payload tampering refused")
-        self._validate_payload(proposal.payload)
+        self._validate_payload(
+            proposal.payload, validate_candidate=proposal.status is not ProposalStatus.APPLIED
+        )
         return proposal
 
-    def _validate_payload(self, payload: dict[str, Any]) -> None:
+    def _validate_payload(
+        self, payload: dict[str, Any], *, validate_candidate: bool = True
+    ) -> None:
         try:
             if (
                 set(payload)
@@ -743,19 +747,24 @@ class WikiWorkspace:
                 raise WikiError("Proposal source identity is invalid")
             self._check_sources(snapshots)
             post = frontmatter.loads(payload["after"])
-            body = payload["after"].split("\n---\n", 1)[1]
-            canonical = self._candidate(
-                payload["page"],
-                body,
-                snapshots,
-                payload["base_sha256"] is not None
-                and (
-                    bool(payload["new_source_ids"])
-                    or bool(self._section(before.decode("utf-8"), "Conflicting information"))
-                ),
-            )
-            if canonical != payload["after"] or post.metadata.get("source") != "wiki-derived":
-                raise WikiError("Proposal candidate identity or provenance changed")
+            if post.metadata.get("source") != "wiki-derived":
+                raise WikiError("Proposal candidate provenance changed")
+            # Applied payloads are historical evidence, not pending candidates:
+            # related pages and headings can change after a completed apply.
+            if validate_candidate:
+                body = payload["after"].split("\n---\n", 1)[1]
+                canonical = self._candidate(
+                    payload["page"],
+                    body,
+                    snapshots,
+                    payload["base_sha256"] is not None
+                    and (
+                        bool(payload["new_source_ids"])
+                        or bool(self._section(before.decode("utf-8"), "Conflicting information"))
+                    ),
+                )
+                if canonical != payload["after"]:
+                    raise WikiError("Proposal candidate identity changed")
             retained = self._retained(before if payload["base_sha256"] is not None else None)
             ids = [item["id"] for item in snapshots]
             if len(set(ids)) != len(ids) or not set(retained).issubset(ids):

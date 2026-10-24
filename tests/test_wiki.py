@@ -871,6 +871,52 @@ def test_valid_related_page_link_is_controlled_and_resolvable(fixture: Fixture) 
         assert fixture.page.read_bytes() == proposal.payload["after"].encode()
 
 
+@pytest.mark.parametrize("target_change", ["remove-heading", "delete-page"])
+def test_applied_links_do_not_lock_future_maintenance(fixture: Fixture, target_change: str) -> None:
+    with WikiWorkspace(fixture.settings) as workspace:
+        workspace.add_source(fixture.source(), "source-a")
+        related = workspace.propose(
+            "wiki/background.md",
+            ["source-a"],
+            draft_file=fixture.draft(INITIAL + "\n## Details\n\nOriginal details.\n"),
+        )
+        workspace.apply(related.proposal_id, proposal_digest(related.payload))
+        linked_body = INITIAL + "\nSee [[wiki/background#details]].\n"
+        applied = fixture.proposal(workspace, linked_body)
+        workspace.apply(applied.proposal_id, proposal_digest(applied.payload))
+        accepted = fixture.page.read_bytes()
+        historical_review = workspace.review(applied.proposal_id)
+        pending = fixture.proposal(workspace, linked_body + "\nPending change.\n")
+        if target_change == "remove-heading":
+            replacement = workspace.propose(
+                "wiki/background.md",
+                ["source-a"],
+                draft_file=fixture.draft(INITIAL + "\n## Overview\n\nChanged overview.\n"),
+            )
+            workspace.apply(replacement.proposal_id, proposal_digest(replacement.payload))
+        else:
+            (fixture.vault / "wiki/background.md").unlink()
+
+    with WikiWorkspace(fixture.settings) as reopened:
+        assert reopened.review(applied.proposal_id) == historical_review
+        assert "no-op" in reopened.apply(applied.proposal_id, proposal_digest(applied.payload))
+        assert fixture.page.read_bytes() == accepted
+        with pytest.raises(WikiError, match="missing (section anchor|wiki page)"):
+            reopened.apply(pending.proposal_id, proposal_digest(pending.payload))
+        with pytest.raises(WikiError, match="missing (section anchor|wiki page)"):
+            fixture.proposal(reopened, linked_body + "\nInvalid new link.\n")
+        repaired = fixture.proposal(
+            reopened, INITIAL + "\nRelated reference removed after the background update.\n"
+        )
+        reopened.apply(repaired.proposal_id, proposal_digest(repaired.payload))
+        assert fixture.page.read_bytes() == repaired.payload["after"].encode()
+        history = fixture.control / "history/report-cache" / f"{repaired.proposal_id}.md"
+        assert history.read_bytes() == accepted
+        assert (
+            fixture.control / "sources/source-a.md"
+        ).read_bytes() == fixture.source().read_bytes()
+
+
 def test_missing_retained_source_refuses_later_update(fixture: Fixture) -> None:
     with WikiWorkspace(fixture.settings) as workspace:
         fixture.initial(workspace)
