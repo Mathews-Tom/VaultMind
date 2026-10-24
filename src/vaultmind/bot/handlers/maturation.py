@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from vaultmind.bot.handlers.capture import telegram_identity
 from vaultmind.bot.handlers.utils import _is_authorized, _split_message
 from vaultmind.errors import VaultMindError
 
@@ -65,7 +66,7 @@ async def _handle_discover(
         lines.append(f"  ID: `{cluster.fingerprint[:8]}`")
         lines.append("")
 
-    lines.append("Use `/mature synthesize <id>` to create a permanent note")
+    lines.append("Use `/mature synthesize <id>` to create an unapproved permanent-note projection")
     lines.append("Use `/mature dismiss <id>` to skip a cluster")
 
     text = "\n".join(lines)
@@ -90,13 +91,21 @@ async def _handle_synthesize(
         await message.answer(f"No cluster found matching '{id_prefix}'.")
         return
 
+    identity = telegram_identity(message)
     await message.answer(f"Synthesizing from {len(match.note_paths)} notes...")
     try:
-        result = await asyncio.to_thread(pipeline.synthesize, match)
+        result = await asyncio.to_thread(
+            pipeline.synthesize, match, invocation_id=identity["event_id"]
+        )
     except VaultMindError as exc:
         await message.answer(f"Synthesis failed for cluster '{match.top_entity}': {exc}")
         return
-    await message.answer(f"Created permanent note: `{result}`", parse_mode="Markdown")
+    source_id = result.rsplit("/", 1)[-1].removesuffix(".md")
+    await message.answer(
+        f"Created permanent-note projection: `{result}` (unapproved).\n"
+        f"Retained source: `{source_id}`; wiki publication requires separate exact review.",
+        parse_mode="Markdown",
+    )
 
 
 async def _handle_dismiss(

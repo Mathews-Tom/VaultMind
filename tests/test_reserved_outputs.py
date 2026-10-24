@@ -9,8 +9,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vaultmind.config import DigestConfig, MaturationConfig
+from vaultmind.config import DigestConfig, MaturationConfig, Settings
 from vaultmind.indexer.digest import DigestGenerator, DigestReport
+from vaultmind.knowledge.intake import SourceIntake
 from vaultmind.memory.consolidation import MemoryConsolidator
 from vaultmind.memory.store import EpisodeStore
 from vaultmind.pipeline.maturation import MaturationPipeline
@@ -59,9 +60,12 @@ def test_maturation_state_alias_is_rejected_before_loading(tmp_path: Path) -> No
     retained.write_bytes(b"retained non-state bytes")
     alias = vault / "ordinary-state.json"
     alias.symlink_to(retained)
-    with pytest.raises(ReservedNamespaceError):
+    with (
+        SourceIntake(Settings(vault={"path": vault})) as intake,
+        pytest.raises(ReservedNamespaceError),
+    ):
         MaturationPipeline(
-            MaturationConfig(), MagicMock(), MagicMock(), MagicMock(), vault, state_path=alias
+            MaturationConfig(), MagicMock(), MagicMock(), MagicMock(), intake, state_path=alias
         )
     assert retained.read_bytes() == b"retained non-state bytes"
     assert {path.name for path in protected.iterdir()} == {"state.json"}

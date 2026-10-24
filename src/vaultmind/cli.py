@@ -700,6 +700,7 @@ def bot(ctx: click.Context) -> None:
     from vaultmind.config import load_settings
     from vaultmind.graph import KnowledgeGraph
     from vaultmind.indexer import Embedder, VaultStore
+    from vaultmind.knowledge.intake import SourceIntake
     from vaultmind.vault import VaultParser
 
     settings = load_settings(ctx.obj.get("config_path"))
@@ -796,7 +797,9 @@ def bot(ctx: click.Context) -> None:
     from vaultmind.pipeline.maturation import MaturationPipeline
 
     maturation_pipeline: MaturationPipeline | None = None
+    producer_intake: SourceIntake | None = None
     if settings.maturation.enabled:
+        producer_intake = SourceIntake(settings)
         synthesis_model = settings.maturation.synthesis_model or settings.llm.thinking_model
         mat_config = settings.maturation
         # Override synthesis_model with resolved value
@@ -810,7 +813,7 @@ def bot(ctx: click.Context) -> None:
             collection=store._collection,
             knowledge_graph=graph,
             llm=llm_client,
-            vault_root=settings.vault.path,
+            intake=producer_intake,
         )
 
     # Episodic memory
@@ -1096,6 +1099,8 @@ def bot(ctx: click.Context) -> None:
             else Path("config/sources.toml")
         )
         source_store = SourceStore(validate_ordinary_output_path(sources_db, settings.vault.path))
+        if producer_intake is None:
+            producer_intake = SourceIntake(settings)
         distill_model = settings.distill.model or settings.llm.thinking_model
         review_queue.register_applier(
             ProposalKind.SOURCE_INGESTION,
@@ -1104,6 +1109,7 @@ def bot(ctx: click.Context) -> None:
                 llm_client=llm_client,
                 model=distill_model,
                 gap_store=gap_store,
+                intake=producer_intake,
             ),
         )
 
@@ -1112,7 +1118,8 @@ def bot(ctx: click.Context) -> None:
                 continue
 
             def _make_source_executor(
-                instance: object = source_instance,
+                instance: object,
+                intake: SourceIntake,
             ) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
                 async def _run(state: dict[str, Any]) -> dict[str, Any]:
                     from vaultmind.sources.models import SourceInstance as _SourceInstance
@@ -1125,6 +1132,7 @@ def bot(ctx: click.Context) -> None:
                         parser=parser,
                         store=store,
                         vault_root=settings.vault.path,
+                        intake=intake,
                         event_bus=event_bus,
                         on_block=on_block,
                     )
@@ -1149,7 +1157,7 @@ def bot(ctx: click.Context) -> None:
                 ScheduledJob(
                     name=f"source_{source_instance.name}",
                     interval=timedelta(hours=source_instance.interval_hours),
-                    execute=_make_source_executor(),
+                    execute=_make_source_executor(source_instance, producer_intake),
                 )
             )
 
@@ -1184,7 +1192,11 @@ def bot(ctx: click.Context) -> None:
                 scheduler_task.cancel()
             watcher.stop()
 
-    asyncio.run(_run_bot_with_watcher())
+    try:
+        asyncio.run(_run_bot_with_watcher())
+    finally:
+        if producer_intake is not None:
+            producer_intake.workspace.close()
 
 
 @cli.command()
@@ -1643,6 +1655,7 @@ def research(ctx: click.Context, query: str, max_results: int | None) -> None:
     """Run a research pipeline: search YouTube, fetch transcripts, analyze, create vault notes."""
     from vaultmind.config import VAULTMIND_HOME, load_settings
     from vaultmind.indexer import Embedder, VaultStore
+    from vaultmind.knowledge.intake import SourceIntake
     from vaultmind.research.pipeline import ResearchConfig as PipelineConfig
     from vaultmind.research.pipeline import run_research_pipeline
     from vaultmind.vault import VaultParser
@@ -1687,8 +1700,8 @@ def research(ctx: click.Context, query: str, max_results: int | None) -> None:
             stale_after_days=settings.gaps.stale_after_days,
         )
 
-    async def _run() -> None:
-        with console.status(f"Researching: {query}..."):
+    async def _run() -> str:
+        with SourceIntake(settings) as intake, console.status(f"Researching: {query}..."):
             result = await run_research_pipeline(
                 query=query,
                 vault_root=settings.vault.path,
@@ -1697,30 +1710,51 @@ def research(ctx: click.Context, query: str, max_results: int | None) -> None:
                 parser=parser,
                 config=pipeline_config,
                 model=model,
+                intake=intake,
             )
 
-        console.print(f"\n[green]✓[/green] Research complete: {query}")
+        console.print(f"\nResearch finished: {query}", markup=False)
+        console.print(f"  Preserved original sources: {len(result.original_source_ids)}")
+        for source_id in result.original_source_ids:
+            console.print(f"    {source_id}", markup=False)
+        if result.derivative_source_id is not None:
+            console.print(
+                f"  Unapproved analysis source: {result.derivative_source_id}", markup=False
+            )
+        for disposition in result.dispositions:
+            console.print(f"  {disposition.stage}: {disposition.status}", markup=False)
         console.print(f"  Sources created: {len(result.sources_created)}")
         for p in result.sources_created:
             console.print(f"    {p.relative_to(settings.vault.path)}")
-        if result.summary_path.exists():
-            console.print(f"  Summary: {result.summary_path.relative_to(settings.vault.path)}")
-        console.print(f"\n[bold]Summary:[/bold] {result.analysis_summary}")
+        if result.summary_path is not None and result.summary_path.is_file():
+            console.print(
+                f"  Unapproved summary: {result.summary_path.relative_to(settings.vault.path)}",
+                markup=False,
+            )
+        console.print(f"\nSummary: {result.analysis_summary}", markup=False)
 
-        if gap_store is not None and result.summary_path.exists():
+        if (
+            gap_store is not None
+            and result.summary_path is not None
+            and result.summary_path.is_file()
+        ):
             resolution_ref = str(result.summary_path.relative_to(settings.vault.path))
             closed = gap_store.close_from_research(query, resolution_ref)
             if closed is not None:
                 console.print(
                     f"[green]✓[/green] Closed gap {closed.gap_id[:8]} -> {resolution_ref}"
                 )
+        return result.error
 
-    asyncio.run(_run())
-
-    if cache is not None:
-        cache.close()
-    if gap_store is not None:
-        gap_store.close()
+    try:
+        error = asyncio.run(_run())
+    finally:
+        if cache is not None:
+            cache.close()
+        if gap_store is not None:
+            gap_store.close()
+    if error:
+        raise click.ClickException(error)
 
 
 @cli.command()
@@ -2522,6 +2556,7 @@ def source_run(ctx: click.Context, name: str) -> None:
     from vaultmind.config import VAULTMIND_HOME, load_settings
     from vaultmind.indexer import Embedder, VaultStore
     from vaultmind.indexer.duplicate_detector import DuplicateDetector
+    from vaultmind.knowledge.intake import SourceIntake
     from vaultmind.memory.gaps import GapStore
     from vaultmind.services.review_queue import ProposalKind
     from vaultmind.sources.pipeline import make_applier, run_connector_once
@@ -2578,16 +2613,6 @@ def source_run(ctx: click.Context, name: str) -> None:
             stale_after_days=settings.gaps.stale_after_days,
         )
 
-    review_queue.register_applier(
-        ProposalKind.SOURCE_INGESTION,
-        make_applier(
-            vault_root=settings.vault.path,
-            llm_client=llm_client,
-            model=distill_model,
-            gap_store=gap_store,
-        ),
-    )
-
     if detector is not None:
         dup_subscriber = _duplicate_review_subscriber(detector, review_queue)
         event_bus.subscribe(NoteCreatedEvent, dup_subscriber)  # type: ignore[arg-type]
@@ -2614,7 +2639,17 @@ def source_run(ctx: click.Context, name: str) -> None:
 
     source_store = SourceStore(_sources_db_path(settings))
 
-    with console.status(f"Running connector '{name}'..."):
+    with SourceIntake(settings) as intake, console.status(f"Running connector '{name}'..."):
+        review_queue.register_applier(
+            ProposalKind.SOURCE_INGESTION,
+            make_applier(
+                vault_root=settings.vault.path,
+                llm_client=llm_client,
+                model=distill_model,
+                gap_store=gap_store,
+                intake=intake,
+            ),
+        )
         result = asyncio.run(
             run_connector_once(
                 instance,
@@ -2623,6 +2658,7 @@ def source_run(ctx: click.Context, name: str) -> None:
                 parser=parser,
                 store=store,
                 vault_root=settings.vault.path,
+                intake=intake,
                 event_bus=event_bus,
             )
         )
@@ -2634,12 +2670,24 @@ def source_run(ctx: click.Context, name: str) -> None:
     source_store.close()
     review_queue.close()
 
+    for outcome in result.outcomes:
+        console.print(
+            f"  Item {outcome.item_id!r}: {outcome.status}; "
+            f"generation={outcome.generation_status}; "
+            f"finalization={outcome.finalization_status}; approved=no",
+            markup=False,
+        )
+        if outcome.source_ids:
+            console.print(f"    Preserved source IDs: {outcome.source_ids!r}", markup=False)
+        if outcome.error:
+            console.print(f"    Processing error: {outcome.error!r}", markup=False)
+
     if result.error:
         console.print(f"[red]✗[/red] Connector '{name}' failed: {result.error}")
         sys.exit(1)
 
     console.print(
-        f"[green]✓[/green] Connector '{name}' run complete:"
+        f"[green]✓[/green] Connector '{name}' fetch/run returned:"
         f" {result.items_fetched} fetched, {result.items_ingested} ingested"
     )
 

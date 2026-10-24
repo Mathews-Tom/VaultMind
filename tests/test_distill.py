@@ -7,18 +7,26 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import frontmatter
+import pytest
 
+from vaultmind.config import Settings, VaultConfig
+from vaultmind.knowledge.intake import SourceIntake, StageDisposition
 from vaultmind.llm.client import LLMError, LLMResponse
 from vaultmind.memory.models import OutcomeStatus
 from vaultmind.memory.store import EpisodeStore
 from vaultmind.pipeline.distill import (
+    DISTILL_SYSTEM_PROMPT,
     DISTILLED_AUTHORITY,
-    DistillResult,
-    distill_conversation,
+    DistillationGeneration,
+    distill_retained_conversation,
     extract_and_store_episodes,
+    generate_distillation,
+    preserve_conversation_snapshot,
+    render_conversation,
 )
 from vaultmind.vault.models import Note, NoteType
 from vaultmind.vault.parser import VaultParser
+from vaultmind.wiki.workspace import WikiError, WikiWorkspace, proposal_digest
 
 
 def _make_llm(response_obj: object) -> MagicMock:
@@ -44,167 +52,215 @@ _GOOD_RESPONSE = {
 }
 
 
-class TestDistillConversationSuccess:
-    def test_writes_note_with_full_schema(self, tmp_path: Path) -> None:
-        llm = _make_llm(_GOOD_RESPONSE)
-        result = distill_conversation(
-            _GOOD_TURNS,
-            llm,
-            "fake-model",
-            tmp_path,
-            "qa-artifacts",
-            source_ref="telegram-thinking:1:1234",
-            occurred_at="2026-07-21T10:00:00Z",
-        )
+def _generate(llm: MagicMock, text: str | None = None) -> DistillationGeneration:
+    return generate_distillation(
+        render_conversation(_GOOD_TURNS) if text is None else text,
+        llm,
+        "fake-model",
+        source_ref="telegram-thinking:1:1234",
+        occurred_at="2026-07-21T10:00:00Z",
+    )
 
-        assert result.success is True
-        assert result.error == ""
-        output_path = tmp_path / result.output_path
-        assert output_path.exists()
 
-        post = frontmatter.loads(output_path.read_text())
+def _input(intake: SourceIntake, event: str = "chat:1:actor"):
+    return preserve_conversation_snapshot(
+        intake,
+        dict(
+            version=1,
+            history=_GOOD_TURNS,
+            participants=[dict(role="user", user_id=1), dict(role="assistant")],
+            summaries=[dict(summary="Historical generated summary")],
+        ),
+        origin="telegram:chat=1:actor=1",
+        adapter="telegram-distill",
+        event_id=event,
+    )
+
+
+def _distill(intake: SourceIntake, captured, llm: MagicMock):
+    return distill_retained_conversation(
+        intake,
+        captured,
+        llm,
+        "fake-model",
+        source_ref="telegram-thinking:1:1234",
+        occurred_at="2026-07-21T10:00:00Z",
+        output_folder="qa-artifacts",
+    )
+
+
+class TestDistillationGeneration:
+    def test_full_schema_wikilinks_and_no_filesystem_effects(self, tmp_path: Path) -> None:
+        result = _generate(_make_llm(_GOOD_RESPONSE))
+        assert result.success and result.error == ""
+        assert list(tmp_path.iterdir()) == []
+        post = frontmatter.loads(result.content)
         assert post.metadata["type"] == "qa-artifact"
-        assert post.metadata["question"] == _GOOD_RESPONSE["question"]
-        assert post.metadata["summary"] == _GOOD_RESPONSE["summary"]
-        assert post.metadata["resolution"] == _GOOD_RESPONSE["resolution"]
-        assert post.metadata["systems"] == _GOOD_RESPONSE["systems"]
-        assert post.metadata["participants"] == _GOOD_RESPONSE["participants"]
+        for name in ("question", "summary", "resolution", "systems", "participants"):
+            assert post.metadata[name] == _GOOD_RESPONSE[name]
         assert post.metadata["source_ref"] == "telegram-thinking:1:1234"
         assert post.metadata["occurred_at"] == "2026-07-21T10:00:00Z"
         assert post.metadata["authority"] == DISTILLED_AUTHORITY == 4
+        assert post.metadata["approved"] is False
+        assert post.metadata["status"] == "unapproved"
+        assert all(link in post.content for link in ("[[ChromaDB]]", "[[pgvector]]", "[[user]]"))
 
-    def test_note_parses_as_qa_artifact_note_type(self, tmp_path: Path) -> None:
+    def test_optional_sections_and_unresolved_resolution(self) -> None:
+        response = dict(_GOOD_RESPONSE, systems=[], participants=[], resolution="")
+        result = _generate(_make_llm(response))
+        assert result.success and result.frontmatter["resolution"] == ""
+        assert "## Systems" not in result.content
+        assert "## Participants" not in result.content
+        assert "_Unresolved._" in result.content
+
+    @pytest.mark.parametrize(
+        "response,error",
+        [(["not", "object"], "JSON object"), (dict(_GOOD_RESPONSE, question=""), "no question")],
+    )
+    def test_invalid_structured_output(self, response: object, error: str) -> None:
+        result = _generate(_make_llm(response))
+        assert not result.success and error in result.error
+
+    def test_invalid_json(self) -> None:
+        llm = _make_llm({})
+        llm.complete.return_value = LLMResponse(text="not json", model="fake", usage={})
+        assert "Invalid JSON" in _generate(llm).error
+
+    def test_empty_input_and_provider_failure(self) -> None:
         llm = _make_llm(_GOOD_RESPONSE)
-        result = distill_conversation(
-            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", source_ref="ref-1"
-        )
-        assert result.success is True
-
-        from vaultmind.config import VaultConfig
-
-        parser = VaultParser(VaultConfig(path=tmp_path))
-        note = parser.parse_file(tmp_path / result.output_path)
-        assert note.note_type == NoteType.QA_ARTIFACT
-        assert note.authority == DISTILLED_AUTHORITY
-
-    def test_body_wikilinks_systems_and_participants(self, tmp_path: Path) -> None:
-        llm = _make_llm(_GOOD_RESPONSE)
-        result = distill_conversation(
-            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", source_ref="ref-wikilinks"
-        )
-        assert result.success is True
-
-        post = frontmatter.loads((tmp_path / result.output_path).read_text())
-        assert "[[ChromaDB]]" in post.content
-        assert "[[pgvector]]" in post.content
-        assert "[[user]]" in post.content
-
-    def test_wikilinks_extracted_by_note_wikilinks_property(self, tmp_path: Path) -> None:
-        llm = _make_llm(_GOOD_RESPONSE)
-        result = distill_conversation(
-            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", source_ref="ref-wl2"
-        )
-        assert result.success is True
-
-        from vaultmind.config import VaultConfig
-
-        parser = VaultParser(VaultConfig(path=tmp_path))
-        note = parser.parse_file(tmp_path / result.output_path)
-        assert set(note.wikilinks) == {"ChromaDB", "pgvector", "user"}
-
-    def test_no_systems_or_participants_omits_wikilink_sections(self, tmp_path: Path) -> None:
-        response = dict(_GOOD_RESPONSE)
-        response["systems"] = []
-        response["participants"] = []
-        llm = _make_llm(response)
-        result = distill_conversation(
-            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", source_ref="ref-no-links"
-        )
-        assert result.success is True
-
-        post = frontmatter.loads((tmp_path / result.output_path).read_text())
-        assert "## Systems" not in post.content
-        assert "## Participants" not in post.content
-
-    def test_unresolved_resolution_kept_empty(self, tmp_path: Path) -> None:
-        response = dict(_GOOD_RESPONSE)
-        response["resolution"] = ""
-        llm = _make_llm(response)
-        result = distill_conversation(
-            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", source_ref="ref-2"
-        )
-        assert result.success is True
-        assert result.frontmatter["resolution"] == ""
-
-    def test_avoids_filename_collision(self, tmp_path: Path) -> None:
-        llm = _make_llm(_GOOD_RESPONSE)
-        first = distill_conversation(
-            _GOOD_TURNS,
-            llm,
-            "fake-model",
-            tmp_path,
-            "qa-artifacts",
-            source_ref="ref-a",
-            occurred_at="2026-07-21T10:00:00Z",
-        )
-        second = distill_conversation(
-            _GOOD_TURNS,
-            llm,
-            "fake-model",
-            tmp_path,
-            "qa-artifacts",
-            source_ref="ref-b",
-            occurred_at="2026-07-21T10:00:00Z",
-        )
-        assert first.output_path != second.output_path
-        assert (tmp_path / first.output_path).exists()
-        assert (tmp_path / second.output_path).exists()
-
-
-class TestDistillConversationFailure:
-    def test_empty_turns_fails_without_llm_call(self, tmp_path: Path) -> None:
-        llm = _make_llm(_GOOD_RESPONSE)
-        result = distill_conversation([], llm, "fake-model", tmp_path, "qa-artifacts", "ref")
-        assert result.success is False
-        assert "No conversation turns" in result.error
+        assert "No conversation turns" in _generate(llm, "").error
         llm.complete.assert_not_called()
-
-    def test_llm_error_returns_failure(self, tmp_path: Path) -> None:
-        llm = MagicMock()
         llm.complete.side_effect = LLMError("boom", provider="anthropic")
-        result = distill_conversation(
-            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", "ref"
-        )
-        assert result.success is False
-        assert result.output_path == ""
-        assert not (tmp_path / "qa-artifacts").exists()
+        assert _generate(llm).error == "LLM call failed"
 
-    def test_invalid_json_returns_failure(self, tmp_path: Path) -> None:
-        llm = MagicMock()
-        llm.complete.return_value = LLMResponse(text="not json", model="fake-model", usage={})
-        result = distill_conversation(
-            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", "ref"
-        )
-        assert result.success is False
-        assert "Invalid JSON" in result.error
 
-    def test_non_object_json_returns_failure(self, tmp_path: Path) -> None:
-        llm = _make_llm(["not", "an", "object"])
-        result = distill_conversation(
-            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", "ref"
-        )
-        assert result.success is False
-        assert "JSON object" in result.error
+class TestPreservedDistillation:
+    def test_retains_request_before_call_and_projects_parented_unapproved_note(
+        self, tmp_path: Path
+    ) -> None:
+        settings = Settings(vault=VaultConfig(path=tmp_path))
+        with SourceIntake(settings) as intake:
+            captured = _input(intake)
+            llm = _make_llm(_GOOD_RESPONSE)
+            response = llm.complete.return_value
 
-    def test_missing_question_returns_failure(self, tmp_path: Path) -> None:
-        response = dict(_GOOD_RESPONSE)
-        response["question"] = ""
-        llm = _make_llm(response)
-        result = distill_conversation(
-            _GOOD_TURNS, llm, "fake-model", tmp_path, "qa-artifacts", "ref"
-        )
-        assert result.success is False
-        assert "no question" in result.error
+            def complete(**kwargs):
+                requests = [
+                    json.loads(path.read_text())
+                    for path in (tmp_path / "_wiki/sources").glob("*.md")
+                    if path.read_text().startswith('{"authority":')
+                ]
+                assert len(requests) == llm.complete.call_count
+                assert requests[0]["messages"][0]["content"] == kwargs["messages"][0].content
+                assert requests[0]["system"] == kwargs["system"] == DISTILL_SYSTEM_PROMPT
+                assert requests[0]["model"] == kwargs["model"]
+                assert requests[0]["max_tokens"] == kwargs["max_tokens"]
+                return response
+
+            llm.complete.side_effect = complete
+            result = _distill(intake, captured, llm)
+            assert result.success and result.derivative is not None
+            assert result.derivative.approved is False
+            retained = intake.read(result.derivative.source_id)
+            assert retained.provenance["original_retained"] is False
+            assert retained.dependencies[0].source_id == result.request.source_id
+            assert retained.dependencies[0].dependencies[0].source_id == captured.source_id
+            assert (tmp_path / result.output_path).read_bytes() == retained.content
+            assert not result.derivative.indexed
+            parser = VaultParser(settings.vault)
+            note = parser.parse_file(tmp_path / result.output_path)
+            assert note.note_type is NoteType.QA_ARTIFACT
+            assert set(note.wikilinks) == {"ChromaDB", "pgvector", "user"}
+            assert note.authority == DISTILLED_AUTHORITY
+            second = _distill(intake, _input(intake, "chat:2:actor"), llm)
+            assert second.success and second.output_path != result.output_path
+
+    @pytest.mark.parametrize("failure", ["provider", "invalid", "derivative", "projection"])
+    def test_failure_preserves_original_without_claiming_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+    ) -> None:
+        settings = Settings(vault=VaultConfig(path=tmp_path))
+        with SourceIntake(settings) as intake:
+            captured = _input(intake)
+            original = intake.read(captured.source_id).dependencies[0]
+            llm = _make_llm(_GOOD_RESPONSE)
+            if failure == "provider":
+                llm.complete.side_effect = RuntimeError("provider unavailable")
+            elif failure == "invalid":
+                llm.complete.return_value = LLMResponse(text="bad json", model="fake", usage={})
+            elif failure == "derivative":
+                preserve = intake.preserve_text
+
+                def fail_derivative(content, **kwargs):
+                    if kwargs.get("role") == "distillation":
+                        raise OSError("derivative unavailable")
+                    return preserve(content, **kwargs)
+
+                monkeypatch.setattr(intake, "preserve_text", fail_derivative)
+            else:
+                monkeypatch.setattr(
+                    intake, "project_text", lambda *_: StageDisposition("projection", "failed")
+                )
+            result = _distill(intake, captured, llm)
+            assert not result.success and result.output_path == ""
+            assert intake.read(original.source_id).content == original.content
+            assert not (tmp_path / "qa-artifacts").exists()
+            if failure in {"provider", "invalid"}:
+                assert result.generation_disposition.status == "failed"
+                replay = _distill(intake, _input(intake), llm)
+                assert replay.generation is None
+                assert llm.complete.call_count == 1
+            if failure == "derivative":
+                assert result.generation.success
+                assert result.derivative is None
+                assert result.derivative_disposition.status == "failed"
+
+    def test_missing_parent_refuses_before_completion(self, tmp_path: Path) -> None:
+        with SourceIntake(Settings(vault=VaultConfig(path=tmp_path))) as intake:
+            captured = _input(intake)
+            original = intake.read(captured.source_id).dependencies[0]
+            (tmp_path / original.path).unlink()
+            llm = _make_llm(_GOOD_RESPONSE)
+            with pytest.raises(WikiError):
+                _distill(intake, captured, llm)
+            llm.complete.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "text", ["---\ndo_not_retain: true\n---\nprivate", "\x00private", "x" * (256 * 1024 + 1)]
+    )
+    def test_original_policy_is_not_hidden_by_envelope(self, tmp_path: Path, text: str) -> None:
+        with SourceIntake(Settings(vault=VaultConfig(path=tmp_path))) as intake:
+            with pytest.raises(WikiError):
+                preserve_conversation_snapshot(
+                    intake,
+                    dict(history=[dict(user=text, assistant="")]),
+                    origin="test",
+                    adapter="test",
+                    event_id="one",
+                )
+            assert not (tmp_path / "_wiki").exists()
+
+    def test_retained_producer_id_requires_exact_wiki_review(self, tmp_path: Path) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        settings = Settings(vault=VaultConfig(path=vault))
+        with WikiWorkspace(settings) as workspace:
+            intake = SourceIntake.from_workspace(workspace)
+            result = _distill(intake, _input(intake), _make_llm(_GOOD_RESPONSE))
+            assert result.derivative is not None
+            source_id = result.derivative.source_id
+            draft = tmp_path / "draft.md"
+            draft.write_text(
+                "# Storage\n\n## Current understanding\n\n"
+                f"Use ChromaDB now. [[_wiki/sources/{source_id}]]\n"
+            )
+            proposal = workspace.propose("wiki/storage.md", [source_id], draft_file=draft)
+            assert not (vault / "wiki/storage.md").exists()
+            assert "Exact before/after unified diff" in workspace.review(proposal.proposal_id)
+            with pytest.raises(WikiError):
+                workspace.apply(proposal.proposal_id, "0" * 64)
+            workspace.apply(proposal.proposal_id, proposal_digest(proposal.payload))
+            assert (vault / "wiki/storage.md").exists()
 
 
 class TestExtractAndStoreEpisodes:
@@ -259,9 +315,25 @@ class TestExtractAndStoreEpisodes:
         store.close()
 
 
-class TestDistillResultDataclass:
+class TestGenerationResultDataclass:
     def test_defaults(self) -> None:
-        result = DistillResult(success=False)
-        assert result.output_path == ""
+        result = DistillationGeneration(success=False)
+        assert result.content == ""
         assert result.frontmatter == {}
         assert result.error == ""
+
+
+def test_absolute_ordinary_output_folder_returns_relative_projection_path(tmp_path: Path) -> None:
+    with SourceIntake(Settings(vault=VaultConfig(path=tmp_path))) as intake:
+        result = distill_retained_conversation(
+            intake,
+            _input(intake),
+            _make_llm(_GOOD_RESPONSE),
+            "fake-model",
+            source_ref="selected-session",
+            occurred_at="2026-10-24T12:00:00Z",
+            output_folder=str(tmp_path / "nested"),
+        )
+        assert result.success
+        assert result.output_path.startswith("nested/")
+        assert (tmp_path / result.output_path).is_file()

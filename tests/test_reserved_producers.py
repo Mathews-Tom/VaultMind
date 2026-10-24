@@ -1,17 +1,19 @@
 """Ordinary producers reject reserved output aliases before side effects."""
 
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vaultmind.pipeline.distill import distill_conversation
-from vaultmind.pipeline.synthesis import synthesize_cluster
-from vaultmind.research.pipeline import ResearchConfig, _create_source_note, run_research_pipeline
+from vaultmind.config import MaturationConfig, Settings
+from vaultmind.knowledge.intake import SourceIntake
+from vaultmind.pipeline.distill import distill_retained_conversation
+from vaultmind.pipeline.maturation import MaturationPipeline
+from vaultmind.research.pipeline import ResearchConfig, run_research_pipeline
 from vaultmind.services.review_queue import Impact, Lane, ProposalKind, ProposalStatus, ReviewQueue
 from vaultmind.sources.models import SourceInstance, SourceItem
 from vaultmind.sources.pipeline import (
-    _write_plain_note,
     ingest_item,
     make_applier,
     propose_ingestion,
@@ -30,6 +32,13 @@ def reserved_alias(tmp_path: Path, request: pytest.FixtureRequest) -> tuple[Path
     return root, page
 
 
+@pytest.fixture
+def intake(reserved_alias: tuple[Path, Path]) -> Iterator[SourceIntake]:
+    root, _ = reserved_alias
+    with SourceIntake(Settings(vault={"path": root})) as capability:
+        yield capability
+
+
 def _item() -> SourceItem:
     return SourceItem(item_id="one", title="page", content="raw source", url="https://example.com")
 
@@ -40,26 +49,50 @@ def _instance() -> SourceInstance:
     )
 
 
-def test_distill_alias_rejected_before_provider(reserved_alias: tuple[Path, Path]) -> None:
+def test_distill_alias_rejected_before_provider(
+    reserved_alias: tuple[Path, Path], intake: SourceIntake
+) -> None:
     root, page = reserved_alias
     llm = MagicMock()
+    capture = intake.preserve_text(
+        "User: source body",
+        original_name="selected-conversation.md",
+        origin="selected synthetic session",
+        adapter="synthetic-distill",
+    )
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
     with pytest.raises(ReservedNamespaceError):
-        distill_conversation(
-            [{"user": "source body"}], llm, "fake", root, "configured-output", "session"
+        distill_retained_conversation(
+            intake,
+            capture,
+            llm,
+            "fake",
+            source_ref="session",
+            occurred_at="2026-10-24T00:00:00+00:00",
+            output_folder="configured-output",
         )
     llm.complete.assert_not_called()
     assert page.read_text() == "approved page"
-    assert list(page.parent.iterdir()) == [page]
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
 
 
-def test_synthesis_alias_rejected_before_source_read(reserved_alias: tuple[Path, Path]) -> None:
+def test_synthesis_alias_rejected_before_source_read(
+    reserved_alias: tuple[Path, Path], intake: SourceIntake
+) -> None:
     root, page = reserved_alias
     llm = MagicMock()
     cluster = MagicMock()
     cluster.top_entity = "entity"
     cluster.note_paths = [str(page.relative_to(root))]
     with pytest.raises(ReservedNamespaceError):
-        synthesize_cluster(cluster, root, "configured-output", llm, "fake")
+        pipeline = MaturationPipeline(
+            MaturationConfig(inbox_folder="configured-output"),
+            MagicMock(),
+            MagicMock(),
+            llm,
+            intake,
+        )
+        pipeline.synthesize(cluster)
     llm.complete.assert_not_called()
     assert page.read_text() == "approved page"
     assert list(page.parent.iterdir()) == [page]
@@ -67,7 +100,7 @@ def test_synthesis_alias_rejected_before_source_read(reserved_alias: tuple[Path,
 
 @pytest.mark.asyncio
 async def test_research_alias_rejected_before_search(
-    reserved_alias: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    reserved_alias: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, intake: SourceIntake
 ) -> None:
     root, page = reserved_alias
     search = AsyncMock()
@@ -81,6 +114,7 @@ async def test_research_alias_rejected_before_search(
             MagicMock(),
             MagicMock(),
             ResearchConfig(output_folder="configured-output"),
+            intake=intake,
         )
     search.assert_not_called()
     llm.complete.assert_not_called()
@@ -88,17 +122,8 @@ async def test_research_alias_rejected_before_search(
     assert list(page.parent.iterdir()) == [page]
 
 
-def test_research_source_writer_rechecks_alias(reserved_alias: tuple[Path, Path]) -> None:
-    root, page = reserved_alias
-    with pytest.raises(ReservedNamespaceError):
-        _create_source_note(
-            "page", "raw source", "https://example.com", "query", root / "configured-output", root
-        )
-    assert page.read_text() == "approved page"
-
-
 def test_connector_alias_rejected_before_queue_and_fallback(
-    reserved_alias: tuple[Path, Path],
+    reserved_alias: tuple[Path, Path], intake: SourceIntake
 ) -> None:
     root, page = reserved_alias
     queue = MagicMock()
@@ -107,9 +132,9 @@ def test_connector_alias_rejected_before_queue_and_fallback(
         propose_ingestion(queue, _item(), _instance(), vault_root=root)
     queue.propose.assert_not_called()
     with pytest.raises(ReservedNamespaceError):
-        ingest_item(_item(), _instance(), vault_root=root, llm_client=llm, model="fake")
-    with pytest.raises(ReservedNamespaceError):
-        _write_plain_note(_item(), _instance(), root)
+        ingest_item(
+            _item(), _instance(), vault_root=root, llm_client=llm, model="fake", intake=intake
+        )
     llm.complete.assert_not_called()
     assert page.read_text() == "approved page"
     assert list(page.parent.iterdir()) == [page]
@@ -118,6 +143,7 @@ def test_connector_alias_rejected_before_queue_and_fallback(
 def test_queued_connector_rechecks_alias_and_stays_failed(
     reserved_alias: tuple[Path, Path],
     tmp_path: Path,
+    intake: SourceIntake,
 ) -> None:
     root, page = reserved_alias
     destination = root / "later-output"
@@ -127,7 +153,7 @@ def test_queued_connector_rechecks_alias_and_stays_failed(
         tmp_path / "review.db",
         appliers={
             ProposalKind.SOURCE_INGESTION: make_applier(
-                vault_root=root, llm_client=llm, model="fake"
+                vault_root=root, llm_client=llm, model="fake", intake=intake
             )
         },
     )

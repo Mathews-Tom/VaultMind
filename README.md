@@ -22,7 +22,7 @@ contradiction detection, graduated autonomy review and non-destructive edit line
 - **Multi-provider LLM** — Anthropic, OpenAI, Gemini, or Ollama for thinking + extraction
 - **Hybrid retrieval** — Reciprocal Rank Fusion merges vector (ChromaDB) and keyword (SQLite FTS5) search results
 - **Contextual embeddings** — chunks carry document-level context (title, type, section, tags) for higher-quality vectors
-- **Zettelkasten maturation** — DBSCAN clustering surfaces fleeting notes ready for permanent synthesis
+- **Zettelkasten maturation** — DBSCAN clustering selects note snapshots for explicitly unapproved permanent-note synthesis; publishing answer evidence still requires exact wiki review
 - **Belief evolution** — tracks confidence drift, relationship shifts, and stale claims across your knowledge
 - **Episodic memory** — decision-outcome tracking with lessons learned and entity linking
 - **Procedural memory** — mines recurring decision patterns into reusable workflows (experimental)
@@ -33,7 +33,7 @@ contradiction detection, graduated autonomy review and non-destructive edit line
 - **Knowledge gap ledger** — independent enabled producers and contradiction escalations maintain trackable gaps (`/gaps`); approved-current questions do not mint gaps or trigger research
 - **Contradiction detection** — new notes landing in the duplicate-detector's merge band are checked by an eval-gated LLM surface; conflicts resolve by temporal-then-authority-then-escalate policy and never edit or delete the losing note
 - **Graduated autonomy** — every automated mutation proposal (tags, merges, contradiction resolutions, maturation synthesis) routes through one AUTO/SKIM/BLOCK review queue with an approval-fatigue metric in `vaultmind learn`
-- **Source connectors** — scheduled `rss`, `youtube-channel`, and `github-activity` connectors ingest with durable cursors, run every item through distillation and the review queue, never bypassing governance
+- **Source connectors** — scheduled `rss`, `youtube-channel`, and `github-activity` connectors preserve fetched items before distillation; source-ingestion approval authorizes capture, not approved wiki publication
 - **Non-destructive edits** — bot-initiated `/delete`/`/edit` write a dated `> [!superseded]` callout and a lineage edge instead of deleting text, preserving full edit history in the note
 - **OKF export** — `vaultmind export-okf` exports permanent/concept notes as a conformant [OKF](https://github.com/Mathews-Tom/Kosha) bundle for governed serving from Kosha
 - **Note modes** — learning vs. operational mode with activation-based decay scoring
@@ -140,9 +140,10 @@ provider/projection/index stages are not automatically retried. Partial completi
 can leave a valid preserved source without an inbox note or usable index; capture
 is not an atomic multi-store transaction or an interrupted-index recovery system.
 
-This source-intake guarantee does not cover every generated domain note:
-research, connectors, maturation, bookmarking and distillation retain their
-existing producer paths and limits. None automatically approves its output.
+Research, connectors, explicit conversation distillation, enabled non-query idle finalization and maturation now preserve their selected inputs and actual generation requests before model transforms. Generated analysis, `qa-artifact` and `permanent` notes are separate, explicitly unapproved derivatives with retained parent identities. Use a reported source ID in the existing selected-page proposal → exact review → apply workflow; a research result, source-ingestion approval or maturation approval cannot publish answer evidence.
+
+Provider failure leaves preserved originals available. Retained source IDs, ordinary-note projection, indexing/event delivery and wiki approval are distinct outcomes. Connector cursor/run-summary and delayed-approval/restart limitations remain: an applied queue operation does not prove index/event finalization. Bookmarking and other independent domain writers retain their existing limits.
+
 For malformed/orphan provenance blocking a later capture or replay, stop affected
 captures, preserve state and follow the
 [read-only diagnostic boundary](docs/architecture.md#source-intake-and-discovery);

@@ -13,6 +13,7 @@ import pytest
 
 from vaultmind.bot.session_store import SessionStore
 from vaultmind.bot.thinking import ThinkingPartner
+from vaultmind.knowledge.intake import SourceIntake
 from vaultmind.llm.client import LLMResponse
 from vaultmind.vault.parser import VaultParser
 from vaultmind.wiki.workspace import WikiError
@@ -432,3 +433,89 @@ async def test_disabled_or_too_short_idle_producer_never_constructs_provider(
         "skipped": 1,
     }
     factory.assert_not_called()
+
+
+def test_manual_snapshot_is_read_only_complete_and_detached(transport: Transport) -> None:
+    t = transport
+    history = [dict(user="stored question", assistant="stored assistant")]
+    t.sessions.save(42, history)
+    t.sessions.save_summary(42, "default", 0, 0, 0, "Historical summary", ["topic"], [])
+    provider = MagicMock()
+    partner = ThinkingPartner(
+        t.corpus.settings, llm_factory=lambda: provider, session_store=t.sessions
+    )
+    before = t.sessions._conn.total_changes
+    snapshot = partner.snapshot_for_distillation(42)
+    assert snapshot is not None
+    assert snapshot["history"] == history
+    assert snapshot["session_name"] == "default"
+    assert snapshot["summaries"][0]["summary_text"] == "Historical summary"
+    assert "not sent to distillation" in snapshot["summary_role"]
+    assert snapshot["participants"] == [dict(role="user", user_id=42), dict(role="assistant")]
+    partner._get_session(42).history[0]["user"] = "later mutation"
+    assert snapshot["history"] == history
+    assert t.sessions._conn.total_changes == before
+    provider.complete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_idle_request_preserves_full_claim_before_completion(transport: Transport) -> None:
+    t = transport
+    settings = t.corpus.settings
+    settings.distill.enabled = True
+    settings.distill.min_turns = 1
+    history = [dict(user="complete original question", assistant="complete original answer")]
+    t.sessions.save(42, history, "thinking:selected")
+    t.sessions.save_summary(42, "thinking:selected", 0, 0, 0, "Historical summary", [], [])
+    expire(t.sessions)
+
+    class CheckingProvider(DistillProvider):
+        def complete(self, messages: Any, model: str, **kwargs: Any) -> LLMResponse:
+            with SourceIntake(settings) as intake:
+                records = [
+                    json.loads(path.read_text())
+                    for path in (settings.vault.path / "_wiki/sources").glob("*.intake.json")
+                    if json.loads(path.read_text())["adapter"] == "idle-session"
+                ]
+                original = next(item for item in records if item["role"] == "selected-conversation")
+                snapshot = json.loads(intake.read(original["id"]).text)
+                assert snapshot["history"] == history
+                assert snapshot["session_name"] == "thinking:selected"
+                assert snapshot["archive_id"] is not None and snapshot["created_at"]
+                assert snapshot["summaries"][0]["summary_text"] == "Historical summary"
+                assert messages[0].content.endswith("Assistant: complete original answer")
+                assert "Historical summary" not in messages[0].content
+            return super().complete(messages, model, **kwargs)
+
+    provider = CheckingProvider()
+    partner = ThinkingPartner(settings, llm_factory=lambda: provider, session_store=t.sessions)
+    counts = await partner.finalize_idle_sessions(
+        store=MagicMock(), parser=VaultParser(settings.vault)
+    )
+    assert counts == dict(completed=1, failed=0, skipped=0)
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["---\ndo_not_retain: true\n---\nprivate", "\x00private"])
+async def test_idle_retention_failure_never_completes_or_retries(
+    transport: Transport, text: str
+) -> None:
+    t = transport
+    settings = t.corpus.settings
+    settings.distill.enabled = True
+    settings.distill.min_turns = 1
+    t.sessions.save(42, [dict(user=text, assistant="original")])
+    expire(t.sessions)
+    factory = MagicMock(side_effect=AssertionError("No provider before original retention"))
+    partner = ThinkingPartner(settings, llm_factory=factory, session_store=t.sessions)
+    counts = await partner.finalize_idle_sessions(store=MagicMock(), parser=MagicMock())
+    assert counts == dict(completed=0, failed=1, skipped=0)
+    factory.assert_not_called()
+    assert await partner.finalize_idle_sessions(store=MagicMock(), parser=MagicMock()) == dict(
+        completed=0, failed=0, skipped=0
+    )
+    row = t.sessions._conn.execute(
+        "SELECT history, state FROM thinking_session_archives"
+    ).fetchone()
+    assert json.loads(row[0])[0]["user"] == text and row[1] == "failed"

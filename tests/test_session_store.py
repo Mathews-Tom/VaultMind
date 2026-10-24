@@ -68,6 +68,9 @@ class TestArchiveExpired:
         assert store.load(1) is None
         record = claimed[0]
         assert record["history"] == [{"user": "a", "assistant": "b"}]
+        assert record["session_name"] == "default"
+        assert isinstance(record["created_at"], float)
+        assert record["summaries"] == []
         assert store.claim_expired(3600) == []
 
     def test_keeps_fresh_sessions(self, store: SessionStore) -> None:
@@ -145,3 +148,39 @@ def test_explicit_clear_removes_conversation_generations_not_other_sessions(
     assert store._conn.execute(
         "SELECT user_id, session_name FROM thinking_session_archives ORDER BY user_id"
     ).fetchall() == [(1, "work"), (2, "default")]
+
+
+def test_snapshot_reads_complete_revision_without_mutation(store: SessionStore) -> None:
+    history = [dict(user="original question", assistant="original answer")]
+    store.save(3, history, "thinking:selected")
+    store.save_summary(3, "thinking:selected", 0, 0, 0, "Prior generated summary", ["topic"], [])
+    before = store._conn.total_changes
+    snapshot = store.snapshot(3, "thinking:selected")
+    assert snapshot is not None
+    assert snapshot["history"] == history
+    assert snapshot["session_name"] == "thinking:selected"
+    assert snapshot["summaries"][0]["summary_text"] == "Prior generated summary"
+    assert snapshot["summaries"][0]["created_at"]
+    assert snapshot["created_at"] <= snapshot["last_active"]
+    assert store._conn.total_changes == before
+    snapshot["history"][0]["user"] = "changed copy"
+    assert store.load(3, "thinking:selected") == history
+    assert store.snapshot(99, "missing") is None
+
+
+def test_claim_returns_full_archived_summary_revision(store: SessionStore) -> None:
+    store.save(4, [dict(user="question", assistant="answer")])
+    store.save_summary(4, "default", 1, 0, 0, "Generated summary", ["topic"], ["open"])
+    before = store.snapshot(4, "default")
+    store._conn.execute(
+        "UPDATE thinking_sessions SET last_active = ? WHERE user_id = 4", (time.time() - 7200,)
+    )
+    store._conn.commit()
+    claimed = store.claim_expired(3600)
+    assert len(claimed) == 1 and before is not None
+    record = claimed[0]
+    assert record["session_name"] == before["session_name"]
+    assert record["created_at"] == before["created_at"]
+    assert record["history"] == before["history"]
+    assert record["summaries"] == before["summaries"]
+    assert store.claim_expired(3600) == []

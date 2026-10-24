@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import time
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from vaultmind.knowledge.intake import SourceIntake
 from vaultmind.knowledge.query import MAX_INTENT_QUESTIONS, query_knowledge
 from vaultmind.knowledge.render import render_knowledge_result
 from vaultmind.pipeline.distill import (
-    distill_conversation,
+    distill_retained_conversation,
     extract_and_store_episodes,
     mint_gap_for_unresolved,
+    preserve_conversation_snapshot,
 )
+from vaultmind.vault.security import validate_ordinary_write_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -24,6 +28,7 @@ if TYPE_CHECKING:
     from vaultmind.indexer.store import VaultStore
     from vaultmind.llm.client import LLMClient
     from vaultmind.memory.gaps import GapStore
+    from vaultmind.vault.models import Note
     from vaultmind.vault.parser import VaultParser
 
 THINKING_MODES = ("explore", "critique", "synthesize", "plan")
@@ -134,6 +139,27 @@ class ThinkingPartner:
             )
         return self._store is not None and self._store.has_active_session(user_id, self.session_ttl)
 
+    def snapshot_for_distillation(self, user_id: int) -> dict[str, Any] | None:
+        """Copy the selected available revision without running any producer."""
+        if not self.has_active_session(user_id):
+            return None
+        session = self._get_session(user_id)
+        stored = (
+            self._store.snapshot(user_id, session.session_name) if self._store is not None else None
+        )
+        return dict(
+            version=1,
+            kind="selected-session",
+            user_id=user_id,
+            session_name=session.session_name,
+            created_at=stored["created_at"] if stored is not None else session.created_at,
+            last_active=session.last_active,
+            history=deepcopy(session.history),
+            summaries=deepcopy(stored["summaries"]) if stored is not None else [],
+            summary_role="historical-generated; retained, not sent to distillation",
+            participants=[dict(role="user", user_id=user_id), dict(role="assistant")],
+        )
+
     def clear_session(self, user_id: int) -> None:
         """Explicitly clear the user's session, including retained idle records."""
         self._sessions.pop(user_id, None)
@@ -181,8 +207,12 @@ class ThinkingPartner:
                     records.append(
                         dict(
                             user_id=uid,
-                            history=session.history,
+                            history=deepcopy(session.history),
                             last_active=session.last_active,
+                            created_at=session.created_at,
+                            session_name=session.session_name,
+                            summaries=[],
+                            generation_id=session.generation_id,
                             session=session,
                         )
                     )
@@ -214,29 +244,66 @@ class ThinkingPartner:
         gap_store: GapStore | None,
     ) -> None:
         config = self._settings.distill
-        client = self._llm_factory()
         model = config.model or self._settings.llm.thinking_model
         source_ref = f"telegram-thinking:{record['user_id']}:{record['last_active']}"
         occurred_at = datetime.fromtimestamp(record["last_active"], tz=UTC).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
-        result = distill_conversation(
-            record["history"],
-            client,
-            model,
-            self._settings.vault.path,
-            config.output_folder,
-            source_ref,
-            occurred_at,
-            config.max_tokens,
+        snapshot = dict(
+            version=1,
+            kind="selected-idle-session",
+            user_id=record["user_id"],
+            session_name=record["session_name"],
+            archive_id=record.get("id"),
+            generation_id=record.get("generation_id"),
+            created_at=record["created_at"],
+            last_active=record["last_active"],
+            history=record["history"],
+            summaries=record["summaries"],
+            summary_role="historical-generated; retained, not sent to distillation",
+            participants=[
+                dict(role="user", user_id=record["user_id"]),
+                dict(role="assistant"),
+            ],
         )
-        if not result.success:
-            raise RuntimeError(result.error or "Distillation produced no qa-artifact")
-        note = parser.parse_file(self._settings.vault.path / result.output_path)
-        store.index_single_note(note, parser)
-        if episode_store is not None:
-            extract_and_store_episodes(note, client, model, episode_store)
-        mint_gap_for_unresolved(result, gap_store, source_ref)
+        output_dir = validate_ordinary_write_path(config.output_folder, self._settings.vault.path)
+        validate_ordinary_write_path(str(output_dir / "distillation.md"), self._settings.vault.path)
+        with SourceIntake(self._settings) as intake:
+            captured = preserve_conversation_snapshot(
+                intake,
+                snapshot,
+                origin=source_ref,
+                adapter="idle-session",
+                event_id=f"{record['user_id']}:{record.get('id', record.get('generation_id'))}",
+            )
+            client = self._llm_factory()
+            result = distill_retained_conversation(
+                intake,
+                captured,
+                client,
+                model,
+                source_ref=source_ref,
+                occurred_at=occurred_at,
+                output_folder=config.output_folder,
+                max_tokens=config.max_tokens,
+            )
+            if not result.success or result.derivative is None or result.generation is None:
+                raise RuntimeError(result.error)
+            derivative = result.derivative
+            note: Note | None = None
+
+            def index() -> None:
+                nonlocal note
+                intake.read(derivative.source_id)
+                note = parser.parse_file(self._settings.vault.path / result.output_path)
+                store.index_single_note(note, parser)
+
+            indexed = derivative.run_stage("index", index)
+            if indexed.status != "succeeded" or note is None:
+                raise RuntimeError(indexed.error or "Indexing failed; sources preserved")
+            if episode_store is not None:
+                extract_and_store_episodes(note, client, model, episode_store)
+            mint_gap_for_unresolved(result.generation, gap_store, source_ref)
 
 
 class _ThinkingSession:
@@ -245,6 +312,8 @@ class _ThinkingSession:
     def __init__(self) -> None:
         self.history: list[dict[str, str]] = []
         self.last_active = time.time()
+        self.created_at = self.last_active
+        self.generation_id = uuid4().hex
         self.finalization_state = "active"
         self.session_name = "default"
 

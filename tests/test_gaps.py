@@ -14,7 +14,7 @@ from vaultmind.bot.handlers.gaps import handle_gaps
 from vaultmind.bot.handlers.recall import handle_recall
 from vaultmind.config import RankingConfig, Settings, VaultConfig
 from vaultmind.memory.gaps import GapKind, GapStatus, GapStore, normalize_question
-from vaultmind.pipeline.distill import DistillResult, mint_gap_for_unresolved
+from vaultmind.pipeline.distill import DistillationGeneration, mint_gap_for_unresolved
 from vaultmind.vault.parser import VaultParser
 
 if TYPE_CHECKING:
@@ -257,9 +257,8 @@ class TestStalenessModel:
 class TestMintGapForUnresolvedMinting:
     def test_minting_mints_when_resolution_is_empty(self, tmp_path: Path) -> None:
         gap_store = _make_store(tmp_path)
-        result = DistillResult(
+        result = DistillationGeneration(
             success=True,
-            output_path="qa-artifacts/x.md",
             frontmatter={"question": "What is Kosha?", "resolution": ""},
         )
         mint_gap_for_unresolved(result, gap_store, "telegram-thinking:1:123")
@@ -272,7 +271,7 @@ class TestMintGapForUnresolvedMinting:
 
     def test_minting_noop_when_resolution_is_present(self, tmp_path: Path) -> None:
         gap_store = _make_store(tmp_path)
-        result = DistillResult(
+        result = DistillationGeneration(
             success=True,
             frontmatter={"question": "What is Kosha?", "resolution": "It's a PKM system."},
         )
@@ -282,18 +281,14 @@ class TestMintGapForUnresolvedMinting:
 
     def test_minting_noop_when_distillation_failed(self, tmp_path: Path) -> None:
         gap_store = _make_store(tmp_path)
-        result = DistillResult(success=False, error="bad")
+        result = DistillationGeneration(success=False, error="bad")
         mint_gap_for_unresolved(result, gap_store, "ref")
         assert gap_store.list_open() == []
         gap_store.close()
 
-    def test_minting_noop_when_gap_store_not_configured(self) -> None:
-        result = DistillResult(success=True, frontmatter={"question": "q", "resolution": ""})
-        mint_gap_for_unresolved(result, None, "ref")  # must not raise
-
     def test_minting_dedups_reask_of_same_unresolved_question(self, tmp_path: Path) -> None:
         gap_store = _make_store(tmp_path)
-        result = DistillResult(
+        result = DistillationGeneration(
             success=True, frontmatter={"question": "What is Kosha?", "resolution": ""}
         )
         mint_gap_for_unresolved(result, gap_store, "ref-1")
