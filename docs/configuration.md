@@ -291,6 +291,8 @@ Legacy answer-only controls are removed, not compatibility switches:
 `single_pass_extraction_enabled` and `extraction_confidence_threshold`.
 Remove them from selected configuration rather than expecting old answer paths.
 
+For migration, delete those keys from `[llm]`, the removed session-summary keys listed below from `[telegram]`, and `chat_max_tokens`, `vault_context_enabled` and `max_context_chunks` from `[routing]`. Remove matching `VAULTMIND_LLM__…`, `VAULTMIND_TELEGRAM__…` and `VAULTMIND_ROUTING__…` overrides from the process environment and cwd `.env` as well; editing TOML alone does not remove higher-priority overrides. Set `[llm].thinking_model` and `[llm].max_tokens` for generated answers. Keep `routing.chat_model` only if needed for edit/date resolution; it does not select the answering model. There is no replacement raw-note/graph-context toggle or summary injection setting. Curate approved current wiki pages instead, and deliberately add both reserved exclusions to an older explicit list as shown above.
+
 ## `[telegram]`
 
 Telegram bot behavior.
