@@ -90,9 +90,7 @@ includes complete section text. Telegram sends every character in ordered chunks
 of at most 4000 characters with Markdown parsing disabled; it does not clip answers,
 rewrite citations or strip boundary whitespace. CLI/MCP return the structured result.
 
-The [README procedure](../README.md#manual-source-backed-wiki) gives SOURCE
-commands; synthetic offline adapters do not establish live-model, private-vault,
-Telegram or native qualification.
+The [README procedure](../README.md#manual-source-backed-wiki) uses checkout commands; a noneditable local wheel runs the same system and answering policy through its registered console script. Source CI and installed-runtime verification measure different execution origins, not different knowledge policies. Synthetic offline adapters do not establish live-model, private-vault, Telegram or native qualification.
 
 ### Source intake and discovery
 
@@ -419,6 +417,8 @@ Required runtime inputs are the nonempty `PATH` with usable Git, the actual Pyth
 These controls are credential hygiene, **not a filesystem, process or network sandbox**. They do not make PATH executables or repository-local Git configuration trustworthy, block inherited file descriptors or system credential stores, or replace OS isolation. Existing network guards are fixture instrumentation. Hosting/shipping operations and separately authorized coding-agent authentication remain outside this offline-consumer boundary; production commands are unchanged.
 
 Reviewed assets resolve relative to the verifier, not the caller's working directory. Receipts identify the Git revision, verifier, dependencies, reviewed source and actual imported runtime; private planning files and ignored history are not inputs. The imported package is fingerprinted separately from the reviewed checkout; differing code fails acceptance. Missing required public assets also fail explicitly. The globally ignored `.docs` directory stays local and must not be force-added to support verification. Add `--receipt-out /temporary/path/receipt.json` to retain a JSON outcome; consumer failures emit a failed outcome and exit nonzero.
+
+The public verifier, guides and `config/default.toml` are checkout assets, not wheel contents. A wheel installs the Python package, typed settings defaults and registered `vaultmind` console script. Supply an explicit external TOML when reproducing checkout configuration: a working directory without `config/default.toml` otherwise uses typed defaults (including their different LLM provider/model defaults). The external verifier below intentionally consumes reviewed public checkout assets while importing the noneditable installed package; running a console help command alone is not that proof.
 
 For a noneditable local-wheel check, build once into a fresh external directory and install the frozen runtime dependencies plus `mcp`. From the repository root, with Python 3.12 and `uv` available:
 

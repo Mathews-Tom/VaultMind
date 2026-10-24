@@ -25,6 +25,10 @@ do, but an older explicit list needs a deliberate setup edit. The application
 does not rewrite that list or fall back to raw notes. Capture/index/graph
 operations remain independent tools, not approval steps.
 
+After capture, use `/recall` for explicitly unapproved discovery, select returned preserved source IDs in CLI `wiki propose`, then inspect `wiki review` and apply with its exact digest. Source-ingestion, maturation or other ordinary-note approvals do not approve a wiki page. A new contradictory capture leaves approved answer evidence unchanged until that separate reviewed page update is applied. Once applied, normal questions and `/think` automatically use eligible approved current pages; a selected unresolved conflict must remain conflicting (or unsupported), just as on CLI and MCP.
+
+Do not restore earlier wording by overwriting the current page from history. Use a new reviewed proposal against the current revision, retaining source citations and attributed conflicts or an explicit reasoned resolution; [the restore example](../README.md#restore-earlier-wording-through-review) preserves the exact pre-restore historical bytes. Manually changed current pages and incomplete apply operations are refused, not silently used or repaired. See [configuration migration](configuration.md#llm) for removed answering controls and their environment/dotenv counterparts.
+
 All generated knowledge answers use the selected provider's
 `[llm].thinking_model` and `[llm].max_tokens`; there is no separate chat answering
 model. The bot still creates its shared domain client at startup, and unrelated

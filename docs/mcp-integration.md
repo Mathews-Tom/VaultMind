@@ -62,6 +62,12 @@ uv run vaultmind mcp-serve --profile full     # Full access
 
 The CLI uses MCP stdio transport, not a listening HTTP port. Stdout contains only JSON-RPC protocol frames; startup diagnostics and logs go to stderr.
 
+The default built-in `researcher` profile allows both `knowledge_query` and `vault_search`: use the former for approved-current answers and the latter for explicitly unapproved discovery. Registration alone is not permission; a configured same-named profile replaces the built-in, so an older explicit `researcher.allowed_tools` list must deliberately include `knowledge_query` to expose that answer surface. Folder/provenance and size restrictions still apply.
+
+Capture and discovery do not publish knowledge. Select preserved source IDs for CLI `wiki propose`, inspect the complete `wiki review` diff and digest, and apply that exact proposal before asking again. Source-ingestion or ordinary-note approvals are not wiki approval. Contradictory raw material leaves approved evidence unchanged until reviewed application; a selected approved unresolved conflict is reported under the same conflicting/unsupported policy as CLI and Telegram. MCP does not provide a shortcut around that review boundary.
+
+Manual current-page edits, copied historical revisions and incomplete apply operations are refused as answer evidence. Restore wording through a [new reviewed proposal](../README.md#restore-earlier-wording-through-review), preserving current provenance and conflicts or an explicit reasoned resolution, rather than replacing approval metadata; exact prior page bytes remain history. For older configurations, deliberately restore both reserved exclusions and remove obsolete answer-only TOML/environment/dotenv controls using the [migration guidance](configuration.md#llm). A checkout and a locally installed noneditable wheel use this same policy; see the [installed verification recipe](architecture.md#offline-acceptance-and-ci), not a separate MCP knowledge mode.
+
 ## Tools
 
 The server registers 19 tools; registration does not grant profile permission.

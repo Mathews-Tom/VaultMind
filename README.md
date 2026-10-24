@@ -45,7 +45,7 @@ contradiction detection, graduated autonomy review and non-destructive edit line
 
 ## Manual source-backed wiki
 
-`wiki add`, `propose`, `review`, and `apply` maintain a selected Markdown page without starting the bot, watcher, graph or retrieval indexes. Preserved sources, pending proposals and prior versions live under `_wiki`; both `wiki` and `_wiki` must be excluded from ordinary indexing. Defaults include both; an explicitly configured older list requires a deliberate setup edit and is never rewritten automatically. This explicit draft workflow needs no model or embedding key. Run from a normal SOURCE checkout environment (`uv sync --extra dev --extra mcp`), not as proof of an independently installed wheel.
+`wiki add`, `propose`, `review`, and `apply` maintain a selected Markdown page without starting the bot, watcher, graph or retrieval indexes. Preserved sources, pending proposals and prior versions live under `_wiki`; both `wiki` and `_wiki` must be excluded from ordinary indexing. Defaults include both; an explicitly configured older list requires a deliberate setup edit and is never rewritten automatically. This explicit draft workflow needs no model or embedding key. The examples use `uv run` from a checkout. A locally built, noneditable wheel provides the same commands and knowledge policy through its installed `vaultmind` console script; these are usage choices, not separate answering systems. This is unreleased source/local-wheel use, not a claim of PyPI publication. See the [external wheel recipe](docs/architecture.md#offline-acceptance-and-ci) for installed-runtime verification.
 
 Use a disposable vault for this example. Create `/tmp/wiki-demo.toml` with an absolute, existing vault path:
 
@@ -78,6 +78,8 @@ uv run vaultmind --config /tmp/wiki-demo.toml wiki apply PROPOSAL_ID --expect RE
 ```
 
 Replace `PROPOSAL_ID` with the exact `Proposal:` output and `REVIEWED_SHA256` with the full `SHA256:` from review. Inspect the source hashes and complete plain diff before approving. Propose/review do not create or change the current page. After apply, open the vault in Obsidian or your editor and follow the source link from `wiki/report-cache.md` to the preserved source.
+
+The complete user path is capture → explicit unapproved discovery (`search-sources`, Telegram `/recall` or MCP `vault_search`) → select preserved source IDs for a page proposal → inspect the exact diff and digest → apply that reviewed proposal → ask normally. CLI `ask`, Telegram questions and MCP `knowledge_query` then select approved current pages automatically; `wiki query --page` offers explicit selection under the same policy. Capturing or discovering a contradictory source does not change the approved answer evidence. Only a reviewed page update can do that.
 
 For an update, save `source-b.md` with an operations note recommending 7 days, whose scope relative to the project note is unresolved, then add it:
 
@@ -249,7 +251,7 @@ producer nor deletes expired history. These ordinary producer effects and explic
 
 Citation/schema validation does **not** prove that a claim follows from the text
 or is true: inspect the complete sections and preserved sources yourself.
-SOURCE/offline use does not qualify an installed package or a live provider.
+Checkout CI/offline results do not by themselves qualify a noneditable installed runtime or a live provider. The [architecture verification recipe](docs/architecture.md#offline-acceptance-and-ci) distinguishes source checks from installed-runtime evidence; neither establishes live-model quality or native/private-vault assurance.
 
 ### Restore earlier wording through review
 
