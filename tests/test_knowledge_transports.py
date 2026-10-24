@@ -69,6 +69,8 @@ def delivered(message: Any) -> str:
         ("handle_text", "What is the cache retention policy?"),
         ("handle_text", "Explain the cache retention policy"),
         ("cmd_think", "/think critique: What is the cache retention policy?"),
+        ("handle_text", "What is the cache\nretention policy?"),
+        ("cmd_think", "/think What is the cache\nretention policy?"),
     ],
 )
 async def test_registered_answers_share_actual_outcome_and_do_not_mutate_knowledge(
@@ -82,6 +84,9 @@ async def test_registered_answers_share_actual_outcome_and_do_not_mutate_knowled
     message = make_message(text)
     callback = registered_callback(t.handlers, route, monkeypatch)
     await callback(message)
+    if "\n" in text:
+        selected_question = text.removeprefix("/think ")
+        assert json.loads(t.provider.calls[0][0].content)["question"] == selected_question
     result = query_knowledge(
         t.corpus.settings, "What is the cache retention policy?", llm_factory=lambda: t.provider
     )
@@ -106,15 +111,40 @@ async def test_sticky_followup_reselects_updated_approved_revision(
     first = json.loads(t.provider.calls[-1][0].content)
     t.corpus.publish(CACHE, cache_body().replace("30 days", "7 days"))
     t.provider.response["answer"] = "The current policy is 7 days."
-    followup = make_message("What about now?", event=11)
+    followup_text = (
+        "What about now?\nCompare the retained policies.\nExplain the current revision.\n"
+        "Keep the unresolved conflict explicit."
+    )
+    followup = make_message(followup_text, event=11)
     await registered_callback(t.handlers, "handle_text", monkeypatch)(followup)
     second = json.loads(t.provider.calls[-1][0].content)
-    assert second["question"] == "What about now?"
+    assert second["question"] == followup_text
     assert second["intent_questions"] == ["What is the cache retention policy?"]
     assert second["evidence"][0]["page_sha256"] != first["evidence"][0]["page_sha256"]
     assert any("7 days" in row["text"] for row in second["evidence"])
     assert "current policy is 7 days" in delivered(followup)
     assert len(t.sessions.load(42)) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("separator", ["\n", "\r\n", "\t"])
+async def test_legacy_multiline_user_turn_keeps_followups_usable_without_answer_authority(
+    transport: Transport,
+    monkeypatch: pytest.MonkeyPatch,
+    separator: str,
+) -> None:
+    t = transport
+    prior = f"What is the cache{separator}retention policy?"
+    t.sessions.save(42, [{"user": prior, "assistant": "The legacy answer was 90 days."}])
+    message = make_message("What about now?", event=12)
+    await registered_callback(t.handlers, "handle_text", monkeypatch)(message)
+    assert "The policy is 30 days." in delivered(message)
+    prompt = json.loads(t.provider.calls[-1][0].content)
+    assert prompt["intent_questions"] == [prior]
+    assert "90 days" not in json.dumps(prompt)
+    history = t.sessions.load(42)
+    assert history is not None
+    assert [turn["user"] for turn in history] == [prior, "What about now?"]
 
 
 @pytest.mark.asyncio

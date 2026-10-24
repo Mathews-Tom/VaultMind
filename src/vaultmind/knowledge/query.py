@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import TYPE_CHECKING, Any
 
 from vaultmind.knowledge.discovery import LEXICAL_LIMITATION, MAX_QUERY_PAGES, discover_pages
 from vaultmind.knowledge.intake import SourceIntake
 from vaultmind.knowledge.sections import _page
 from vaultmind.llm.client import Message
-from vaultmind.wiki.workspace import WikiError, WikiWorkspace, _safe_text, _scalar
+from vaultmind.wiki.workspace import WikiError, WikiWorkspace, _safe_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -37,6 +38,14 @@ For unresolved_conflicts do not select a winner: return conflicting and cite eve
 unresolved Conflicting information section, or unsupported. Attribute disagreeing
 claims to their supplied sources. Structural citation checks do not establish truth.
 """
+
+
+def _question_scalar(value: str, label: str) -> None:
+    """Keep question whitespace without permitting other controls or formats."""
+    if not isinstance(value, str) or not value or len(value) > MAX_QUESTION_CHARS:
+        raise WikiError(f"Invalid {label}")
+    if any(unicodedata.category(char).startswith("C") and char not in "\n\r\t" for char in value):
+        raise WikiError(f"Invalid {label}: control characters are not permitted")
 
 
 def _source_identities(
@@ -147,13 +156,13 @@ def query_knowledge(
     never a value inferred from the question. Permission for ``_wiki`` must cover
     preserved provenance and approval state, not merely the current page.
     """
-    _scalar(question, "wiki question", MAX_QUESTION_CHARS)
+    _question_scalar(question, "wiki question")
     if not question.strip():
         raise WikiError("Wiki question must not be blank")
     if not isinstance(intent_questions, tuple) or len(intent_questions) > MAX_INTENT_QUESTIONS:
         raise WikiError(f"Select at most {MAX_INTENT_QUESTIONS} prior user questions for intent")
     for prior in intent_questions:
-        _scalar(prior, "prior user question", MAX_QUESTION_CHARS)
+        _question_scalar(prior, "prior user question")
         if not prior.strip():
             raise WikiError("Prior user questions must not be blank")
     context_limit = MAX_QUERY_CONTEXT_BYTES
