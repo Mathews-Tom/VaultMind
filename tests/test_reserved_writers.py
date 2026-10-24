@@ -351,10 +351,14 @@ def test_contradiction_preflights_before_parser_provider_or_proposal(
     note = Note(path=target if reserved_event else "ordinary.md", title="Event", content="Text.")
     before = protected.snapshot()
     try:
-        with pytest.raises(ReservedNamespaceError):
-            asyncio.run(service.on_note_changed(NoteCreatedEvent(note=note, path=str(note.path))))
         if reserved_event:
+            with pytest.raises(ReservedNamespaceError):
+                asyncio.run(
+                    service.on_note_changed(NoteCreatedEvent(note=note, path=str(note.path)))
+                )
             service._duplicate_detector.find_duplicates.assert_not_called()
+        else:
+            asyncio.run(service.on_note_changed(NoteCreatedEvent(note=note, path=str(note.path))))
         service._parser.parse_file.assert_not_called()
         service._llm_client.complete.assert_not_called()
         service._gap_store.mint.assert_not_called()

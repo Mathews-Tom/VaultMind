@@ -284,6 +284,11 @@ class SourceIntake:
 
         This read-only bounded scan intentionally creates no receipt for events
         (such as voice questions) which did not retain a source.
+
+        Only provenance candidates count toward the scan bound. Adjacent metadata
+        and provenance must be authorized and valid even for nonmatching events;
+        otherwise a genuine miss cannot be established. Retained bodies are read
+        only for matching events, each with an independent closure budget.
         """
         for value, label in (
             (adapter, "source adapter"),
@@ -299,55 +304,38 @@ class SourceIntake:
         if not directory.exists():
             return None
         matches: list[SourceRecord] = []
-        total = [0]
+        count = 0
         try:
-            for count, path in enumerate(directory.iterdir(), 1):
-                if count > MAX_EVENT_SCAN_FILES:
-                    raise WikiError("Event lookup exceeds its source scan limit")
+            for path in directory.iterdir():
                 if not path.name.endswith(".intake.json"):
                     continue
+                count += 1
+                if count > MAX_EVENT_SCAN_FILES:
+                    raise WikiError("Event lookup exceeds its source scan limit")
                 source_id = path.name.removesuffix(".intake.json")
-                try:
-                    source = self._read(source_id, set(), {}, total, 0)
-                except WikiError:
-                    if total[0] > MAX_CLOSURE_BYTES:
-                        raise WikiError(
-                            "Event lookup exceeds its retained byte scan limit"
-                        ) from None
-                    # Incomplete, unknown or unauthorized evidence is not a
-                    # completed source and is never exposed by lookup.
-                    continue
-                record = source.provenance
+                # Validate authorized adjacent identities before inspecting any
+                # retained body. Unreadable provenance cannot establish a miss.
+                _, _, record = self._provenance(source_id)
                 if record is not None and (
                     record["adapter"] == adapter
                     and record["event_id"] == event_id
                     and record["upstream_revision"] == revision
                     and record["role"] == role
                 ):
-                    matches.append(source)
+                    # Each matching output has its own bounded closure. Never
+                    # turn corrupt/incomplete/unauthorized evidence into a miss:
+                    # the voice caller would otherwise transcribe it again.
+                    matches.append(self.read(source_id))
                     if len(matches) > 1:
                         raise WikiError("Authenticated source event has ambiguous retained outputs")
         except OSError:
             raise WikiError("Cannot inspect retained source events") from None
         return matches[0] if matches else None
 
-    def _read(
-        self,
-        source_id: str,
-        active: set[str],
-        seen: dict[str, SourceRecord],
-        total: list[int],
-        depth: int,
-    ) -> SourceRecord:
+    def _provenance(self, source_id: str) -> tuple[dict[str, Any], bytes, dict[str, Any] | None]:
+        """Validate adjacent identities without reading retained source bodies."""
         workspace = self.workspace
         workspace._source_id(source_id)
-        if source_id in active or depth > MAX_CLOSURE_DEPTH:
-            raise WikiError("Retained source dependency cycle or depth limit")
-        if source_id in seen:
-            return seen[source_id]
-        if len(seen) + len(active) >= MAX_DEPENDENCIES:
-            raise WikiError("Retained source dependency count exceeds its limit")
-        active.add(source_id)
         metadata_path = f"_wiki/sources/{source_id}.json"
         record_path = f"_wiki/sources/{source_id}.intake.json"
         self._authorize(metadata_path)
@@ -362,8 +350,6 @@ class SourceIntake:
         self._authorize(record_path)
         record_exists = workspace._path(record_path).exists()
         provenance: dict[str, Any] | None = None
-        kind = "text"
-        dependencies: list[SourceRecord] = []
         if marked:
             if not meta["origin"].startswith(MARKER) or not record_exists:
                 raise WikiError("Marked intake source has missing or unsupported provenance")
@@ -388,6 +374,30 @@ class SourceIntake:
                 _scalar(provenance["event_id"], "intake event")
             if provenance["upstream_revision"] is not None:
                 _scalar(provenance["upstream_revision"], "upstream source revision")
+        elif record_exists:
+            raise WikiError("Intake provenance marker is missing; legacy downgrade refused")
+        return meta, raw_meta, provenance
+
+    def _read(
+        self,
+        source_id: str,
+        active: set[str],
+        seen: dict[str, SourceRecord],
+        total: list[int],
+        depth: int,
+    ) -> SourceRecord:
+        self.workspace._source_id(source_id)
+        if source_id in active or depth > MAX_CLOSURE_DEPTH:
+            raise WikiError("Retained source dependency cycle or depth limit")
+        if source_id in seen:
+            return seen[source_id]
+        if len(seen) + len(active) >= MAX_DEPENDENCIES:
+            raise WikiError("Retained source dependency count exceeds its limit")
+        active.add(source_id)
+        meta, raw_meta, provenance = self._provenance(source_id)
+        kind = "text"
+        dependencies: list[SourceRecord] = []
+        if provenance is not None:
             kind = provenance["kind"]
             for relation in ("parents", "attachments"):
                 refs = provenance[relation]
@@ -407,8 +417,6 @@ class SourceIntake:
                     ):
                         raise WikiError("Retained attachment is not an attachment source")
                     dependencies.append(dependency)
-        elif record_exists:
-            raise WikiError("Intake provenance marker is missing; legacy downgrade refused")
         relative = f"_wiki/sources/{source_id}.{'bin' if kind == 'attachment' else 'md'}"
         content = self._binary(
             relative, MAX_ATTACHMENT_BYTES if kind == "attachment" else MAX_INPUT_BYTES

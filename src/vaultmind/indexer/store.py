@@ -7,7 +7,7 @@ import math
 from typing import TYPE_CHECKING, Any, cast
 
 import chromadb
-from chromadb.api.types import IncludeEnum, validate_n_results
+from chromadb.api.types import validate_n_results
 from chromadb.config import Settings as ChromaSettings
 
 if TYPE_CHECKING:
@@ -325,7 +325,7 @@ class VaultStore:
         if where:
             validate_n_results(n_results)
             matching = self._collection.get(
-                where=where, include=[IncludeEnum.metadatas], limit=4097
+                where=where, include=cast("Any", ["metadatas"]), limit=4097
             )
             if len(matching["ids"]) > 4096:
                 raise ValueError("Source search scope is too broad; narrow the authorized folders")

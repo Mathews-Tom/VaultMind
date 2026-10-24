@@ -55,6 +55,8 @@ evidence without an indexed note; this is not an atomic write/index transaction.
 Text retention restrictions are checked before preservation, and source readers
 verify the complete parent/attachment chain before discovery or curation.
 
+Capture, photo and transcription refusals log only the exception class, not input bodies or exception messages. Invalid retained replay evidence refuses the event without another transcription/provider attempt; it is not treated as an uncaptured event.
+
 ### Greetings
 
 Short messages matching common greetings ("hi", "thanks", "ok", "hello") get a static response. No LLM call is made.

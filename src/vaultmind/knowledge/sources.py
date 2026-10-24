@@ -105,6 +105,14 @@ def _read_current(path: Path) -> bytes:
     return raw
 
 
+def _authority(value: Any) -> int:
+    try:
+        authority = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return authority if 1 <= authority <= 5 else 0
+
+
 def _ordinary_hit(
     settings: Settings,
     relative: str,
@@ -125,12 +133,7 @@ def _ordinary_hit(
             mode = NoteMode(meta.get("mode", "learning"))
         except ValueError:
             mode = NoteMode.LEARNING
-        try:
-            authority = int(meta.get("authority", 0))
-        except (TypeError, ValueError):
-            authority = 0
-        if not 1 <= authority <= 5:
-            authority = 0
+        authority = _authority(meta.get("authority", 0))
         note = Note(
             path=Path(relative),
             title=meta.get("title", Path(relative).stem.replace("-", " ").replace("_", " ")),
@@ -184,7 +187,9 @@ def _preserved_hit(record: SourceRecord) -> dict[str, Any]:
     )
     hit["metadata"]["note_type"] = "source"
     if record.text is not None:
-        hit["metadata"]["authority"] = frontmatter.loads(record.text).metadata.get("authority", 0)
+        hit["metadata"]["authority"] = _authority(
+            frontmatter.loads(record.text).metadata.get("authority", 0)
+        )
     return hit
 
 

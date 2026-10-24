@@ -233,6 +233,52 @@ def test_current_authority_reorders_complete_sources_before_limit(settings: Sett
     assert hit["authority_score"] != hit["distance"]
 
 
+@pytest.mark.parametrize(
+    ("authority_yaml", "expected"),
+    [
+        ("invalid", 0),
+        ("null", 0),
+        ("[]", 0),
+        ("{}", 0),
+        (".inf", 0),
+        ("-.inf", 0),
+        (".nan", 0),
+        ("0", 0),
+        ("-1", 0),
+        ("6", 0),
+        ("1", 1),
+        ("5", 5),
+        ("'4'", 4),
+        ("true", 1),
+    ],
+)
+@pytest.mark.parametrize("kind", ["ordinary", "preserved"])
+def test_source_authority_normalizes_before_ranking(
+    settings: Settings, authority_yaml: str, expected: int, kind: str
+) -> None:
+    settings.ranking.enabled = True
+    text = f"---\nauthority: {authority_yaml}\n---\nneedle retained evidence"
+    if kind == "preserved":
+        path = preserve(settings, text).path
+    else:
+        note(settings, "current.md", text)
+        path = "current.md"
+    before = snapshot(settings.vault.path)
+
+    hit = search_sources(settings, "needle")[0]
+
+    assert hit["path"] == path
+    assert hit["metadata"]["authority"] == expected
+    level = expected or settings.ranking.authority_default
+    assert hit["authority_score"] == pytest.approx(
+        hit["rrf_score"] * settings.ranking.authority_weight[level]
+    )
+    assert hit["distance"] is None
+    assert hit["content"] == (text if kind == "preserved" else "needle retained evidence")
+    assert hit["current_digest"] == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert snapshot(settings.vault.path) == before
+
+
 def test_retained_parent_closure_missing_tampered_or_unauthorized_is_not_discoverable(
     settings: Settings,
 ) -> None:

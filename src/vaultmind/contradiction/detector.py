@@ -20,7 +20,7 @@ from vaultmind.contradiction.marking import mark_contradicted
 from vaultmind.contradiction.policy import resolve_conflict
 from vaultmind.indexer.duplicate_detector import MatchType
 from vaultmind.services.review_delivery import deliver_block
-from vaultmind.vault.security import validate_ordinary_write_path
+from vaultmind.vault.security import ReservedNamespaceError, validate_ordinary_write_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -113,7 +113,11 @@ class ContradictionDetector:
 
     async def _check_pair(self, note: Note, match: DuplicateMatch) -> None:
         validate_ordinary_write_path(str(note.path), self._vault_root)
-        candidate_path = validate_ordinary_write_path(match.match_path, self._vault_root)
+        try:
+            candidate_path = validate_ordinary_write_path(match.match_path, self._vault_root)
+        except ReservedNamespaceError:
+            # A stale index candidate cannot abort checks of ordinary neighbors.
+            return
         if not candidate_path.exists():
             return
 

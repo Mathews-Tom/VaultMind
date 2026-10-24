@@ -461,10 +461,112 @@ def test_pending_proposal_revalidates_dependency_before_acceptance(
         assert not (settings.vault.path / "wiki/evidence.md").exists()
 
 
-def test_incomplete_records_are_not_event_discoverable(settings: Settings) -> None:
+def test_incomplete_matching_record_refuses_event_replay(settings: Settings) -> None:
     with SourceIntake(settings) as intake:
         saved = capture(intake, event_id="incomplete:1", revision="revision-1")
         (settings.vault.path / f"_wiki/sources/{saved.source_id}.json").unlink()
         before = files(settings.vault.path)
-        assert intake.find_event("telegram", "incomplete:1", "revision-1", "text") is None
+        with pytest.raises(WikiError):
+            intake.find_event("telegram", "incomplete:1", "revision-1", "text")
+        assert files(settings.vault.path) == before
+
+
+def test_event_lookup_counts_only_adjacent_provenance_candidates(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with SourceIntake(settings) as intake:
+        capture(intake, event_id="other:1")
+        saved = capture(intake, event_id="target:1")
+        directory = settings.vault.path / "_wiki/sources"
+        for index in range(5):
+            (directory / f"unrelated-{index}.md").write_text("Not intake provenance\n")
+        monkeypatch.setattr("vaultmind.knowledge.intake.MAX_EVENT_SCAN_FILES", 2)
+        found = intake.find_event("telegram", "target:1", None, "text")
+        assert found is not None and found.source_id == saved.source_id
+        capture(intake, event_id="other:2")
+        with pytest.raises(WikiError, match="source scan limit"):
+            intake.find_event("telegram", "target:1", None, "text")
+
+
+def test_event_lookup_does_not_read_unrelated_retained_closures(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with SourceIntake(settings) as intake:
+        unrelated = [capture(intake, "Other bytes\n", event_id=f"other:{i}") for i in range(3)]
+        saved = capture(intake, "Target bytes\n", event_id="target:1")
+        # Every source fits individually; unrelated retained bytes together do not.
+        monkeypatch.setattr("vaultmind.knowledge.intake.MAX_CLOSURE_BYTES", len("Target bytes\n"))
+        found = intake.find_event("telegram", "target:1", None, "text")
+        assert found is not None and found.source_id == saved.source_id
+        # An unrelated incomplete closure is not a reason to read/return its body.
+        for source in unrelated:
+            (settings.vault.path / source.path).unlink()
+        before = files(settings.vault.path)
+        found = intake.find_event("telegram", "target:1", None, "text")
+        assert found is not None and found.content == b"Target bytes\n"
+        assert intake.find_event("telegram", "absent:1", None, "text") is None
+        assert files(settings.vault.path) == before
+
+
+def test_event_lookup_matching_closures_have_independent_byte_limits(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with SourceIntake(settings) as intake:
+        capture(intake, "First bytes\n", event_id="target:1")
+        capture(intake, "Other bytes\n", event_id="target:1")
+        monkeypatch.setattr("vaultmind.knowledge.intake.MAX_CLOSURE_BYTES", len("First bytes\n"))
+        with pytest.raises(WikiError, match="ambiguous"):
+            intake.find_event("telegram", "target:1", None, "text")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["missing", "corrupt", "dependency", "unauthorized", "unauthorized-provenance", "limit"],
+)
+def test_event_lookup_matching_invalid_closure_refuses_replay(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    with SourceIntake(settings) as intake:
+        parent = capture(intake, "Parent bytes\n", event_id="parent:1")
+        saved = capture(intake, "Target bytes\n", event_id="target:1", parents=[parent.source_id])
+        if failure == "missing":
+            (settings.vault.path / saved.path).unlink()
+        elif failure == "corrupt":
+            (settings.vault.path / saved.path).write_text("Changed bytes\n")
+        elif failure == "dependency":
+            (settings.vault.path / parent.path).unlink()
+        elif failure == "unauthorized":
+            intake.allows_path = lambda path: path != parent.path
+        elif failure == "unauthorized-provenance":
+            record_path = f"_wiki/sources/{saved.source_id}.intake.json"
+            intake.allows_path = lambda path: path != record_path
+        else:
+            monkeypatch.setattr(
+                "vaultmind.knowledge.intake.MAX_CLOSURE_BYTES", len("Target bytes\n")
+            )
+        before = files(settings.vault.path)
+        with pytest.raises(WikiError):
+            intake.find_event("telegram", "target:1", None, "text")
+        assert files(settings.vault.path) == before
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_event_lookup_unvalidated_provenance_never_establishes_miss_or_exposes_body(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, matching: bool
+) -> None:
+    with SourceIntake(settings) as intake:
+        saved = capture(intake, event_id="target:1")
+        path = settings.vault.path / f"_wiki/sources/{saved.source_id}.intake.json"
+        provenance = json.loads(path.read_bytes())
+        provenance["event_id"] = "target:1" if matching else "other:1"
+        provenance["origin"] = "Corrupt provenance"
+        path.write_text(json.dumps(provenance))
+
+        def refuse_body(relative: str, limit: int) -> bytes:
+            pytest.fail(f"Unvalidated provenance exposed source body: {relative}")
+
+        monkeypatch.setattr(intake, "_binary", refuse_body)
+        before = files(settings.vault.path)
+        with pytest.raises(WikiError, match="provenance hash"):
+            intake.find_event("telegram", "target:1", None, "text")
         assert files(settings.vault.path) == before

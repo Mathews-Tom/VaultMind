@@ -7,6 +7,7 @@ import base64
 import hashlib
 import io
 import json
+import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
     from aiogram.types import Message
 
     from vaultmind.bot.handlers.context import HandlerContext
+
+logger = logging.getLogger(__name__)
 
 
 class BoundedDownload(io.BytesIO):
@@ -217,7 +220,8 @@ async def handle_capture(
             original_retained=original_retained,
             revision=revision,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("Capture refused or incomplete: %s", type(exc).__name__)
         await message.answer(
             "Capture refused or incomplete; no indexed-success claim. "
             "Check retention, size and destination."
@@ -392,7 +396,8 @@ async def handle_photo_capture(ctx: HandlerContext, message: Message) -> None:
         summary = await asyncio.to_thread(
             _photo_sync, ctx, image, caption, telegram_identity(message)
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("Photo capture failed or refused: %s", type(exc).__name__)
         await message.answer("Photo capture failed or refused; no derived/indexed-success claim.")
         return
     await message.answer(summary)

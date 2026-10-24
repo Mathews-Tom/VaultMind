@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,9 @@ if TYPE_CHECKING:
 
     from vaultmind.bot.handlers.context import HandlerContext
     from vaultmind.bot.transcribe import Transcriber
+
+logger = logging.getLogger(__name__)
+
 
 # Transient transport deduplication, not a durable question/source journal.
 _voice_events: OrderedDict[tuple[str, str, str, str], None] = OrderedDict()
@@ -82,7 +86,8 @@ async def handle_voice(
             if transcript is None:
                 stream.seek(0)
                 transcript = await asyncio.to_thread(transcriber.transcribe, stream)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Transcription failed or refused: %s", type(exc).__name__)
         await message.answer("Transcription failed or voice input refused; nothing captured.")
         return
     if not transcript.strip():

@@ -92,6 +92,8 @@ An attempted stage is recorded before its effect. Failed or incomplete stages
 remain explicit and are not retried automatically; preservation, projection,
 Chroma, FTS and approval are not one atomic transaction.
 
+Authenticated replay lookup validates adjacent event identities before reading matching retained closures. Invalid provenance or a matching incomplete/unauthorized closure refuses replay rather than becoming a missing event; unrelated bodies do not consume the matching closure's byte budget.
+
 Text capture preserves submitted text. URL submission and extracted text have
 separate parent-linked identities; extraction is not wire-response preservation.
 Photo-original retention follows `save_originals`; audio is transient and voice
@@ -107,6 +109,8 @@ measure source discovery, not approved-answer quality. Offline bundles contain
 real `vault/` Markdown plus candidate identities/distances in `retrieval.yaml`;
 the loader snapshots chunks once and the same discovery path independently
 hydrates the current bundle corpus.
+
+An unreadable, malformed or oversized authorized ordinary source aborts source discovery with a redacted error rather than silently omitting evidence. Correct the source or explicitly narrow the authorized scope; query text alone does not narrow enumeration. Ordinary and preserved frontmatter authority values share the same 1–5 conversion/range validation; invalid values use the configured neutral-default ranking behavior, never approval.
 
 Ordinary writers reject lexical and resolved `wiki`/`_wiki` targets, including
 symlinks and configuration aliases into those trees. Only the narrow wiki/intake
