@@ -401,6 +401,173 @@ class TestRunConnectorOnce:
         assert len(runs) == 1
         assert runs[0].items_ingested == 2
 
+    async def test_changed_projection_reports_mismatch_without_skipping_raw_finalization(
+        self, tmp_path: Path, intake: SourceIntake
+    ) -> None:
+        applier = make_applier(
+            vault_root=tmp_path, llm_client=_make_llm(), model="fake-model", intake=intake
+        )
+
+        def edit_after_capture(proposal: ReviewProposal) -> str:
+            relative_path = applier(proposal)
+            path = tmp_path / relative_path
+            projected = frontmatter.loads(path.read_text())
+            projected.content += "\n\nUser-edited ordinary source."
+            path.write_text(str(frontmatter.dumps(projected)))
+            return relative_path
+
+        class ObservedStore(FakeStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.contents: list[str] = []
+
+            def index_single_note(self, note: Note, parser: object) -> int:
+                self.contents.append(note.content)
+                return super().index_single_note(note, parser)
+
+        queue = ReviewQueue(
+            tmp_path / "queue.db",
+            appliers={ProposalKind.SOURCE_INGESTION: edit_after_capture},
+        )
+        source_store = SourceStore(tmp_path / "sources.db")
+        bus = VaultEventBus()
+        events: list[NoteCreatedEvent] = []
+
+        async def collect(event: NoteCreatedEvent) -> None:
+            events.append(event)
+
+        bus.subscribe(NoteCreatedEvent, collect)  # type: ignore[arg-type]
+        store = ObservedStore()
+        result = await run_connector_once(
+            _instance(),
+            source_store=source_store,
+            review_queue=queue,
+            parser=VaultParser(Settings(vault={"path": tmp_path}).vault),
+            store=store,  # type: ignore[arg-type]
+            vault_root=tmp_path,
+            intake=intake,
+            event_bus=bus,
+        )
+
+        assert result.items_ingested == 2
+        assert "projection differs from its preserved source" in result.error.lower()
+        assert store.indexed == [outcome.path for outcome in result.outcomes]
+        assert all(content.endswith("User-edited ordinary source.") for content in store.contents)
+        assert [str(event.path) for event in events] == store.indexed
+        assert all(event.note.content.endswith("User-edited ordinary source.") for event in events)
+        for outcome in result.outcomes:
+            assert outcome.status == "applied"
+            assert outcome.projection_status == "unverified"
+            assert outcome.finalization_status == "returned-no-durable-receipt"
+            assert outcome.indexed is None
+            assert outcome.event_published is None
+            retained = intake.read((tmp_path / outcome.path).stem)
+            assert "User-edited ordinary source." not in retained.content.decode()
+        assert source_store.get_state("rss-fixture").last_seen_id == "a"
+        assert source_store.list_runs("rss-fixture")[0].error == result.error
+
+    @pytest.mark.parametrize("rejected_field", ["title", "item_id"])
+    async def test_rejected_original_stays_out_of_logs_and_run_history(
+        self,
+        tmp_path: Path,
+        intake: SourceIntake,
+        caplog: pytest.LogCaptureFixture,
+        rejected_field: str,
+    ) -> None:
+        marker = "NO-RETAIN-LOG-MARKER"
+        fields = {
+            "item_id": "rejected",
+            "title": "Rejected item",
+            "content": "Permitted content",
+            "url": "https://example.invalid/rejected",
+        }
+        fields[rejected_field] = f"---\ndo_not_retain: true\n---\n{marker}"
+        rejected = SourceItem(**fields)
+
+        async def fetch(instance: SourceInstance, state: object) -> FetchResult:
+            return FetchResult(items=[rejected], next_cursor_id="fetched-cursor")
+
+        REGISTRY.pop("rss", None)
+        register_connector(ConnectorDefinition(kind="rss", fetch=fetch, description="fixture"))
+        queue = ReviewQueue(tmp_path / "queue.db")
+        source_store = SourceStore(tmp_path / "sources.db")
+        result = await run_connector_once(
+            _instance(),
+            source_store=source_store,
+            review_queue=queue,
+            parser=VaultParser(Settings(vault={"path": tmp_path}).vault),
+            store=FakeStore(),  # type: ignore[arg-type]
+            vault_root=tmp_path,
+            intake=intake,
+            event_bus=VaultEventBus(),
+        )
+
+        assert result.items_fetched == 1
+        assert result.items_ingested == 0
+        assert result.outcomes[0].proposal_id == ""
+        assert result.outcomes[0].source_ids == []
+        assert marker not in caplog.text
+        assert marker not in result.error
+        assert marker not in result.outcomes[0].item_id
+        assert marker not in source_store.list_runs("rss-fixture")[0].error
+        assert "do-not-retain" in result.error.lower()
+        assert not (tmp_path / "_wiki" / "sources").exists()
+
+    @pytest.mark.parametrize("target_kind", ["reserved", "outside"])
+    async def test_applied_projection_alias_is_denied_before_raw_finalization(
+        self, tmp_path: Path, intake: SourceIntake, target_kind: str
+    ) -> None:
+        target = (
+            tmp_path / "wiki" / "protected.md"
+            if target_kind == "reserved"
+            else tmp_path.parent / f"{tmp_path.name}-outside.md"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"# Never index this alias\n\nProtected target bytes.\n")
+        before = target.read_bytes()
+        applier = make_applier(
+            vault_root=tmp_path, llm_client=_make_llm(), model="fake-model", intake=intake
+        )
+
+        def alias_after_capture(proposal: ReviewProposal) -> str:
+            relative_path = applier(proposal)
+            path = tmp_path / relative_path
+            path.unlink()
+            path.symlink_to(target)
+            return relative_path
+
+        queue = ReviewQueue(
+            tmp_path / "queue.db",
+            appliers={ProposalKind.SOURCE_INGESTION: alias_after_capture},
+        )
+        source_store = SourceStore(tmp_path / "sources.db")
+        store = FakeStore()
+        bus = VaultEventBus()
+        events: list[NoteCreatedEvent] = []
+
+        async def collect(event: NoteCreatedEvent) -> None:
+            events.append(event)
+
+        bus.subscribe(NoteCreatedEvent, collect)  # type: ignore[arg-type]
+        result = await run_connector_once(
+            _instance(),
+            source_store=source_store,
+            review_queue=queue,
+            parser=VaultParser(Settings(vault={"path": tmp_path}).vault),
+            store=store,  # type: ignore[arg-type]
+            vault_root=tmp_path,
+            intake=intake,
+            event_bus=bus,
+        )
+
+        assert result.items_ingested == 0
+        assert result.error
+        assert store.indexed == []
+        assert events == []
+        assert target.read_bytes() == before
+        assert all(outcome.status == "applied" for outcome in result.outcomes)
+        assert all(outcome.finalization_status == "not-attempted" for outcome in result.outcomes)
+
     async def test_connector_fetch_failure_records_error_without_crashing(
         self, tmp_path: Path, intake: SourceIntake
     ) -> None:

@@ -399,10 +399,8 @@ def _describe_failed_capture(
         outcome.error += "; retained identities could not be verified"
 
 
-def _describe_projection(outcome: ItemOutcome, intake: SourceIntake, vault_root: Path) -> None:
-    if not outcome.path:
-        return
-    path = validate_ordinary_write_path(outcome.path, vault_root)
+def _describe_projection(outcome: ItemOutcome, intake: SourceIntake, path: Path) -> None:
+    """Describe retained provenance after ordinary-destination authorization."""
     # Old APPLIED rows keep their old meaning. No migration or retroactive
     # source preservation is inferred from an ordinary legacy note.
     if re.fullmatch(r"i-[0-9a-f]{60}", path.stem) is None:
@@ -481,7 +479,14 @@ async def run_connector_once(
                 outcome.status = proposal.status.value
                 if proposal.status is ProposalStatus.APPLIED:
                     outcome.path = proposal.result
-                    _describe_projection(outcome, intake, vault_root)
+                    if outcome.path:
+                        path = validate_ordinary_write_path(outcome.path, vault_root)
+                        try:
+                            _describe_projection(outcome, intake, path)
+                        except WikiError as exc:
+                            outcome.projection_status = "unverified"
+                            outcome.error = f"Projection verification failed: {exc}"
+                            item_errors.append(f"{item.item_id}: {outcome.error}")
                 elif proposal.status is ProposalStatus.FAILED:
                     outcome.error = proposal.result
                     _describe_failed_capture(outcome, item, instance, intake)
@@ -500,13 +505,17 @@ async def run_connector_once(
                     outcome.indexed = None
                     outcome.event_published = None
             except Exception as exc:  # noqa: BLE001 - one item's failure must not block the rest of the batch
+                if not outcome.proposal_id and isinstance(exc, WikiError):
+                    # A rejected original can put forbidden text in its own ID.
+                    # Keep that text out of diagnostics and durable run history.
+                    outcome.item_id = f"rejected-item-{len(outcomes)}"
                 logger.exception(
                     "Ingestion failed for %s item %r from instance %r",
                     instance.kind,
-                    item.title,
+                    outcome.item_id,
                     instance.name,
                 )
-                item_errors.append(f"{item.item_id}: {exc}")
+                item_errors.append(f"{outcome.item_id}: {exc}")
                 outcome.error = str(exc)
                 if outcome.finalization_status == "attempted":
                     outcome.finalization_status = "failed"
