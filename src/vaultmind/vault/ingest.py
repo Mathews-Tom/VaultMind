@@ -8,14 +8,7 @@ import logging
 import re
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING
-
-from vaultmind.vault.security import validate_vault_path
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +78,14 @@ async def fetch_youtube(url: str, language: str = "en") -> IngestResult:
     # Attempt to get video title from page
     title = f"YouTube: {video_id}"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=10)  # noqa: S310
-        page = resp.read().decode("utf-8", errors="replace")[:50_000]
+
+        def read_title() -> str:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+                raw: bytes = resp.read(50_000)
+            return raw.decode("utf-8", errors="replace")
+
+        page = await asyncio.to_thread(read_title)
         m = re.search(r"<title>(.*?)</title>", page, re.IGNORECASE | re.DOTALL)
         if m:
             title = html.unescape(m.group(1).replace(" - YouTube", "").strip())
@@ -105,9 +103,16 @@ async def fetch_youtube(url: str, language: str = "en") -> IngestResult:
 
 async def fetch_article(url: str) -> IngestResult:
     """Fetch article content via urllib (no extra dependencies)."""
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=15)  # noqa: S310
-    raw = resp.read().decode("utf-8", errors="replace")
+
+    def read_article() -> str:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
+            raw: bytes = resp.read(2 * 1024 * 1024 + 1)
+        if len(raw) > 2 * 1024 * 1024:
+            raise ValueError("Fetched article exceeds its byte limit")
+        return raw.decode("utf-8", errors="replace")
+
+    raw = await asyncio.to_thread(read_article)
 
     # Extract title
     title_match = re.search(r"<title>(.*?)</title>", raw, re.IGNORECASE | re.DOTALL)
@@ -134,53 +139,3 @@ async def ingest_url(url: str, language: str = "en") -> IngestResult:
     if source_type == SourceType.YOUTUBE:
         return await fetch_youtube(url, language=language)
     return await fetch_article(url)
-
-
-def _sanitize_filename(name: str) -> str:
-    """Create a filesystem-safe filename from a title."""
-    name = re.sub(r'[<>:"/\\|?*]', "_", name)
-    name = re.sub(r"\s+", "_", name)
-    return name[:100].strip("_")
-
-
-def create_vault_note(
-    result: IngestResult,
-    vault_root: Path,
-    inbox_folder: str = "00-inbox",
-) -> Path:
-    """Create a markdown note in the vault from an IngestResult."""
-    folder = vault_root / inbox_folder
-    folder.mkdir(parents=True, exist_ok=True)
-
-    filename = _sanitize_filename(result.title) + ".md"
-    note_path = folder / filename
-    validate_vault_path(str(note_path), vault_root)
-
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    meta_lines = ""
-    for k, v in result.metadata.items():
-        meta_lines += f"{k}: {v}\n"
-
-    content = f"""\
----
-title: "{result.title}"
-source: "{result.url}"
-source_type: {result.source_type}
-tags: [ingested]
-created: {now}
-authority: 2
-{meta_lines}---
-
-# {result.title}
-
-**Source:** {result.url}
-**Type:** {result.source_type}
-
----
-
-{result.content}
-"""
-    note_path.write_text(content, encoding="utf-8")
-    logger.info("Created vault note: %s", note_path)
-    return note_path

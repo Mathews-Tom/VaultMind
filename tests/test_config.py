@@ -524,3 +524,194 @@ def test_explicit_toml_constructor_preserves_custom_dotenv_controls(
     dotenv_disabled = Settings(_toml_file=profile_config_path, _env_file=None)
     assert dotenv_disabled.mcp.profiles["editor"].write_enabled is True
     assert dotenv_disabled.mcp.profiles["editor"].folder_scope == ["02-projects"]
+
+
+@pytest.mark.parametrize(
+    ("excluded", "missing"),
+    [
+        ([".git"], ("wiki", "_wiki")),
+        ([".git", "wiki"], ("_wiki",)),
+        ([".git", "_wiki"], ("wiki",)),
+        (["Wiki", "_Wiki"], ("wiki", "_wiki")),
+    ],
+)
+def test_explicit_missing_exclusions_fail_without_rewriting_setup(
+    loader: SettingsLoader, config_path: Path, excluded: list[str], missing: tuple[str, ...]
+) -> None:
+    config_path.write_text(
+        config_path.read_text().replace(
+            'inbox_folder = "toml-inbox"',
+            f'inbox_folder = "toml-inbox"\nexcluded_folders = {json.dumps(excluded)}',
+        ),
+        encoding="utf-8",
+    )
+    before = config_path.read_bytes()
+    vault = config_path.parent.parent / "vault"
+    with pytest.raises(ValidationError) as error:
+        loader(config_path)
+    for name in missing:
+        assert name in str(error.value)
+    assert "add these exact root folder names" in str(error.value)
+    assert config_path.read_bytes() == before
+    assert list(vault.iterdir()) == []
+
+
+def test_new_config_is_read_only_and_excludes_both_owned_trees(
+    loader: SettingsLoader, config_path: Path
+) -> None:
+    before = config_path.read_bytes()
+    settings = loader(config_path)
+    assert {"wiki", "_wiki"}.issubset(settings.vault.excluded_folders)
+    assert list(settings.vault.path.iterdir()) == []
+    assert config_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("vault", "inbox_folder"),
+        ("vault", "daily_folder"),
+        ("vault", "templates_folder"),
+        ("vault", "meta_folder"),
+        ("memory_profile", "identity_folder"),
+        ("memory_profile", "daily_log_folder"),
+        ("drafts", "active_folder"),
+        ("drafts", "sent_folder"),
+        ("drafts", "expired_folder"),
+        ("maturation", "inbox_folder"),
+        ("digest", "inbox_folder"),
+        ("ingest", "inbox_folder"),
+        ("research", "output_folder"),
+        ("distill", "output_folder"),
+    ],
+)
+@pytest.mark.parametrize("destination", ["wiki/new", "_WiKi/new", "alias/new"])
+def test_configured_ordinary_folders_fail_before_any_setup_writes(
+    config_path: Path, section: str, field: str, destination: str
+) -> None:
+    vault = config_path.parent.parent / "vault"
+    reserved = vault / "_wiki"
+    reserved.mkdir()
+    source = reserved / "source.json"
+    source.write_bytes(b"preserved source")
+    (vault / "alias").symlink_to(reserved, target_is_directory=True)
+    with pytest.raises(ValidationError, match="Ordinary writes cannot target"):
+        Settings.from_toml(config_path, **{section: {field: destination}})
+    assert source.read_bytes() == b"preserved source"
+    assert sorted(path.name for path in reserved.iterdir()) == ["source.json"]
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("chroma", "persist_dir"),
+        ("graph", "persist_path"),
+        ("search", "bm25_db_path"),
+        ("bench", "trend_path"),
+        ("tracking", "db_path"),
+        ("activation", "db_path"),
+        ("episodic", "db_path"),
+        ("gaps", "db_path"),
+        ("autonomy", "db_path"),
+        ("sources", "db_path"),
+        ("procedural", "db_path"),
+        ("scheduler", "state_path"),
+        ("heartbeat", "snapshot_state_path"),
+        ("integrations", "manifest_path"),
+    ],
+)
+def test_configured_durable_outputs_deny_aliases_but_allow_external_locations(
+    config_path: Path, tmp_path: Path, section: str, field: str
+) -> None:
+    vault = config_path.parent.parent / "vault"
+    reserved = vault / "_wiki"
+    reserved.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    alias = outside / "alias"
+    alias.symlink_to(reserved, target_is_directory=True)
+    with pytest.raises(ValidationError, match="Ordinary writes cannot target"):
+        Settings.from_toml(config_path, **{section: {field: str(alias / "state.json")}})
+    destination = outside / "ordinary.json"
+    settings = Settings.from_toml(config_path, **{section: {field: str(destination)}})
+    assert Path(getattr(getattr(settings, section), field)) == destination
+    assert not destination.exists()
+    assert list(reserved.iterdir()) == []
+
+
+def test_folder_preflight_preserves_safe_selected_alias_spelling(config_path: Path) -> None:
+    vault = config_path.parent.parent / "vault"
+    target = vault / "ordinary"
+    target.mkdir()
+    (vault / "alias").symlink_to(target, target_is_directory=True)
+    settings = Settings.from_toml(config_path, vault={"inbox_folder": "alias"})
+    assert settings.vault.inbox_folder == "alias"
+    assert list(target.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["embedding_cache.db", "sessions.db", "lineage.json", "tag_vocabulary.json", "mcp_audit.jsonl"],
+)
+def test_fixed_state_defaults_cannot_alias_wiki_storage(
+    config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str
+) -> None:
+    import vaultmind.config as config_module
+
+    home = tmp_path / "runtime"
+    data = home / "data"
+    data.mkdir(parents=True)
+    monkeypatch.setattr(config_module, "VAULTMIND_HOME", home)
+    vault = config_path.parent.parent / "vault"
+    reserved = vault / "_wiki"
+    reserved.mkdir()
+    retained = reserved / "retained"
+    retained.write_bytes(b"unaltered")
+    (data / filename).symlink_to(retained)
+    with pytest.raises(ValidationError, match="Ordinary writes cannot target"):
+        load_settings(config_path)
+    assert retained.read_bytes() == b"unaltered"
+
+
+def test_configured_state_loop_fails_without_creating_outputs(config_path: Path) -> None:
+    vault = config_path.parent.parent / "vault"
+    cycle = vault / "cycle"
+    cycle.symlink_to(cycle)
+    with pytest.raises(ValidationError, match="Path cannot be resolved"):
+        Settings.from_toml(config_path, autonomy={"db_path": str(cycle / "queue.db")})
+    assert cycle.is_symlink()
+    assert not (vault / "_wiki").exists()
+
+
+def test_output_preflight_preserves_explicit_empty_sentinels_and_relative_paths(
+    config_path: Path,
+) -> None:
+    settings = Settings.from_toml(
+        config_path,
+        tracking={"db_path": ""},
+        bench={"trend_path": ""},
+        scheduler={"state_path": ""},
+        autonomy={"db_path": "relative/queue.db"},
+    )
+    assert settings.tracking.db_path == ""
+    assert settings.bench.trend_path == ""
+    assert settings.scheduler.state_path == ""
+    assert settings.autonomy.db_path == "relative/queue.db"
+    assert not (Path.cwd() / "relative").exists()
+
+
+@pytest.mark.parametrize("filename", ["maturation_state.json", "evolution_dismissed.json"])
+def test_home_relative_state_defaults_cannot_alias_wiki_storage(
+    config_path: Path, filename: str
+) -> None:
+    data = Path.home() / ".vaultmind" / "data"
+    data.mkdir(parents=True)
+    vault = config_path.parent.parent / "vault"
+    reserved = vault / "_wiki"
+    reserved.mkdir()
+    retained = reserved / "retained.json"
+    retained.write_bytes(b'{"preserved":true}')
+    (data / filename).symlink_to(retained)
+    with pytest.raises(ValidationError, match="Ordinary writes cannot target"):
+        load_settings(config_path)
+    assert retained.read_bytes() == b'{"preserved":true}'

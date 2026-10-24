@@ -26,6 +26,11 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+from vaultmind.vault.security import (
+    validate_ordinary_output_path,
+    validate_ordinary_write_path,
+)
+
 VAULTMIND_HOME = Path.home() / ".vaultmind"
 
 
@@ -38,7 +43,21 @@ class VaultConfig(BaseSettings):
     templates_folder: str = "06-templates"
     meta_folder: str = "_meta"
     sync_interval_seconds: int = 300
-    excluded_folders: list[str] = Field(default_factory=lambda: [".obsidian", ".git", ".trash"])
+    excluded_folders: list[str] = Field(
+        default_factory=lambda: [".obsidian", ".git", ".trash", "wiki", "_wiki"]
+    )
+
+    @field_validator("excluded_folders")
+    @classmethod
+    def require_wiki_exclusions(cls, folders: list[str]) -> list[str]:
+        missing = [name for name in ("wiki", "_wiki") if name not in folders]
+        if missing:
+            raise ValueError(
+                "vault.excluded_folders is missing "
+                + ", ".join(missing)
+                + "; add these exact root folder names to the selected configuration"
+            )
+        return folders
 
     @field_validator("path")
     @classmethod
@@ -47,6 +66,12 @@ class VaultConfig(BaseSettings):
         if not v.exists():
             raise ValueError(f"Vault path does not exist: {v}")
         return v.resolve()
+
+    @model_validator(mode="after")
+    def validate_output_folders(self) -> VaultConfig:
+        for field in ("inbox_folder", "daily_folder", "templates_folder", "meta_folder"):
+            validate_ordinary_write_path(str(getattr(self, field)), self.path)
+        return self
 
 
 class MemoryProfileConfig(BaseSettings):
@@ -611,6 +636,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     vault: VaultConfig = Field(default_factory=lambda: VaultConfig(path=VAULTMIND_HOME / "vault"))
@@ -664,6 +690,81 @@ class Settings(BaseSettings):
     def __init__(self, *, _toml_file: Path | None = None, **values: Any) -> None:
         """Select TOML per load while forwarding all BaseSettings controls."""
         super().__init__(_toml_file=_toml_file, **values)
+
+    @model_validator(mode="after")
+    def validate_output_destinations(self) -> Settings:
+        """Preflight selected outputs without creating directories or state.
+
+        This prevents configured aliases from entering wiki-owned storage before
+        assemblies construct providers/stores. Writers still check at use time;
+        configuration validation is not a filesystem or concurrency sandbox.
+        """
+        root = self.vault.path
+        folders: tuple[tuple[BaseModel, tuple[str, ...]], ...] = (
+            (self.memory_profile, ("identity_folder", "daily_log_folder")),
+            (self.drafts, ("active_folder", "sent_folder", "expired_folder")),
+            (self.maturation, ("inbox_folder",)),
+            (self.digest, ("inbox_folder",)),
+            (self.ingest, ("inbox_folder",)),
+            (self.research, ("output_folder",)),
+            (self.distill, ("output_folder",)),
+        )
+        for model, fields in folders:
+            for field in fields:
+                validate_ordinary_write_path(str(getattr(model, field)), root)
+        for field in (
+            "user_note_name",
+            "system_note_name",
+            "promoted_memory_note_name",
+            "priorities_note_name",
+        ):
+            validate_ordinary_write_path(
+                str(
+                    Path(self.memory_profile.identity_folder) / getattr(self.memory_profile, field)
+                ),
+                root,
+            )
+
+        validate_ordinary_output_path(self.chroma.persist_dir, root)
+        validate_ordinary_output_path(self.graph.persist_path, root)
+        data = VAULTMIND_HOME / "data"
+        outputs: tuple[tuple[BaseModel, str, Path | None], ...] = (
+            (self.search, "bm25_db_path", data / "bm25.db"),
+            (self.bench, "trend_path", data / "bench" / "trend.jsonl"),
+            (self.tracking, "db_path", data / "preferences.db"),
+            (self.activation, "db_path", None),
+            (self.episodic, "db_path", data / "episodes.db"),
+            (self.gaps, "db_path", data / "gaps.db"),
+            (self.autonomy, "db_path", data / "review_queue.db"),
+            (self.sources, "db_path", data / "sources.db"),
+            (self.procedural, "db_path", data / "procedural.db"),
+            (
+                self.scheduler,
+                "state_path",
+                Path.home() / ".vaultmind" / "data" / "scheduler_state.json",
+            ),
+            (self.heartbeat, "snapshot_state_path", None),
+            (self.integrations, "manifest_path", None),
+        )
+        for model, field, default in outputs:
+            configured = str(getattr(model, field))
+            destination = Path(configured) if configured else default
+            if destination is not None:
+                validate_ordinary_output_path(destination, root)
+        # These outputs have no configurable path field. Check their actual
+        # defaults too: a data-directory symlink must not bypass the boundary.
+        for name in (
+            "embedding_cache.db",
+            "sessions.db",
+            "lineage.json",
+            "tag_vocabulary.json",
+            "mcp_audit.jsonl",
+        ):
+            validate_ordinary_output_path(data / name, root)
+        home_data = Path.home() / ".vaultmind" / "data"
+        for name in ("maturation_state.json", "evolution_dismissed.json"):
+            validate_ordinary_output_path(home_data / name, root)
+        return self
 
     @classmethod
     def settings_customise_sources(

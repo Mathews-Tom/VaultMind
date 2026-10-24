@@ -1,98 +1,231 @@
-"""Tests for the manual text capture handler (`bot/handlers/capture.py::handle_capture`)."""
+"""Intake behavior through the public Telegram command facade."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from vaultmind.bot.commands import CommandHandlers
+from vaultmind.bot.handlers.context import HandlerContext
+from vaultmind.config import Settings
+from vaultmind.knowledge.intake import SourceIntake
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Helpers / fakes
-# ---------------------------------------------------------------------------
+
+def make_handlers(tmp_path: Path) -> CommandHandlers:
+    settings = Settings(vault={"path": tmp_path})
+    settings.ingest.enabled = False
+    ctx = HandlerContext(
+        settings=settings,
+        vault_root=tmp_path,
+        parser=MagicMock(),
+        store=MagicMock(),
+        graph=MagicMock(),
+        thinking=MagicMock(),
+        llm_client=MagicMock(),
+    )
+    ctx.thinking.has_active_session.return_value = False
+    handlers = CommandHandlers.__new__(CommandHandlers)
+    handlers._ctx = ctx
+    handlers._last_exchanges = {}
+    return handlers
 
 
-class FakeVaultConfig:
-    inbox_folder: str = "00-inbox"
-
-
-class FakeIngestConfig:
-    enabled: bool = False  # URL ingestion disabled -> exercises plain-text capture
-    youtube_language: str = "en"
-    max_content_length: int = 50_000
-
-
-class FakeSettings:
-    vault: FakeVaultConfig = FakeVaultConfig()
-    ingest: FakeIngestConfig = FakeIngestConfig()
-    telegram: Any = MagicMock(allowed_user_ids=[])
-
-
-def _make_fake_store() -> MagicMock:
-    store = MagicMock()
-    store.index_single_note = MagicMock(return_value=None)
-    return store
-
-
-def _make_fake_parser(note: MagicMock | None = None) -> MagicMock:
-    parser = MagicMock()
-    parser.parse_file = MagicMock(return_value=note or MagicMock())
-    return parser
-
-
-def _make_ctx(tmp_path: Path) -> Any:
-    """Build a minimal HandlerContext-like object for capture tests."""
-    from vaultmind.bot.handlers.context import HandlerContext
-
-    ctx = MagicMock(spec=HandlerContext)
-    ctx.settings = FakeSettings()
-    ctx.vault_root = tmp_path
-    ctx.store = _make_fake_store()
-    ctx.parser = _make_fake_parser()
-    return ctx
-
-
-def _fake_message() -> MagicMock:
+def make_message(text: str | None = None, event: int = 10) -> MagicMock:
     message = MagicMock()
-    message.from_user = MagicMock(id=42)
+    message.text = text
+    message.caption = None
+    message.chat = SimpleNamespace(id=12)
+    message.message_id = event
+    message.from_user = SimpleNamespace(id=42)
     message.answer = AsyncMock()
     return message
 
 
-class TestHandleCaptureStampsAuthority:
-    def test_manual_capture_stamped_with_authority_5(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path)
-        message = _fake_message()
+def source_records(handlers: CommandHandlers) -> list[object]:
+    root = handlers._ctx.vault_root
+    with SourceIntake(handlers._ctx.settings) as intake:
+        return [
+            intake.read(path.name.removesuffix(".intake.json"))
+            for path in sorted((root / "_wiki/sources").glob("*.intake.json"))
+        ]
 
-        from vaultmind.bot.handlers.capture import handle_capture
 
-        asyncio.run(handle_capture(ctx, message, "A quick thought worth keeping."))
+def registered_callback(
+    handlers: CommandHandlers, name: str, monkeypatch: pytest.MonkeyPatch
+) -> object:
+    from aiogram import Router
 
-        inbox = tmp_path / "00-inbox"
-        notes = list(inbox.glob("*.md"))
-        assert len(notes) == 1, f"Expected 1 note, found {len(notes)}"
-        content = notes[0].read_text()
-        assert "authority: 5" in content
+    from vaultmind.bot import telegram
 
-    def test_manual_capture_note_indexed(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path)
-        message = _fake_message()
+    router = Router()
+    monkeypatch.setattr(telegram, "router", router)
+    telegram.register_handlers(handlers)
+    return next(
+        handler.callback for handler in router.message.handlers if handler.callback.__name__ == name
+    )
 
-        from vaultmind.bot.handlers.capture import handle_capture
 
-        asyncio.run(handle_capture(ctx, message, "Another quick capture."))
+def test_raw_routing_preserves_exact_bytes_and_full_capture_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handlers = make_handlers(tmp_path)
+    original = "note: \r\n" + "é" * 9000 + "\r\n  "
+    message = make_message(original)
+    callback = registered_callback(handlers, "handle_text", monkeypatch)
+    asyncio.run(callback(message))
+    records = source_records(handlers)
+    assert len(records) == 1
+    assert records[0].content == original.encode("utf-8")
+    assert records[0].provenance["origin"] == "telegram:chat=12:actor=42"
+    assert records[0].provenance["event_id"] == "12:10:42"
+    note = next((tmp_path / "00-inbox").glob("*.md")).read_text()
+    assert "é" * 9000 in note
+    assert f"source_id: {records[0].source_id}" in note
+    assert "authority: 5" in note
+    handlers._ctx.store.index_single_note.assert_called_once()
 
-        ctx.store.index_single_note.assert_called_once()
 
-    def test_empty_text_after_sanitization_writes_no_note(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path)
-        message = _fake_message()
+@pytest.mark.parametrize(
+    "text",
+    [
+        "note: " + "x" * 10001,
+        "note: ---\ndo_not_retain: true\n---\nprivate",
+        "note: ---\nretention: do-not-retain\n---\nprivate",
+    ],
+)
+def test_routed_refusal_precedes_all_persistence(tmp_path: Path, text: str) -> None:
+    handlers = make_handlers(tmp_path)
+    message = make_message(text)
+    asyncio.run(handlers.handle_message(message, text))
+    assert not (tmp_path / "_wiki").exists()
+    assert not (tmp_path / "00-inbox").exists()
+    handlers._ctx.store.index_single_note.assert_not_called()
 
-        from vaultmind.bot.handlers.capture import handle_capture
 
-        asyncio.run(handle_capture(ctx, message, "   "))
+def test_event_replay_revision_and_actor_have_distinct_immutable_identity(tmp_path: Path) -> None:
+    handlers = make_handlers(tmp_path)
+    first = make_message("exact\r\noriginal\r\n")
+    asyncio.run(handlers.handle_capture(first, first.text))
+    asyncio.run(handlers.handle_capture(first, first.text))
+    assert len(source_records(handlers)) == 1
+    handlers._ctx.store.index_single_note.assert_called_once()
+    first.text = "changed bytes"
+    asyncio.run(handlers.handle_capture(first, first.text))
+    other = make_message("changed bytes", event=11)
+    asyncio.run(handlers.handle_capture(other, other.text))
+    third = make_message("changed bytes", event=11)
+    third.from_user.id = 43
+    asyncio.run(handlers.handle_capture(third, third.text))
+    assert len(source_records(handlers)) == 4
+    assert len(list((tmp_path / "00-inbox").glob("*.md"))) == 4
 
-        inbox = tmp_path / "00-inbox"
-        assert not inbox.exists() or len(list(inbox.glob("*.md"))) == 0
+
+def test_index_failure_is_preserved_not_reported_as_indexed(tmp_path: Path) -> None:
+    handlers = make_handlers(tmp_path)
+    handlers._ctx.store.index_single_note.side_effect = RuntimeError("secret-body")
+    message = make_message("keep original")
+    asyncio.run(handlers.handle_capture(message, message.text))
+    answer = message.answer.call_args.args[0]
+    assert "Preserved source" in answer and "index: failed" in answer
+    assert "secret-body" not in answer
+    asyncio.run(handlers.handle_capture(message, message.text))
+    handlers._ctx.store.index_single_note.assert_called_once()
+    assert source_records(handlers)[0].text == "keep original"
+
+
+def test_auth_and_reserved_destination_precede_source_creation(tmp_path: Path) -> None:
+    handlers = make_handlers(tmp_path)
+    message = make_message("private")
+    handlers._ctx.settings.telegram.allowed_user_ids = [999]
+    asyncio.run(handlers.handle_capture(message, message.text))
+    assert not (tmp_path / "_wiki").exists()
+    handlers._ctx.settings.telegram.allowed_user_ids = []
+    handlers._ctx.settings.vault.inbox_folder = "wiki"
+    asyncio.run(handlers.handle_capture(message, message.text))
+    assert not (tmp_path / "_wiki").exists()
+
+
+def test_url_original_and_extraction_are_related_not_same_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vaultmind.vault.ingest import IngestResult, SourceType
+
+    handlers = make_handlers(tmp_path)
+    handlers._ctx.settings.ingest.enabled = True
+    fetch = AsyncMock(
+        return_value=IngestResult(
+            SourceType.ARTICLE, "Article", "extracted article", "https://example.com"
+        )
+    )
+    monkeypatch.setattr("vaultmind.bot.handlers.capture.ingest_url", fetch)
+    message = make_message("save: https://example.com\r\n")
+    asyncio.run(handlers.handle_message(message, message.text))
+    records = source_records(handlers)
+    assert len(records) == 2
+    original = next(item for item in records if item.provenance["role"] == "text")
+    derived = next(item for item in records if item.provenance["role"] == "extracted-text")
+    assert original.text == message.text
+    assert derived.text == "extracted article"
+    assert derived.dependencies[0].source_id == original.source_id
+    asyncio.run(handlers.handle_message(message, message.text))
+    fetch.assert_awaited_once()
+    assert len(source_records(handlers)) == 2
+    assert handlers._ctx.store.index_single_note.call_count == 2
+
+
+def test_url_failure_reports_fetch_failure_with_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handlers = make_handlers(tmp_path)
+    handlers._ctx.settings.ingest.enabled = True
+    fetch = AsyncMock(side_effect=RuntimeError("private URL body"))
+    monkeypatch.setattr("vaultmind.bot.handlers.capture.ingest_url", fetch)
+    message = make_message("https://example.com")
+    asyncio.run(handlers.handle_capture(message, message.text))
+    answer = message.answer.call_args.args[0]
+    assert "URL fetch: failed" in answer and "original preserved" in answer
+    assert "private URL body" not in answer
+    assert len(source_records(handlers)) == 1
+    asyncio.run(handlers.handle_capture(message, message.text))
+    fetch.assert_awaited_once()
+
+
+def test_registered_text_question_does_not_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handlers = make_handlers(tmp_path)
+    response = AsyncMock()
+    monkeypatch.setattr("vaultmind.bot.handlers.routing.handle_smart_response", response)
+    message = make_message("Why does the system work this way?")
+    callback = registered_callback(handlers, "handle_text", monkeypatch)
+    asyncio.run(callback(message))
+    response.assert_awaited_once()
+    assert not (tmp_path / "_wiki").exists()
+    assert not (tmp_path / "00-inbox").exists()
+
+
+def test_extraction_limit_is_failed_derivative_without_truncation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vaultmind.vault.ingest import IngestResult, SourceType
+
+    handlers = make_handlers(tmp_path)
+    handlers._ctx.settings.ingest.enabled = True
+    handlers._ctx.settings.ingest.max_content_length = 3
+    fetch = AsyncMock(
+        return_value=IngestResult(SourceType.ARTICLE, "Article", "too long", "https://example.com")
+    )
+    monkeypatch.setattr("vaultmind.bot.handlers.capture.ingest_url", fetch)
+    message = make_message("https://example.com")
+    asyncio.run(handlers.handle_capture(message, message.text))
+    assert len(source_records(handlers)) == 1
+    answer = message.answer.call_args.args[0]
+    assert "URL fetch: succeeded; extraction: failed" in answer
+    assert "Original preserved" in answer

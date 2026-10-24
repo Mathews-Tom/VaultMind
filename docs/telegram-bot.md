@@ -26,15 +26,36 @@ Plain text messages are classified automatically using a heuristic-first router.
 
 ### Capture
 
-Messages matching any of these patterns are saved directly to the inbox:
+Messages matching these patterns enter source capture, followed by an ordinary inbox projection:
 
 - **Explicit prefix**: `note:`, `save:`, `capture:`, `remember:`, `jot:`, `log:`
 - **Multiline paste**: 3+ lines (pasting = intentional capture)
 - **Long text**: 500+ characters
-- **URL in message**: Creates a vault note from the YouTube transcript or article content
-- **Photo/image**: Described via vision model, saved as note with `![[images/...]]` embed
+- **URL in message**: Preserves submitted text first; a successful YouTube transcript or article extraction becomes a separate parent-linked source
+- **Photo/image**: Preserves the original only when `save_originals` is enabled, then records provider-derived vision text and a linked ordinary note
 
-The prefix is stripped before saving. The note gets `type: fleeting` frontmatter and is indexed immediately.
+Text preservation precedes downstream projection and indexing. Replies distinguish
+the source ID/hash from provider/derivative, projection and index dispositions;
+preservation is not approval and does not promise that every later stage succeeded.
+Use a returned source ID explicitly with `wiki propose --source SOURCE_ID` before
+reviewing and applying any accepted page. The ordinary projection is for note UX,
+not an automatic curation decision.
+
+URL extraction preserves extracted text, not original HTTP response bytes.
+Fetch failure retains the submitted text and reports a failed derivative without
+fabricating extracted content. Voice capture preserves a transcript with explicit
+audio nonretention; downloaded audio is transient. Voice questions follow the
+question route and do not create source captures.
+
+Where Telegram supplies a stable event/revision identity, replay does not repeat
+provider, derivative, projection or index effects. Changed bytes get a new immutable
+source and separate equal-byte events remain distinct. Failed/incomplete stages
+are visible and not automatically retried. Partial success can leave preserved
+evidence without an indexed note; this is not an atomic write/index transaction.
+Text retention restrictions are checked before preservation, and source readers
+verify the complete parent/attachment chain before discovery or curation.
+
+Capture, photo and transcription refusals log only the exception class, not input bodies or exception messages. Invalid retained replay evidence refuses the event without another transcription/provider attempt; it is not treated as an uncaptured event.
 
 ### Greetings
 
@@ -67,11 +88,19 @@ Set `capture_all = true` in `[routing]` config to bypass routing and capture all
 
 | Command       | Usage                      | Description                                                                                                    |
 | ------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `/recall`     | `/recall machine learning` | Semantic search over the vault. Results are paginated (5 per page) with navigation buttons                     |
+| `/recall`     | `/recall machine learning` | Source-only discovery over current ordinary notes and preserved text, with paginated results |
 | `/suggest`    | `/suggest my-note.md`      | Find notes worth linking. Uses composite scoring: semantic similarity + shared graph entities + graph distance |
 | `/duplicates` | `/duplicates my-note.md`   | Find duplicate or merge-candidate notes. Bands: duplicate (>= 92%), merge (80-92%)                             |
 
 Note lookup tries a relative path, a `.md` suffix, matching filenames and then one semantic result. Symlink loops, unreadable candidates and overlong path components do not prevent a valid later lookup strategy. Paths escaping the vault remain explicit containment errors; unexpected filesystem stat errors are not suppressed.
+
+`/recall` shares its current-file policy with CLI `search-sources`, MCP
+`vault_search` and `vaultmind bench`. Hits are explicitly unapproved, with
+current-byte digests/provenance; missing or stale indexed distance is unknown,
+not zero. History, pending/control state and current `wiki` pages are excluded.
+Changing a paginated source invalidates its snapshot and requires a fresh search.
+This does not switch normal chat or `/think` to approved-wiki-only answering:
+root `ask` and explicit `wiki query` remain the approved-only routes.
 
 ### Thinking Partner
 
@@ -146,7 +175,7 @@ Use the explicit Retry button on a failure response or `/review`'s failed-operat
 
 BLOCK delivery reports `sent`, `disabled` (`notification_chat_id = 0`), `unavailable` (no active bot delivery collaborator, including CLI-created proposals), or `failed` (transport error). Deduplicated and terminal proposals do not send again. Undelivered pending BLOCK proposals remain available with per-item Approve/Reject buttons in `/review`; no polling service or automatic delivery retry runs. Generic proposal messages use plain text so vault-controlled summaries cannot inject Telegram Markdown.
 
-Source proposal notifications use this same delivery path, but source write/index/event finalization and durable cursor-completion guarantees remain a separate M15 remediation. An applied queue operation is not evidence that those downstream source steps completed. Offline approval verification uses temporary fixture state, scripted LLM responses, synthetic embeddings and a recorded Telegram transport; it does not qualify native providers, embeddings, production migrations or actual Telegram delivery.
+Source proposal notifications use this same delivery path, but source write/index/event finalization and durable cursor-completion guarantees remain separate connector-recovery work. An applied queue operation is not evidence that those downstream source steps completed. Offline approval verification uses temporary fixture state, scripted LLM responses, synthetic embeddings and a recorded Telegram transport; it does not qualify native providers, embeddings, production migrations or actual Telegram delivery.
 
 ### Queue migration and rollback
 

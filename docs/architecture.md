@@ -10,7 +10,7 @@ Architectural prep is now in place for five additional runtime capabilities that
 
 `wiki/cli.py` registers the `wiki add/propose/review/apply/list/query/lint` Click group on the existing root CLI. `wiki/workspace.py` owns a bounded, synchronous source-backed page workflow, not a replacement runtime. Settings are loaded through the normal `load_settings` precedence. Add/review/apply and draft-file proposals construct no LLM, embedding, graph, bot, connector or index collaborator. Generated proposals use the existing configured LLM client for one completion, with no fallback/retry.
 
-Current pages are one-level `wiki/SLUG.md` Markdown files. `_wiki/sources/ID.md` preserves exact source bytes (including CRLF); adjacent JSON records the ID, original name, origin/URI, capture time and full SHA-256. The URI is provenance, not a fetch instruction. `_wiki` must be explicitly excluded from vault indexing before any persistence. Source/history/pending state is not fed to Chroma, FTS or the event bus. Page application itself does not index the current page.
+Current pages are one-level `wiki/SLUG.md` Markdown files. `_wiki/sources/ID.md` preserves exact source bytes (including CRLF); adjacent JSON records the ID, original name, origin/URI, capture time and full SHA-256. The URI is provenance, not a fetch instruction. Both `wiki` and `_wiki` must be excluded from ordinary indexing before persistence. Source/history/pending state is not fed to Chroma, FTS or the event bus. Page application itself does not index the current page.
 
 A candidate has a title, `Current understanding`, resolvable source/page links, and wiki-controlled frontmatter/provenance. Drafts cannot supply frontmatter. Existing sources remain in provenance on updates. A new-source update must explicitly retain attributed disagreements in `Conflicting information`, or provide a reviewed `Resolution` with its reason and source citations. These are structural checks, not automatic conflict discovery or factual entailment. Reviewers must check actual statements against original sources.
 
@@ -66,10 +66,58 @@ Neither citation membership nor structural conflict checks prove factual truth
 or semantic entailment. Readers must inspect sections and preserved sources.
 Queries never promote answers, submit proposals or mutate accepted state. They
 never fall back to raw notes, graph, memory, web or previous answers. Existing
-Telegram and MCP answering/retrieval routes remain unchanged; root CLI `ask`
-is not a transport-wide cutover. The [README procedure](../README.md#manual-source-backed-wiki)
+Telegram and MCP normal answering remain on their existing policy; source
+discovery changes do not make root CLI `ask` a transport-wide answer cutover.
+The [README procedure](../README.md#manual-source-backed-wiki)
 gives real SOURCE commands; synthetic offline adapters do not establish
 installed-wheel, live-model, private-vault, Telegram or native qualification.
+
+### Source intake and discovery
+
+`knowledge/intake.py::SourceIntake` is the provider-free preservation boundary
+shared by adapters and the workspace source reader. Legacy exact source metadata
+and proposal snapshots remain readable. New sources additionally bind a versioned
+manifest through the metadata origin marker's hash. The manifest records actual
+origin, adapter, event/revision, role, original-retention disposition and complete
+parent/attachment identities. Readers validate that closure before returning text
+or permitting curation; changing an attachment or parent invalidates its derivative.
+Metadata is published last, so an incomplete write is not a valid source.
+
+Capture separates immutable preservation from persisted provider, derivative,
+ordinary projection and index stages. A source is never an approval. Projections
+link back to preserved source IDs but do not silently become wiki curation input.
+Event/revision/role replay avoids duplicate effects; changed bytes receive a new
+identity and distinct events do not collapse merely because their bytes match.
+An attempted stage is recorded before its effect. Failed or incomplete stages
+remain explicit and are not retried automatically; preservation, projection,
+Chroma, FTS and approval are not one atomic transaction.
+
+Authenticated replay lookup validates adjacent event identities before reading matching retained closures. Invalid provenance or a matching incomplete/unauthorized closure refuses replay rather than becoming a missing event; unrelated bodies do not consume the matching closure's byte budget.
+
+Text capture preserves submitted text. URL submission and extracted text have
+separate parent-linked identities; extraction is not wire-response preservation.
+Photo-original retention follows `save_originals`; audio is transient and voice
+questions do not create captured sources. A provider-derived description or
+transcript does not establish original retention or factual accuracy.
+
+`knowledge/sources.py::search_sources(settings, query, *, store=None, n_results=5, note_type=None, allows_path=None)` serves CLI `search-sources`, Telegram `/recall`, MCP `vault_search` and benchmark queries. It enumerates authorized current ordinary Markdown and validated preserved text before ranking/limits/counts, independently of approval. Results carry `source-only`, `approved: false`, current-byte digests and provenance. Current wiki pages, history, queue/control files and unsafe aliases are excluded. Optional indexed paths assist ranking; displayed content always comes from current bytes. Raw distance is retained only for an exact current indexed chunk. The shared parser orders tags deterministically in chunk prefixes so unchanged tagged sources have the same indexed/current representation across processes; old differing prefix variants remain unknown rather than supplying stale confidence. Lexical-only or stale chunks remain unknown. Permissions apply before body reads, including the full retained-source dependency closure.
+
+Search refuses excessive scopes rather than silently scanning a prefix: at most
+512 candidates, 4096 indexed chunks, 1 MiB per searched source and 64 MiB total
+search bytes. Lexical matching is not exhaustive semantic retrieval. Benchmarks
+measure source discovery, not approved-answer quality. Offline bundles contain
+real `vault/` Markdown plus candidate identities/distances in `retrieval.yaml`;
+the loader snapshots chunks once and the same discovery path independently
+hydrates the current bundle corpus.
+
+An unreadable, malformed or oversized authorized ordinary source aborts source discovery with a redacted error rather than silently omitting evidence. Correct the source or explicitly narrow the authorized scope; query text alone does not narrow enumeration. Ordinary and preserved frontmatter authority values share the same 1–5 conversion/range validation; invalid values use the configured neutral-default ranking behavior, never approval.
+
+Ordinary writers reject lexical and resolved `wiki`/`_wiki` targets, including
+symlinks and configuration aliases into those trees. Only the narrow wiki/intake
+writers own their respective namespace operations. This application boundary is
+not an OS sandbox or a repair of old indexed data. Retired/superseded-content
+reindexing and native watcher qualification remain unresolved; batching still
+does not make Chroma and FTS atomic or recover interrupted indexing.
 
 ## Module Map
 
@@ -131,7 +179,7 @@ src/vaultmind/
 │       ├── context.py       # HandlerContext dataclass (shared state)
 │       ├── utils.py         # Shared utilities (_is_authorized, _split_message)
 │       ├── capture.py       # Note capture + URL ingestion + photo capture
-│       ├── recall.py        # Semantic search with pagination
+│       ├── recall.py        # Current-file source-only discovery with pagination
 │       ├── think.py         # Thinking partner sessions
 │       ├── graph.py         # Knowledge graph queries
 │       ├── daily.py         # Daily note management
@@ -260,9 +308,9 @@ Fusion and relevance are separate signals. `hybrid_search()` returns, per hit:
 
 `unknown` means "the results are non-empty, but no hit has vector evidence of relevance and at least one has no vector evidence at all" — typically lexical-only BM25 hits. It is deliberately not weak: no knowledge gap is minted (`GapKind.WEAK_RETRIEVAL` / `UNANSWERED_QUESTION`), `vaultmind bench` withholds deterministic decline credit and counts the question as unknown confidence, and `formatter.relevance_label()` renders `relevance unknown` rather than a fabricated percentage. Authority re-ranking can reorder hits but never rewrites `distance`, so it cannot change the confidence of a result set. Raw-vector consumers (duplicate detection, note suggestions, digest) are unchanged.
 
-The bench `--bundle` fixture (`retrieval.yaml`: golden query text → ordered hit list) follows the same contract: a hit's `distance` is optional, and a **missing or `null` distance is explicit unknown evidence**, never defaulted to a number. Optional `rrf_score`, `authority` and `content` pass through unchanged.
+Benchmark bundles pair `golden.yaml` with `retrieval.yaml` candidates and actual `vault/` Markdown. Candidate YAML supplies paths, optional chunk indices, raw distances and fusion scores only; content and authority come from real parsed files. Missing/null distance remains unknown. The loader snapshots indexed chunks once, and shared source queries independently hydrate current corpus bytes; stale chunk text cannot lend confidence to changed content.
 
-`scripts/verify_acceptance.py --case retrieval --offline` exercises this contract through the real parser → ChromaDB + BM25 → `handle_recall` / `run_bench` / `ThinkingPartner.think` → `GapStore` path in a fresh temporary HOME configured by explicit TOML, and emits a JSON receipt (git revision, dirty flag, code/API-origin/corpus digests, boundary labels, per-assertion expected vs observed). Its boundary substitutions are labeled in the receipt: a deterministic hash embedder (no embedding provider), a scripted LLM client, an in-process fake Telegram message, a scripted store used *only* for exact floor-boundary values (`floor − ε`, `floor`, `None`, missing key), and a direct BM25 insert that creates the lexical-only chunk. It is a plumbing and raw-distance-semantics check, not retrieval-quality or live-provider evidence; thinking retrieves with vector-only `store.search()`, so its `unknown` branch is covered only through the scripted store.
+`scripts/verify_acceptance.py --case retrieval --offline` exercises parser → Chroma/BM25 → shared source discovery → real recall/benchmark consumers, plus the existing thinking-partner gap classifier, in synthetic HOME/state. Deterministic embeddings, scripted LLM/Telegram transport and labeled exact-threshold raw-hit substitutions are not live-quality evidence. Boundary hits use pre-created real Markdown chunks. A separate real lexical-only file is discoverable without vector evidence. The same case retains authority/distance invariants and tests authorized top-k against a larger truly closer forbidden population and current-byte hydration against stale indexed excerpts. Thinking remains vector-only; its unknown branch uses the labeled boundary store.
 
 ### Offline Acceptance and CI
 

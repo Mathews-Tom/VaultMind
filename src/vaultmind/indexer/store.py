@@ -179,15 +179,17 @@ class VaultStore:
             List of dicts with keys: chunk_id, content, metadata, distance.
 
         With a nonempty metadata filter, bound the backend limit by matching chunks
-        using an ID-only lookup capped at the requested limit. This avoids Chroma's
-        global-index-size warning without truncating multi-chunk notes. No matches
-        returns an empty list without embedding or querying. Invalid limits retain
+        using an ID-only lookup capped at the requested limit and the complete
+        scoped-candidate bound (4096). This avoids Chroma's global-size warning.
+        No matches returns an empty list without embedding or querying. Invalid limits retain
         Chroma's validation errors even when the filter matches nothing. Unfiltered
         search and its cache retain their existing behavior.
         """
         if where:
             validate_n_results(n_results)
-            matching = self._collection.get(where=where, include=[], limit=n_results)
+            matching = self._collection.get(where=where, include=[], limit=min(n_results, 4097))
+            if len(matching["ids"]) > 4096:
+                raise ValueError("Source search scope is too broad; narrow the authorized folders")
             n_results = len(matching["ids"])
             if not n_results:
                 return []
@@ -225,6 +227,14 @@ class VaultStore:
                         "distance": dists[0][i] if dists else None,
                     }
                 )
+
+        hits.sort(
+            key=lambda hit: (
+                hit["distance"] if hit["distance"] is not None else math.inf,
+                str((hit.get("metadata") or {}).get("note_path", "")),
+                str(hit["chunk_id"]),
+            )
+        )
 
         # Store in cache (only unfiltered queries)
         if self._search_cache is not None and where is None:
@@ -308,15 +318,42 @@ class VaultStore:
         """
         from vaultmind.indexer.hybrid import reciprocal_rank_fusion
 
-        # Fetch more candidates from each source so RRF has a deep pool to rank
-        fetch_n = max(n_results * 4, 20)
+        # A filtered search must scope BOTH backends before either top-k. Obtain
+        # a complete bounded relation, rather than letting forbidden FTS hits
+        # crowd out permitted notes and filtering after fusion.
+        note_paths: list[str] | None = None
+        if where:
+            validate_n_results(n_results)
+            matching = self._collection.get(
+                where=where, include=cast("Any", ["metadatas"]), limit=4097
+            )
+            if len(matching["ids"]) > 4096:
+                raise ValueError("Source search scope is too broad; narrow the authorized folders")
+            path_filter = where.get("note_path")
+            if (
+                len(where) == 1
+                and isinstance(path_filter, dict)
+                and isinstance(path_filter.get("$in"), list)
+            ):
+                note_paths = sorted(str(path) for path in path_filter["$in"])
+            else:
+                note_paths = sorted(
+                    {
+                        str(meta["note_path"])
+                        for meta in matching["metadatas"] or []
+                        if meta is not None and isinstance(meta.get("note_path"), str)
+                    }
+                )
+            fetch_n = n_results
+        else:
+            fetch_n = max(n_results * 4, 20)
 
         vector_hits = self.search(query, n_results=fetch_n, where=where)
 
         if self._bm25 is None:
             return vector_hits[:n_results]
 
-        bm25_hits = self._bm25.search(query, n_results=fetch_n)
+        bm25_hits = self._bm25.search(query, n_results=fetch_n, note_paths=note_paths)
         fused = reciprocal_rank_fusion(vector_hits, bm25_hits)
 
         # Reformat to match the standard search() output shape

@@ -213,7 +213,7 @@ class VaultParser:
             clean = heading.lstrip("#").strip()
             parts.append(f"section: {clean}")
         if note.tags:
-            parts.append(f"tags: {', '.join(note.tags[:5])}")
+            parts.append(f"tags: {', '.join(sorted(note.tags)[:5])}")
         return " | ".join(parts)
 
     def _split_by_headings(self, text: str) -> list[tuple[str, str]]:

@@ -1,264 +1,192 @@
-"""Tests for photo capture handler and multimodal message types."""
+"""Photo adapter preservation, retention and dependency boundaries."""
 
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+import io
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
-from vaultmind.llm.client import ContentPart, LLMResponse, Message, MultimodalMessage
+from tests.test_capture import make_handlers, make_message, registered_callback, source_records
+from vaultmind.knowledge.intake import SourceIntake
+from vaultmind.llm.client import ContentPart, LLMResponse, MultimodalMessage
+from vaultmind.wiki.workspace import WikiError
 
-# ---------------------------------------------------------------------------
-# Helpers / fakes
-# ---------------------------------------------------------------------------
-
-
-class FakeImageConfig:
-    enabled: bool = True
-    vision_model: str = "gpt-4.1"
-    max_image_size_bytes: int = 10_000_000
-    save_originals: bool = True
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
-class FakeVaultConfig:
-    inbox_folder: str = "00-inbox"
+def photo_message(data: bytes = b"JPEG-original") -> object:
+    message = make_message()
+    message.photo = [SimpleNamespace(file_id="photo-id", file_size=len(data))]
+    message.bot.get_file = AsyncMock(return_value=SimpleNamespace(file_path="photo.jpg"))
 
+    async def download(path: str, destination: io.BytesIO) -> None:
+        assert isinstance(destination, io.BytesIO)
+        destination.write(data)
 
-class FakeLLMConfig:
-    fast_model: str = "gpt-4.1"
-
-
-class FakeSettings:
-    image: FakeImageConfig = FakeImageConfig()
-    vault: FakeVaultConfig = FakeVaultConfig()
-    llm: FakeLLMConfig = FakeLLMConfig()
-    telegram: Any = MagicMock(allowed_user_ids=[])
-
-
-class FakeLLMClient:
-    """Fake LLM client that records multimodal calls."""
-
-    def __init__(self, description: str = "A whiteboard with notes.") -> None:
-        self._description = description
-        self.calls: list[dict[str, Any]] = []
-
-    @property
-    def provider_name(self) -> str:
-        return "fake"
-
-    def complete(
-        self,
-        messages: list[Message],
-        model: str,
-        max_tokens: int = 4096,
-        system: str | None = None,
-    ) -> LLMResponse:
-        raise AssertionError("complete() should not be called for photo capture")
-
-    def complete_multimodal(
-        self,
-        messages: list[Message | MultimodalMessage],
-        model: str,
-        max_tokens: int = 4096,
-        system: str | None = None,
-    ) -> LLMResponse:
-        self.calls.append({"messages": messages, "model": model})
-        return LLMResponse(text=self._description, model=model, usage={})
-
-
-def _make_fake_store() -> MagicMock:
-    store = MagicMock()
-    store.index_single_note = MagicMock(return_value=None)
-    return store
-
-
-def _make_fake_parser(note: MagicMock | None = None) -> MagicMock:
-    parser = MagicMock()
-    parser.parse_file = MagicMock(return_value=note or MagicMock())
-    return parser
-
-
-def _make_ctx(
-    tmp_path: Path,
-    save_originals: bool = True,
-    vision_model: str = "gpt-4.1",
-    llm_description: str = "A whiteboard.",
-) -> Any:
-    """Build a minimal HandlerContext-like object for photo capture tests."""
-    from vaultmind.bot.handlers.context import HandlerContext
-
-    settings = FakeSettings()
-    settings.image = FakeImageConfig()
-    settings.image.save_originals = save_originals
-    settings.image.vision_model = vision_model
-
-    ctx = MagicMock(spec=HandlerContext)
-    ctx.settings = settings
-    ctx.vault_root = tmp_path
-    ctx.llm_client = FakeLLMClient(description=llm_description)
-    ctx.store = _make_fake_store()
-    ctx.parser = _make_fake_parser()
-    return ctx
-
-
-def _fake_photo(file_id: str = "FILE123", file_size: int = 1024) -> MagicMock:
-    photo = MagicMock()
-    photo.file_id = file_id
-    photo.file_size = file_size
-    return photo
-
-
-def _fake_message(tmp_path: Path, fake_image_bytes: bytes = b"JPEG") -> MagicMock:
-    """Build a fake aiogram Message with a bot that writes fake image bytes."""
-    message = MagicMock()
-    message.from_user = MagicMock(id=42)
-    message.photo = [_fake_photo()]
-
-    # Bot async fakes
-    bot = MagicMock()
-    fake_file = MagicMock()
-    fake_file.file_path = "photos/file.jpg"
-    bot.get_file = AsyncMock(return_value=fake_file)
-
-    async def _download_file(file_path: str, destination: str) -> None:
-        Path(destination).write_bytes(fake_image_bytes)
-
-    bot.download_file = _download_file
-    message.bot = bot
-    message.answer = AsyncMock()
+    message.bot.download_file = AsyncMock(side_effect=download)
     return message
 
 
-# ---------------------------------------------------------------------------
-# Tests — multimodal message types
-# ---------------------------------------------------------------------------
+def test_multimodal_structure_remains_immutable() -> None:
+    message = MultimodalMessage(
+        role="user",
+        parts=[
+            ContentPart(type="text", text="describe"),
+            ContentPart(type="image_url", image_url="data:image/jpeg;base64,eA=="),
+        ],
+    )
+    assert message.parts[0].text == "describe"
+    assert message.parts[1].image_url.endswith("eA==")
+    with pytest.raises((AttributeError, TypeError)):
+        message.role = "assistant"  # type: ignore[misc]
 
 
-class TestMultimodalMessageStructure:
-    def test_content_part_text(self) -> None:
-        part = ContentPart(type="text", text="hello")
-        assert part.type == "text"
-        assert part.text == "hello"
-        assert part.image_url == ""
+def test_original_precedes_vision_and_derivative_binds_exact_attachment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handlers = make_handlers(tmp_path)
+    ctx = handlers._ctx
+    ctx.llm_client.provider_name = "fake-provider"
+    message = photo_message()
 
-    def test_content_part_image(self) -> None:
-        uri = "data:image/jpeg;base64,abc=="
-        part = ContentPart(type="image_url", image_url=uri)
-        assert part.type == "image_url"
-        assert part.image_url == uri
+    def vision(*args: object) -> LLMResponse:
+        records = source_records(handlers)
+        assert len(records) == 1
+        assert records[0].content == b"JPEG-original"
+        return LLMResponse(text="  A whiteboard.\r\n", model="vision-model", usage={})
 
-    def test_multimodal_message_parts(self) -> None:
-        parts = [
-            ContentPart(type="text", text="Describe this"),
-            ContentPart(type="image_url", image_url="data:image/png;base64,xyz"),
-        ]
-        msg = MultimodalMessage(role="user", parts=parts)
-        assert msg.role == "user"
-        assert len(msg.parts) == 2
-        assert msg.parts[0].type == "text"
-        assert msg.parts[1].type == "image_url"
-
-    def test_multimodal_message_frozen(self) -> None:
-        msg = MultimodalMessage(role="user", parts=[])
-        with pytest.raises((AttributeError, TypeError)):
-            msg.role = "assistant"  # type: ignore[misc]
-
-
-# ---------------------------------------------------------------------------
-# Tests — photo note creation
-# ---------------------------------------------------------------------------
-
-
-class TestPhotoCreatesNoteWithEmbed:
-    def test_note_contains_image_embed(self, tmp_path: Path) -> None:
-        """Written note must contain ![[images/..."""
-        ctx = _make_ctx(tmp_path, save_originals=True)
-        message = _fake_message(tmp_path)
-
-        from vaultmind.bot.handlers.capture import handle_photo_capture
-
-        asyncio.run(handle_photo_capture(ctx, message))
-
-        inbox = tmp_path / "00-inbox"
-        notes = list(inbox.glob("*.md"))
-        assert len(notes) == 1, f"Expected 1 note, found {len(notes)}"
-        content = notes[0].read_text()
-        assert "![[images/" in content
-
-    def test_note_contains_ai_description(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, llm_description="A cat on a keyboard.")
-        message = _fake_message(tmp_path)
-
-        from vaultmind.bot.handlers.capture import handle_photo_capture
-
-        asyncio.run(handle_photo_capture(ctx, message))
-
-        inbox = tmp_path / "00-inbox"
-        notes = list(inbox.glob("*.md"))
-        content = notes[0].read_text()
-        assert "A cat on a keyboard." in content
-
-    def test_note_stamped_with_authority_5(self, tmp_path: Path) -> None:
-        """Photo capture is a manual/authored path — authority=5."""
-        ctx = _make_ctx(tmp_path)
-        message = _fake_message(tmp_path)
-
-        from vaultmind.bot.handlers.capture import handle_photo_capture
-
-        asyncio.run(handle_photo_capture(ctx, message))
-
-        inbox = tmp_path / "00-inbox"
-        content = next(inbox.glob("*.md")).read_text()
-        assert "authority: 5" in content
+    ctx.llm_client.complete_multimodal.side_effect = vision
+    callback = registered_callback(handlers, "handle_photo", monkeypatch)
+    asyncio.run(callback(message))
+    records = source_records(handlers)
+    original = next(record for record in records if record.provenance["kind"] == "attachment")
+    derived = next(record for record in records if record.provenance["role"] == "image-description")
+    assert derived.text == "  A whiteboard.\r\n"
+    assert original.source_id in {record.source_id for record in derived.dependencies}
+    assert derived.provenance["attachments"][0]["id"] == original.source_id
+    assert (ctx.settings.image.vision_model or ctx.settings.llm.fast_model) in derived.provenance[
+        "adapter"
+    ]
+    assert next((tmp_path / "00-inbox/images").glob("*.jpg")).read_bytes() == b"JPEG-original"
+    note = next((tmp_path / "00-inbox").glob("*.md")).read_text()
+    assert "![[images/" in note and "A whiteboard." in note
+    asyncio.run(callback(message))
+    ctx.llm_client.complete_multimodal.assert_called_once()
+    ctx.store.index_single_note.assert_called_once()
+    (tmp_path / original.path).write_bytes(b"tampered")
+    with SourceIntake(ctx.settings) as intake, pytest.raises(WikiError):
+        intake.read(derived.source_id)
 
 
-class TestPhotoSavesOriginal:
-    def test_image_file_written_when_save_originals_true(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, save_originals=True)
-        fake_bytes = b"\xff\xd8\xff" + b"X" * 100  # minimal JPEG header
-        message = _fake_message(tmp_path, fake_image_bytes=fake_bytes)
-
-        from vaultmind.bot.handlers.capture import handle_photo_capture
-
-        asyncio.run(handle_photo_capture(ctx, message))
-
-        images_dir = tmp_path / "00-inbox" / "images"
-        saved = list(images_dir.glob("*.jpg"))
-        assert len(saved) == 1
-        assert saved[0].read_bytes() == fake_bytes
-
-    def test_image_not_saved_when_save_originals_false(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path, save_originals=False)
-        message = _fake_message(tmp_path)
-
-        from vaultmind.bot.handlers.capture import handle_photo_capture
-
-        asyncio.run(handle_photo_capture(ctx, message))
-
-        images_dir = tmp_path / "00-inbox" / "images"
-        assert not images_dir.exists() or len(list(images_dir.glob("*.jpg"))) == 0
+def test_originals_disabled_never_puts_binary_on_disk(tmp_path: Path) -> None:
+    handlers = make_handlers(tmp_path)
+    ctx = handlers._ctx
+    ctx.settings.image.save_originals = False
+    ctx.llm_client.provider_name = "fake"
+    ctx.llm_client.complete_multimodal.return_value = LLMResponse(
+        text="Description", model="vision", usage={}
+    )
+    message = photo_message(b"UNIQUE-BINARY-ORIGINAL")
+    asyncio.run(handlers.handle_photo(message))
+    records = source_records(handlers)
+    assert len(records) == 2
+    assert all(record.provenance["original_retained"] is False for record in records)
+    assert not list(tmp_path.rglob("*.bin"))
+    assert not list(tmp_path.rglob("*.jpg"))
+    assert all(
+        b"UNIQUE-BINARY-ORIGINAL" not in path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    )
+    asyncio.run(handlers.handle_photo(message))
+    ctx.llm_client.complete_multimodal.assert_called_once()
 
 
-class TestPhotoLargeImageRejected:
-    def test_oversized_photo_rejected(self, tmp_path: Path) -> None:
-        ctx = _make_ctx(tmp_path)
-        ctx.settings.image.max_image_size_bytes = 100  # tiny limit
+def test_vision_failure_keeps_original_without_description_or_success(tmp_path: Path) -> None:
+    handlers = make_handlers(tmp_path)
+    handlers._ctx.llm_client.provider_name = "fake"
+    handlers._ctx.llm_client.complete_multimodal.side_effect = RuntimeError("private pixels")
+    message = photo_message()
+    asyncio.run(handlers.handle_photo(message))
+    records = source_records(handlers)
+    assert len(records) == 1 and records[0].content == b"JPEG-original"
+    answer = message.answer.call_args.args[0]
+    assert "binary original preserved" in answer and "Vision: failed" in answer
+    assert "private pixels" not in answer
+    assert not list((tmp_path / "00-inbox").glob("*.md"))
+    handlers._ctx.store.index_single_note.assert_not_called()
+    asyncio.run(handlers.handle_photo(message))
+    handlers._ctx.llm_client.complete_multimodal.assert_called_once()
 
-        message = _fake_message(tmp_path)
-        # Override file_size to exceed limit
-        message.photo = [_fake_photo(file_size=200)]
 
-        from vaultmind.bot.handlers.capture import handle_photo_capture
+@pytest.mark.parametrize("mode", ["auth", "retention", "reserved", "declared-size", "actual-size"])
+def test_photo_preconditions_prevent_provider_and_persistence(tmp_path: Path, mode: str) -> None:
+    handlers = make_handlers(tmp_path)
+    message = photo_message(b"12345")
+    if mode == "auth":
+        handlers._ctx.settings.telegram.allowed_user_ids = [999]
+    elif mode == "retention":
+        message.caption = "---\ndo_not_retain: true\n---\nprivate"
+    elif mode == "reserved":
+        handlers._ctx.settings.vault.inbox_folder = "_wiki"
+    else:
+        handlers._ctx.settings.image.max_image_size_bytes = 4
+        if mode == "actual-size":
+            message.photo[0].file_size = 1
+    asyncio.run(handlers.handle_photo(message))
+    handlers._ctx.llm_client.complete_multimodal.assert_not_called()
+    assert not (tmp_path / "_wiki").exists()
+    if mode != "actual-size":
+        message.bot.download_file.assert_not_called()
 
-        asyncio.run(handle_photo_capture(ctx, message))
 
-        # No note should be written
-        inbox = tmp_path / "00-inbox"
-        assert not inbox.exists() or len(list(inbox.glob("*.md"))) == 0
-        # Error message sent to user
-        message.answer.assert_called_once()
-        call_args = str(message.answer.call_args)
-        assert "too large" in call_args.lower() or "max" in call_args.lower()
+@pytest.mark.parametrize("save_originals", [True, False])
+def test_changed_caption_is_a_new_photo_revision_with_stable_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, save_originals: bool
+) -> None:
+    handlers = make_handlers(tmp_path)
+    ctx = handlers._ctx
+    ctx.settings.image.save_originals = save_originals
+    ctx.llm_client.provider_name = "scripted"
+    ctx.llm_client.complete_multimodal.return_value = LLMResponse(
+        text="A whiteboard.", model="vision", usage={}
+    )
+    message = photo_message()
+    message.caption = "First caption"
+    callback = registered_callback(handlers, "handle_photo", monkeypatch)
+    asyncio.run(callback(message))
+    first = next(
+        record
+        for record in source_records(handlers)
+        if record.provenance["role"] == "image-description"
+    )
+    before = {path: path.read_bytes() for path in (tmp_path / "_wiki/sources").iterdir()}
+
+    message.caption = "Changed caption"
+    asyncio.run(callback(message))
+    second = next(
+        record
+        for record in source_records(handlers)
+        if record.provenance["role"] == "image-description" and record.source_id != first.source_id
+    )
+    assert all(path.read_bytes() == raw for path, raw in before.items())
+    assert second.provenance["event_id"] != first.provenance["event_id"]
+    if save_originals:
+        original = next(
+            record for record in second.dependencies if record.content == b"JPEG-original"
+        )
+        assert original.dependencies[0].text == "Changed caption"
+    else:
+        assert second.dependencies[0].text == "Changed caption"
+        assert not list(tmp_path.rglob("*.bin"))
+        assert not list(tmp_path.rglob("*.jpg"))
+    completed = {path: path.read_bytes() for path in (tmp_path / "_wiki/sources").iterdir()}
+    asyncio.run(callback(message))
+    assert {path: path.read_bytes() for path in (tmp_path / "_wiki/sources").iterdir()} == completed
+    assert ctx.llm_client.complete_multimodal.call_count == 2
+    assert ctx.store.index_single_note.call_count == 2

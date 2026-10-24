@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 
 import frontmatter
 
+from vaultmind.vault.security import validate_ordinary_write_path
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -69,6 +71,13 @@ def synthesize_cluster(
     """
     from vaultmind.llm.client import Message
 
+    vault_root = vault_root.resolve()
+    inbox_path = validate_ordinary_write_path(inbox_folder, vault_root)
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    slug = cluster.top_entity.lower().replace(" ", "-")[:50]
+    filename = f"synthesis-{slug}-{today}.md"
+    output_path = validate_ordinary_write_path(str(inbox_path / filename), vault_root)
+
     # Read source notes
     source_contents: list[str] = []
     for note_path in cluster.note_paths:
@@ -85,7 +94,6 @@ def synthesize_cluster(
             error="No source notes found on disk",
         )
 
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
     prompt = SYNTHESIS_PROMPT.format(
         source_notes_content="\n\n---\n\n".join(source_contents),
         entity_list=cluster.top_entity,
@@ -112,18 +120,14 @@ def synthesize_cluster(
         )
 
     # Write to inbox
-    inbox_path = vault_root / inbox_folder
+    inbox_path = validate_ordinary_write_path(str(inbox_path), vault_root)
     inbox_path.mkdir(parents=True, exist_ok=True)
-
-    slug = cluster.top_entity.lower().replace(" ", "-")[:50]
-    filename = f"synthesis-{slug}-{today}.md"
-    output_path = inbox_path / filename
 
     # Avoid overwriting
     counter = 1
     while output_path.exists():
         filename = f"synthesis-{slug}-{today}-{counter}.md"
-        output_path = inbox_path / filename
+        output_path = validate_ordinary_write_path(str(inbox_path / filename), vault_root)
         counter += 1
 
     output_path.write_text(content, encoding="utf-8")

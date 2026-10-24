@@ -82,6 +82,7 @@ _STOPWORDS = frozenset(
         "your",
     )
 )
+_STRUCTURAL_HEADINGS = frozenset({"Current understanding", "Conflicting information", "Resolution"})
 
 
 def _terms(text: str) -> set[str]:
@@ -112,8 +113,20 @@ def discover_pages(
     ranked: list[tuple[int, int, str, dict[str, Any]]] = []
     for payload in payloads:
         title, sections, _ = _page(payload)
-        heading_terms = _terms("\n".join([title, *(heading for heading, _ in sections)]))
-        body_terms = _terms("".join(text for _, text in sections))
+        heading_terms = _terms(
+            "\n".join(
+                [
+                    title,
+                    *(heading for heading, _ in sections if heading not in _STRUCTURAL_HEADINGS),
+                ]
+            )
+        )
+        body_terms = _terms(
+            "".join(
+                text.partition("\n")[2] if heading in _STRUCTURAL_HEADINGS else text
+                for heading, text in sections
+            )
+        )
         heading_matches = len(question_terms & heading_terms)
         body_matches = len(question_terms & body_terms)
         if heading_matches or body_matches:

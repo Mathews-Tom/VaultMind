@@ -215,6 +215,7 @@ def fixture_config(home: Path, name: str, hybrid: bool) -> Any:
     config = root / "config.toml"
     config.write_text(
         f'[vault]\npath = "{root / "vault"}"\n'
+        'excluded_folders = [".obsidian", ".git", ".trash", "wiki", "_wiki"]\n'
         f'[chroma]\npersist_dir = "{root / "data/chroma"}"\n'
         f'[graph]\npersist_path = "{root / "data/graph.json"}"\n'
         f"[search]\nhybrid_enabled = {str(hybrid).lower()}\nmax_results = 10\npage_size = 10\n"
@@ -240,6 +241,7 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     from vaultmind.indexer.bm25 import BM25Index
     from vaultmind.indexer.ranking import retrieval_confidence
     from vaultmind.indexer.store import VaultStore
+    from vaultmind.knowledge.sources import search_sources
     from vaultmind.memory.gaps import GapStore
     from vaultmind.vault.parser import VaultParser
 
@@ -262,6 +264,9 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     store.index_notes(notes, parser)
     exact = parser.chunk_note(parser.parse_file(settings.vault.path / ALPHA))[0].content
     bm25.upsert("lexical::0", "lexical.md", "Lexical", "kestrelquartz field memo")
+    (settings.vault.path / "lexical.md").write_text(
+        "---\ntitle: Lexical\n---\n\nkestrelquartz field memo\n", encoding="utf-8"
+    )
     corpus_hashes["lexical"] = digest(b"lexical::0 lexical.md Lexical kestrelquartz field memo")
     corpus_hashes["exact-query"] = digest(exact.encode())
     gaps: list[Any] = []
@@ -299,11 +304,10 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
         )
         report = run_bench(
             [question],
-            ctx.store,
+            ctx.settings,
             k=ctx.settings.search.max_results,
-            hybrid_enabled=ctx.settings.search.hybrid_enabled,
+            store=ctx.store,
             score_floor=ctx.settings.bench.score_floor,
-            ranking_config=ctx.settings.ranking,
         )
         outcome = report.results[0]
         confidence = retrieval_confidence(hits, ctx.settings.bench.score_floor)
@@ -332,11 +336,10 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
             label + ".same-hits",
             hits,
             run_query(
-                ctx.store,
+                ctx.settings,
                 query,
                 ctx.settings.search.max_results,
-                ctx.settings.search.hybrid_enabled,
-                ctx.settings.ranking,
+                store=ctx.store,
             ),
         )
         if expected == "unknown":
@@ -347,11 +350,17 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
         for hybrid in (False, True):
             mode = "hybrid" if hybrid else "vector"
             cfg = fixture_config(home, mode, hybrid)
+            cfg = cfg.model_copy(update={"vault": settings.vault})
             ctx = context(cfg, store)
             hits = await observe(mode + ".self-match", ctx, exact, "strong")
             alpha = next(h for h in hits if h["metadata"]["note_path"] == ALPHA)
             check(mode + ".raw-self-distance", True, abs(alpha["distance"]) < 0.01)
-            raw = run_query(store, exact, 10, hybrid, RankingConfig(enabled=False))
+            raw = run_query(
+                cfg.model_copy(update={"ranking": RankingConfig(enabled=False)}),
+                exact,
+                10,
+                store=store,
+            )
             check(
                 mode + ".authority-reorder",
                 [ALPHA, BETA],
@@ -367,7 +376,7 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
                 str(retrieval_confidence(raw, FLOOR)),
                 str(retrieval_confidence(hits, FLOOR)),
             )
-            await observe(mode + ".lexical", ctx, "kestrelquartz", "unknown" if hybrid else "weak")
+            await observe(mode + ".lexical", ctx, "kestrelquartz", "unknown")
             empty_cfg = fixture_config(home, mode + "-empty", hybrid)
             empty_bm25 = BM25Index(Path(empty_cfg.search.bm25_db_path))
             try:
@@ -377,11 +386,17 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
                 empty_bm25.close()
 
         cfg = fixture_config(home, "boundary", True)
+        boundary_parser = VaultParser(cfg.vault)
+        boundary_chunks = {}
+        for i in range(2):
+            path = cfg.vault.path / f"{i}.md"
+            path.write_text("boundary input\n", encoding="utf-8")
+            boundary_chunks[i] = boundary_parser.chunk_note(boundary_parser.parse_file(path))[0]
         for name, distances, expected in BOUNDARIES + [("missing", [None], "unknown")]:
             hits = [
                 {
-                    "chunk_id": f"{i}::0",
-                    "content": "boundary input",
+                    "chunk_id": boundary_chunks[i].chunk_id,
+                    "content": boundary_chunks[i].content,
                     "metadata": {"note_path": f"{i}.md"},
                     "rrf_score": 0.02,
                     **({"distance": distance} if name != "missing" else {}),
@@ -398,6 +413,60 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
                 ["unanswered_question"] if expected == "weak" else [],
                 [str(g.kind) for g in new],
             )
+        # A larger, truly closer forbidden population must not consume top-k.
+        for i in range(20):
+            private_path = settings.vault.path / "private" / f"closer-{i:02d}.md"
+            private_path.parent.mkdir(exist_ok=True)
+            private_path.write_text(
+                f"---\ntitle: Harbor\ntype: project\nauthority: 5\n---\n\n{NOTES[BETA][1]}\n",
+                encoding="utf-8",
+            )
+            store.index_single_note(parser.parse_file(private_path), parser)
+        closer_query = parser.chunk_note(parser.parse_file(settings.vault.path / BETA))[0].content
+        unscoped = store.search(closer_query, n_results=10)
+        check(
+            "source.scope.has-real-closer-forbidden-population",
+            True,
+            len(unscoped) == 10 and all(hit["metadata"]["note_path"] != ALPHA for hit in unscoped),
+        )
+        scoped = search_sources(
+            settings,
+            closer_query,
+            store=store,
+            n_results=1,
+            allows_path=lambda path: path == ALPHA,
+        )
+        check("source.scope.filters-before-topk", [ALPHA], [hit["path"] for hit in scoped])
+        check(
+            "source.scope.bench-same-boundary",
+            scoped,
+            run_query(
+                settings, closer_query, 1, store=store, allows_path=lambda path: path == ALPHA
+            ),
+        )
+        check(
+            "source.scope.explicitly-unapproved",
+            [("source-only", False)],
+            [(hit["status"], hit["approved"]) for hit in scoped],
+        )
+        current_bytes = (
+            b"---\ntitle: Harbor\n---\n\nnewcurrenttoken replaces the old indexed excerpt\n"
+        )
+        (settings.vault.path / ALPHA).write_bytes(current_bytes)
+        current = search_sources(
+            settings,
+            "newcurrenttoken",
+            store=store,
+            n_results=1,
+            allows_path=lambda path: path == ALPHA,
+        )[0]
+        check("source.current-byte-digest", digest(current_bytes), current["current_digest"])
+        check(
+            "source.current-body-not-stale",
+            True,
+            "newcurrenttoken" in current["content"] and TEXT not in current["content"],
+        )
+        check("source.stale-vector-confidence-unknown", None, current["distance"])
         return {
             "corpus_sha256": corpus_hashes,
             "configuration_sha256": {
@@ -728,6 +797,7 @@ if embedding_fixture.exists():
             emit(kind="producer-entry", module=module, method=method)
 
     sys.setprofile(observe)
+    threading.setprofile(observe)
 
 code = 0
 try:
@@ -942,7 +1012,8 @@ def mcp_build_fixture(root: Path, scoped: bool, consumer: bool = False) -> dict[
 
 def mcp_write_config(root: Path, override: bool) -> Path:
     sections = [
-        f"[vault]\npath = {json.dumps(str(root / 'vault'))}\n",
+        f"[vault]\npath = {json.dumps(str(root / 'vault'))}\n"
+        'excluded_folders = [".obsidian", ".git", ".trash", "wiki", "_wiki"]\n',
         f"[chroma]\npersist_dir = {json.dumps(str(root / 'data' / 'chroma'))}\n",
         f"[graph]\npersist_path = {json.dumps(str(root / 'data' / 'graph.json'))}\n",
         "[embedding]\ncache_enabled = false\n",
@@ -1115,6 +1186,8 @@ async def mcp_stdio_session(
 
 def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, Any], Path]:
     """Seed real Chroma with synthetic provenance, not replacement tool responses."""
+    import frontmatter
+
     from vaultmind.config import ChromaConfig
     from vaultmind.indexer.store import VaultStore
 
@@ -1125,11 +1198,18 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
     private = [f"03-private/closer-{i:02d}.md" for i in range(16)]
     small_index = name == "root-scoped-small"
     contents: dict[str, str] = {
-        source: "# Source\n\n" + TEXT * 4 + "\n",
-        peer: "# Allowed Peer\n\n" + TEXT * 4 + "\n",
-        suggestion: "# Allowed Suggestion\n\nA neighboring subject.\n",
+        source: "---\ntitle: Source\ntype: project\n---\n\n# Source\n\n" + TEXT * 4 + "\n",
+        peer: "---\ntitle: Allowed Peer\ntype: permanent\n---\n\n# Allowed Peer\n\n"
+        + TEXT * 4
+        + "\n",
+        suggestion: (
+            "---\ntitle: Allowed Suggestion\ntype: permanent\n---\n\nA neighboring subject.\n"
+        ),
         **{
-            path: f"# ROOT-PRIVATE-{i:02d}\n\nROOT-PRIVATE-BODY-{i:02d}\n"
+            path: (
+                f"---\ntitle: ROOT-PRIVATE-{i:02d}\ntype: permanent\n---\n\n"
+                f"ROOT-PRIVATE-BODY-{i:02d}\n"
+            )
             for i, path in enumerate(private)
         },
     }
@@ -1228,10 +1308,15 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
     scopes = ["02-projects"]
     if name in ("root-capture-size", "root-capture-symlink"):
         scopes.append("00-inbox")
+    if name == "root-capture-size":
+        # Explicit synthetic permission reaches serialized-size enforcement;
+        # the planner/default-scope cases still deny preservation first.
+        scopes.append("_wiki")
     maximum = 256 if name == "root-capture-size" else 50000
     profile = "full" if name == "root-full" else "root-scope"
     config.write_text(
         f"[vault]\npath = {json.dumps(str(vault))}\n"
+        'excluded_folders = [".obsidian", ".git", ".trash", "wiki", "_wiki"]\n'
         f"[chroma]\npersist_dir = {json.dumps(str(root / 'data' / 'chroma'))}\n"
         f"[graph]\npersist_path = {json.dumps(str(root / 'data' / 'graph.json'))}\n"
         "[embedding]\ncache_enabled = false\ndimensions = 2\n"
@@ -1259,34 +1344,75 @@ def mcp_root_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, A
         )
 
     full = profile == "full"
-    visible = [r for r in rows if r["valid"] and (full or r["scoped"])]
+    visible_paths = {path for path in contents if full or path.startswith("02-projects/")}
 
-    def search_expected(selected: list[dict[str, Any]]) -> dict[str, Any]:
+    def search_expected(limit: int, note_type: str | None = None) -> dict[str, Any]:
+        # Independent current-file oracle: no shared-search call, no synthetic
+        # current bytes per query and no trust in the adversarial indexed body.
+        posts = {path: frontmatter.loads(contents[path]) for path in visible_paths}
+        posts = {
+            path: post
+            for path, post in posts.items()
+            if note_type is None or post.metadata["type"] == note_type
+        }
+        indexed_paths = list(
+            dict.fromkeys(
+                row["metadata"].get("note_path")
+                for row in sorted(rows, key=lambda row: row["distance"])
+                if row["metadata"].get("note_path") in posts
+            )
+        )
+        lexical_paths = sorted(path for path in posts if path in (peer, source))
+        scores: dict[str, float] = {}
+        for ranking in (indexed_paths, lexical_paths):
+            for rank, path in enumerate(ranking, 1):
+                scores[path] = scores.get(path, 0.0) + 1.0 / (60 + rank)
+        selected = sorted(scores, key=lambda path: (-scores[path], path))[:limit]
+        results = [
+            {
+                "chunk_id": f"source:{path}",
+                "path": path,
+                "source_kind": "ordinary",
+                "status": "source-only",
+                "approved": False,
+                "current_digest": digest(contents[path].encode()),
+                "content": posts[path].content,
+                "distance": None,
+                "metadata": {
+                    "note_path": path,
+                    "note_title": posts[path].metadata["title"],
+                    "note_type": posts[path].metadata["type"],
+                    "authority": 0,
+                },
+                "rrf_score": scores[path],
+                "authority_score": scores[path],
+            }
+            for path in selected
+        ]
         return {
-            "results": [
-                {k: r[k] for k in ("chunk_id", "content", "metadata", "distance")} for r in selected
-            ],
-            "count": len(selected),
+            "status": "source-only",
+            "approved": False,
+            "results": results,
+            "count": len(results),
         }
 
     if name in ("root-scoped", "root-scoped-small", "root-full"):
-        call("vault_search", {"query": TEXT, "n_results": 100}, search_expected(visible))
-        closest = min(visible, key=lambda r: r["distance"])
-        call("vault_search", {"query": TEXT, "n_results": 1}, search_expected([closest]))
+        call("vault_search", {"query": TEXT, "n_results": 100}, search_expected(100))
+        call("vault_search", {"query": TEXT, "n_results": 1}, search_expected(1))
         call(
             "vault_search",
             {"query": TEXT, "note_type": "project", "n_results": 1},
-            search_expected([next(r for r in rows if r["chunk_id"] == "allowed-source")]),
+            search_expected(1, "project"),
         )
         call(
             "vault_search",
             {"query": TEXT, "note_type": "project", "n_results": 100},
-            search_expected([r for r in visible if r["metadata"]["note_type"] == "project"]),
+            search_expected(100, "project"),
         )
         call(
             "vault_search",
             {"query": TEXT, "note_type": "literature", "n_results": 100},
-            search_expected([]),
+            search_expected(100, "literature"),
         )
         allowed_notes = [source, peer, suggestion, "02-projects/allowed-alias.md"]
         listed = sorted(
@@ -1518,6 +1644,9 @@ print(json.dumps(rows))
 
 def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str, Any], Path]:
     """Persist adversarial provenance and substantive real optional producer data."""
+    from collections import Counter
+
+    import frontmatter
     import networkx as nx
 
     from vaultmind.config import GraphConfig
@@ -1785,13 +1914,14 @@ def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str
         if not any(part.startswith(".") for part in Path(p).parts)
         and (full or p.startswith("02-projects/"))
     )
+    note_types = [frontmatter.load(vault / path).get("type") for path in canonical_notes]
     call(
         "vault_stats",
         {},
         {
             "total_notes": len(canonical_notes),
-            "by_type": {"project": 1},
-            "by_folder": {"02-projects": 4, "03-private": 16},
+            "by_type": dict(Counter(kind for kind in note_types if kind)),
+            "by_folder": dict(Counter(Path(path).parts[0] for path in canonical_notes)),
             "graph": {"entities": len(nodes), "edges": len(edges)},
         },
     )
@@ -1908,7 +2038,8 @@ def mcp_derived_fixture(root: Path, name: str) -> tuple[dict[str, Any], dict[str
     if name == "derived-writes":
         config.write_text(
             config.read_text(encoding="utf-8").replace(
-                'folder_scope = ["02-projects"]', 'folder_scope = ["02-projects", "00-inbox"]'
+                'folder_scope = ["02-projects"]',
+                'folder_scope = ["02-projects", "00-inbox", "_wiki"]',
             ),
             encoding="utf-8",
         )
@@ -2170,6 +2301,15 @@ def mcp_scenario(name: str, root: Path) -> dict[str, Any]:
             ),
             call("follow_links", {"path": inbox}, follow(inbox, [("Hub Note", hub)], [])),
         ]
+        for tool in ("capture", "capture_note"):
+            calls.append(
+                call(
+                    tool,
+                    {"content": "PLANNER-CAPTURE-BODY-NOT-FOR-AUDIT"},
+                    {"error": True},
+                    "DENIED",
+                )
+            )
         # Resolved-forbidden or private targets are denied by the policy; unresolvable
         # (loop) or outside-resolving folders are rejected by the path validator.
         for folder in (
@@ -2440,6 +2580,11 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         spec = mcp_scenario(name, root)
         fixture = mcp_build_fixture(root, spec["scoped"], consumer=True)
         config = mcp_write_config(root, spec["override"])
+        capture_before = {
+            path: digest((fixture["vault"] / path).read_bytes())
+            for path in MCP_NOTES
+            if not path.startswith("03-private/")
+        }
     calls = spec["calls"]
     try:
         run = await mcp_stdio_session(
@@ -2450,6 +2595,21 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         )
     finally:
         mcp_restore_permissions(fixture)
+    if name == "planner-scoped":
+        check(name + ".capture-no-source-storage", False, (fixture["vault"] / "_wiki").exists())
+        check(
+            name + ".capture-no-projection-or-note-changes",
+            capture_before,
+            {path: digest((fixture["vault"] / path).read_bytes()) for path in capture_before},
+        )
+        check(
+            name + ".capture-no-new-inbox-notes",
+            sorted(path for path in MCP_NOTES if path.startswith("00-inbox/")),
+            sorted(
+                path.relative_to(fixture["vault"]).as_posix()
+                for path in (fixture["vault"] / "00-inbox").rglob("*.md")
+            ),
+        )
     if root_notes:
         after = mcp_derived_snapshot(fixture) if derived else mcp_root_snapshot(fixture)
         if name == "derived-writes":
@@ -2472,16 +2632,35 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
                     call_spec["arguments"]["content"] in content,
                 )
                 new_paths.append(path)
+                if call_spec["tool"] in ("capture", "capture_note"):
+                    original = payload["original"]
+                    source_path = fixture["vault"] / original["path"]
+                    check(
+                        name + "." + call_spec["tool"] + ".exact-source-bytes",
+                        True,
+                        call_spec["arguments"]["content"].encode() == source_path.read_bytes(),
+                    )
+                    check(
+                        name + "." + call_spec["tool"] + ".source-identity",
+                        [True, False, True, digest(source_path.read_bytes())],
+                        [
+                            payload["preserved"],
+                            payload["approved"],
+                            original["indexed"],
+                            original["sha256"],
+                        ],
+                    )
+                    projection = destination.read_text(encoding="utf-8")
+                    check(
+                        name + "." + call_spec["tool"] + ".projection-links-source",
+                        True,
+                        payload["source_id"] in projection,
+                    )
             check(name + ".three-distinct-writes", 3, len(set(new_paths)))
             new_records = [r for r in after["index"] if r[0] not in {r[0] for r in before["index"]}]
             check(
                 name + ".writes-real-indexed-paths",
-                sorted(
-                    [
-                        "02-projects/bounded-write.md",
-                        next(p for p in new_paths if "structured" in p),
-                    ]
-                ),
+                sorted(new_paths),
                 sorted({r[2]["note_path"] for r in new_records}),
             )
             after["index"] = [r for r in after["index"] if r not in new_records]
@@ -2489,6 +2668,48 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
                 after["vault"].pop(path)
                 after["note_mtimes"].pop(path)
             after["vault"].pop("00-inbox", None)
+            expected_control = {"_wiki", "_wiki/sources", "_wiki/wiki.lock"}
+            for call_spec, result in zip(calls, run["results"], strict=True):
+                payload = json.loads(result.content[0].text)
+                if "original" not in payload:
+                    continue
+                source_id = payload["source_id"]
+                expected_control.update(
+                    f"_wiki/sources/{source_id}{suffix}"
+                    for suffix in (".md", ".json", ".intake.json", ".processing.json")
+                )
+                manifest = json.loads(
+                    (fixture["vault"] / "_wiki/sources" / f"{source_id}.intake.json").read_text()
+                )
+                check(name + ".capture-origin", "mcp", manifest["origin"])
+                check(
+                    name + ".capture-adapter",
+                    f"mcp:{spec['profile']}:{call_spec['tool']}",
+                    manifest["adapter"],
+                )
+                metadata = json.loads(
+                    (fixture["vault"] / "_wiki/sources" / f"{source_id}.json").read_text()
+                )
+                check(
+                    name + ".capture-manifest-hashbound",
+                    "vaultmind-intake:v1:"
+                    + digest(
+                        (
+                            fixture["vault"] / "_wiki/sources" / f"{source_id}.intake.json"
+                        ).read_bytes()
+                    ),
+                    metadata["origin"],
+                )
+                check(name + ".capture-original-retained", True, manifest["original_retained"])
+            actual_control = {path for path in after["vault"] if path.startswith("_wiki")}
+            check(
+                name + ".only-declared-source-control-artifacts",
+                sorted(expected_control),
+                sorted(actual_control),
+            )
+            for path in expected_control:
+                after["vault"].pop(path, None)
+                after["note_mtimes"].pop(path, None)
         check(
             name + ".read-only-and-denied-mutations-state-unchanged",
             before,
@@ -2659,21 +2880,73 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
             expected_payload = expected_call["expected"]
             if expected_payload.get("path") == "<generated>":
                 path = payload.get("path", "")
-                pattern = (
-                    r"00-inbox/\d{8}-\d{6}-bounded-capture\.md"
-                    if tool == "capture"
-                    else r"02-projects/bounded-structured-\d{8}-\d{6}\.md"
-                )
+                source_id = payload.get("source_id")
+                folder = "00-inbox" if tool == "capture" else "02-projects"
                 check(
                     label + ".generated-path-bounded",
                     True,
-                    isinstance(path, str) and re.fullmatch(pattern, path) is not None,
+                    isinstance(source_id, str)
+                    and path == f"{folder}/{source_id}.md"
+                    and re.fullmatch(r"[A-Za-z0-9_-]+", source_id) is not None,
                 )
-                expected_payload = {**expected_payload, "path": path}
+                original = payload["original"]
+                check(
+                    label + ".capture-dispositions",
+                    [
+                        "ok",
+                        False,
+                        True,
+                        source_id,
+                        f"_wiki/sources/{source_id}.md",
+                        "added",
+                        True,
+                        True,
+                        False,
+                    ],
+                    [
+                        payload["status"],
+                        payload["approved"],
+                        payload["preserved"],
+                        original["id"],
+                        original["path"],
+                        original["status"],
+                        original["preserved"],
+                        original["indexed"],
+                        original["approved"],
+                    ],
+                )
+                for stage in ("projection", "index"):
+                    check(
+                        label + "." + stage + ".succeeded",
+                        {"stage": stage, "status": "succeeded", "error": None},
+                        payload[stage],
+                    )
+                expected_payload = {
+                    "status": "ok",
+                    "path": path,
+                    "title": arguments["title"],
+                    "source_id": source_id,
+                    "approved": False,
+                    "preserved": True,
+                    "original": original,
+                    "projection": payload["projection"],
+                    "index": payload["index"],
+                }
             check(label + ".payload", mcp_normalize(tool, expected_payload), actual)
             if tool == "vault_search":
-                distances = [hit["distance"] for hit in payload["results"]]
-                check(label + ".raw-distance-order", sorted(distances), distances)
+                check(
+                    label + ".source-only-current-evidence",
+                    True,
+                    payload["status"] == "source-only"
+                    and payload["approved"] is False
+                    and all(
+                        hit["status"] == "source-only"
+                        and hit["approved"] is False
+                        and hit["distance"] is None
+                        and "-CONTENT" not in hit["content"]
+                        for hit in payload["results"]
+                    ),
+                )
         if root_notes and tool in ("vault_search", "find_duplicates"):
             expected = expected_call["expected"]
             # Empty filtered results legitimately avoid embedding; another tool's
@@ -2723,16 +2996,11 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         options = mcp_audit_options(c)
         result_seen = audit[position]["result"]
         expected_result = result_seen if result_seen in options else options[0]
-        expected_reason = (
-            observed_calls[position]["actual"].get("error", "")
-            if expected_result in ("DENIED", "ERROR")
-            else ""
-        )
-        expected_rows.append((spec["profile"], c["tool"], expected_result, expected_reason))
+        expected_rows.append((spec["profile"], c["tool"], expected_result))
     check(
         prefix + "audit.rows",
         expected_rows,
-        [(row["profile"], row["tool"], row["result"], row.get("reason", "")) for row in audit],
+        [(row["profile"], row["tool"], row["result"]) for row in audit],
     )
     # Independent per-row audit oracle: each row is bound to ITS call's arguments (never the
     # union of other calls') and scanned for unknown physical targets and path residue.
@@ -2742,9 +3010,17 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         reason = row.get("reason", "")
         check(
             label + ".audit.params-are-this-call",
-            {key: str(value)[:200] for key, value in arguments.items()},
+            {}
+            if c["tool"] in ("capture", "capture_note", "vault_write")
+            else {key: str(value)[:200] for key, value in arguments.items()},
             row["params"],
         )
+        if c["tool"] in ("capture", "capture_note", "vault_write"):
+            check(
+                label + ".audit.body-absent",
+                False,
+                arguments["content"] in json.dumps(row),
+            )
         masked_for = {
             **arguments,
             **{f"{key}@audit": str(value)[:200] for key, value in arguments.items()},
@@ -2904,7 +3180,7 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
 
 def mcp_direct_dispatcher(root: Path, check: Any) -> None:
     """Explicit full/planner enforcers keep exact dispatcher-level semantics."""
-    from vaultmind.config import VaultConfig
+    from vaultmind.config import Settings, VaultConfig
     from vaultmind.mcp.auth import ProfileEnforcer, ProfileError
     from vaultmind.mcp.profiles import load_profile
     from vaultmind.mcp.server import _dispatch_tool
@@ -2912,12 +3188,15 @@ def mcp_direct_dispatcher(root: Path, check: Any) -> None:
 
     vault = mcp_build_fixture(root, scoped=False)["vault"]
     parser = VaultParser(VaultConfig(path=vault))
+    settings = Settings(vault={"path": vault, "excluded_folders": ["wiki", "_wiki"]})
     hub = "02-projects/hub.md"
     secret = "03-private/secret.md"
 
     def dispatch(tool: str, args: dict[str, Any], **context: Any) -> Any:
         try:
-            return _dispatch_tool(tool, args, vault, object(), object(), parser, **context)
+            return _dispatch_tool(
+                tool, args, vault, object(), object(), parser, settings=settings, **context
+            )
         except ProfileError as exc:
             return {"error": str(exc)}
 
@@ -2963,6 +3242,30 @@ def mcp_direct_dispatcher(root: Path, check: Any) -> None:
         ),
         mcp_normalize("follow_links", dispatch("follow_links", {"path": hub}, enforcer=planner)),
     )
+    before_capture = {
+        str(path.relative_to(vault)): digest(path.read_bytes())
+        for path in vault.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+    for tool in ("capture", "capture_note"):
+        denied_capture = dispatch(
+            tool, {"content": "PLANNER-CAPTURE-PRIVATE-BODY"}, enforcer=planner
+        )
+        check("direct.planner." + tool + ".denied", True, set(denied_capture) == {"error"})
+        check(
+            "direct.planner." + tool + ".body-redacted",
+            False,
+            "PLANNER-CAPTURE-PRIVATE-BODY" in json.dumps(denied_capture),
+        )
+    check(
+        "direct.planner.capture-no-source-or-projection",
+        before_capture,
+        {
+            str(path.relative_to(vault)): digest(path.read_bytes())
+            for path in vault.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        },
+    )
 
 
 async def mcp_factory_none_handlers(
@@ -2977,7 +3280,7 @@ async def mcp_factory_none_handlers(
     """
     from mcp.types import CallToolRequest, CallToolRequestParams
 
-    from vaultmind.config import VaultConfig
+    from vaultmind.config import Settings, VaultConfig
     from vaultmind.mcp.auth import ProfileEnforcer
     from vaultmind.mcp.profiles import load_profile
     from vaultmind.mcp.server import create_mcp_server
@@ -2985,9 +3288,17 @@ async def mcp_factory_none_handlers(
 
     vault = mcp_build_fixture(root, scoped=False)["vault"]
     parser = VaultParser(VaultConfig(path=vault))
-    none_server = create_mcp_server(vault, object(), object(), parser, enforcer=None)
+    settings = Settings(vault={"path": vault, "excluded_folders": ["wiki", "_wiki"]})
+    none_server = create_mcp_server(
+        vault, object(), object(), parser, settings=settings, enforcer=None
+    )
     full_server = create_mcp_server(
-        vault, object(), object(), parser, enforcer=ProfileEnforcer(load_profile("full"), vault)
+        vault,
+        object(),
+        object(),
+        parser,
+        settings=settings,
+        enforcer=ProfileEnforcer(load_profile("full"), vault),
     )
 
     async def invoke(server: Any, tool: str, arguments: dict[str, Any]) -> tuple[Any, Any, str]:
@@ -3093,7 +3404,35 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     home = home.resolve()
     check = make_checker(checks)
     scenarios: dict[str, Any] = {}
+    configuration_refusals: dict[str, Any] = {}
     for name in (*MCP_SCENARIOS, *MCP_ROOT_SCENARIOS, *MCP_DERIVED_SCENARIOS):
+        if name == "root-capture-symlink":
+            # Configured ordinary output aliases now fail before SDK startup.
+            # Exercise the real CLI refusal rather than treating a closed SDK
+            # connection as either successful capture or a transport defect.
+            from click.testing import CliRunner
+
+            from vaultmind.cli import cli
+
+            root = home / name
+            spec, fixture, config = mcp_root_fixture(root, name)
+            before = mcp_root_snapshot(fixture)
+            result = CliRunner().invoke(
+                cli, ["-c", str(config), "mcp-serve", "--profile", spec["profile"]]
+            )
+            check(name + ".configuration-refused", True, result.exit_code != 0)
+            check(name + ".no-side-effects", before, mcp_root_snapshot(fixture))
+            diagnostic = result.output + str(result.exception)
+            check(name + ".refused-destination-identified", True, "00-inbox" in diagnostic)
+            check(
+                name + ".unknown-target-not-disclosed", False, str(root / "outside") in diagnostic
+            )
+            configuration_refusals[name] = {
+                "exit_code": result.exit_code,
+                "diagnostic": diagnostic,
+                "unchanged": True,
+            }
+            continue
         scenarios[name] = await run_mcp_scenario(name, home / name, check)
     check(
         "root-scoped.forbidden-chunk-population-does-not-change-authorized-results",
@@ -3190,6 +3529,7 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     origins = {s["import_origin"] for s in scenarios.values()}
     check("origin.consistent-across-launches", 1, len(origins))
     return {
+        "configuration_refusals": configuration_refusals,
         "mcp_sdk": importlib.metadata.version("mcp"),
         "import_origin": origins.pop(),
         "factory_none_handlers": factory,
@@ -3465,6 +3805,7 @@ def approval_world(
     config.write_text(
         'anthropic_api_key = "OFFLINE-SENTINEL-NOT-CREDENTIAL"\n'
         f'[vault]\npath = "{vault}"\n'
+        'excluded_folders = [".obsidian", ".git", ".trash", "wiki", "_wiki"]\n'
         f'[autonomy]\nforce_block = {str(force_block).lower()}\ndb_path = "{data / "review.db"}"\n'
         f"[telegram]\nallowed_user_ids = [{', '.join(map(str, allowed))}]\n"
         f'[chroma]\npersist_dir = "{data / "chroma"}"\n'
@@ -4888,6 +5229,7 @@ async def config_mcp_policy_case(home: Path, checks: list[dict[str, Any]]) -> di
     config = root / "policy.toml"
     config.write_text(
         f"[vault]\npath = {json.dumps(str(sentinel))}\n"
+        'excluded_folders = [".obsidian", ".git", ".trash", "wiki", "_wiki"]\n'
         f"[chroma]\npersist_dir = {json.dumps(str(forbidden / 'chroma'))}\n"
         f"[graph]\npersist_path = {json.dumps(str(forbidden / 'graph.json'))}\n"
         "[embedding]\ncache_enabled = false\n"
@@ -5142,9 +5484,34 @@ async def config_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any
         }
 
     before = snapshot()
+    # Explicit old lists fail actionably; defaults are not a silent repair.
+    legacy_config = root / "legacy-missing-exclusions.toml"
+    legacy_bytes = (
+        f"[vault]\npath = {json.dumps(str(sentinel))}\n"
+        'excluded_folders = [".obsidian", ".git", ".trash", "_wiki"]\n'
+    ).encode()
+    legacy_config.write_bytes(legacy_bytes)
+    for args in (["ask", "private"], ["search-sources", "private"]):
+        result = CliRunner().invoke(cli, ["--config", str(legacy_config), *args])
+        check("config.old-exclusions." + args[0] + ".fails", True, result.exit_code != 0)
+        check(
+            "config.old-exclusions." + args[0] + ".actionable",
+            True,
+            "excluded_folders" in result.output
+            and "wiki" in result.output
+            and "_wiki" in result.output,
+        )
+        check(
+            "config.old-exclusions." + args[0] + ".not-rewritten",
+            True,
+            legacy_bytes == legacy_config.read_bytes(),
+        )
+    check("config.old-exclusions.no-workspace", False, (sentinel / "_wiki").exists())
+    check("config.old-exclusions.no-index", False, forbidden.exists())
     config = root / "explicit.toml"
     config.write_text(
         f"[vault]\npath = {json.dumps(str(sentinel))}\n"
+        'excluded_folders = [".obsidian", ".git", ".trash", "wiki", "_wiki"]\n'
         f"[chroma]\npersist_dir = {json.dumps(str(forbidden / 'chroma'))}\n"
         f"[graph]\npersist_path = {json.dumps(str(forbidden / 'graph.json'))}\n"
         "[search]\nhybrid_enabled = true\nmax_results = 3\npage_size = 7\n"
@@ -5389,7 +5756,7 @@ async def wiki_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     config = root / "config.toml"
     config.write_text(
         f"[vault]\npath = {json.dumps(str(vault))}\n"
-        'excluded_folders = [".obsidian", ".git", ".trash", "_wiki"]\n'
+        'excluded_folders = [".obsidian", ".git", ".trash", "wiki", "_wiki"]\n'
         '[llm]\nprovider = "ollama"\nthinking_model = "fixture-wiki-model"\nmax_tokens = 1777\n'
         f"[chroma]\npersist_dir = {json.dumps(str(forbidden / 'chroma'))}\n"
         f"[search]\nbm25_db_path = {json.dumps(str(forbidden / 'bm25.db'))}\n"
@@ -5863,10 +6230,240 @@ async def wiki_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
             (control / "history/report-cache" / f"{interrupted_id}.md").read_bytes() == accepted,
         )
 
+    from vaultmind.config import load_settings
+    from vaultmind.knowledge.intake import SourceIntake
+    from vaultmind.knowledge.sources import search_sources
+    from vaultmind.wiki.workspace import WikiError
+
+    settings = load_settings(config)
+    capture_bytes = b"# Intake evidence\r\n\r\norioncapture exact submitted text\r\n"
+    capture_args = {
+        "original_name": "submitted.txt",
+        "origin": "urn:acceptance:submitted",
+        "adapter": "acceptance",
+        "event_id": "event-1",
+        "revision": "revision-1",
+    }
+    effects: list[str] = []
+    with SourceIntake(settings) as intake:
+        captured = intake.preserve_text(capture_bytes, **capture_args)
+        record = intake.read(captured.source_id)
+        check("wiki.capture.exact-original", True, capture_bytes == record.content)
+        check(
+            "wiki.capture.no-implicit-index-or-approval",
+            [True, False, False],
+            [captured.preserved, captured.indexed, captured.approved],
+        )
+        check("wiki.capture.actual-origin", capture_args["origin"], record.provenance["origin"])
+        check("wiki.capture.original-retention", True, record.provenance["original_retained"])
+        projection = intake.project_text(captured, settings.vault.inbox_folder)
+        check("wiki.capture.projection-succeeded", "succeeded", projection.status)
+        check(
+            "wiki.capture.projection-exact-text",
+            True,
+            capture_bytes == (vault / projection.value).read_bytes(),
+        )
+
+        def fail_index() -> None:
+            effects.append("index")
+            raise RuntimeError("PRIVATE-DOWNSTREAM-FAILURE-BODY")
+
+        failed = captured.run_stage("index", fail_index)
+        check("wiki.capture.partial-index-failed", "failed", failed.status)
+        check(
+            "wiki.capture.partial-still-preserved",
+            True,
+            capture_bytes == intake.read(captured.source_id).content,
+        )
+        check(
+            "wiki.capture.partial-error-redacted",
+            False,
+            "PRIVATE-DOWNSTREAM-FAILURE-BODY" in json.dumps(failed.as_dict()),
+        )
+        replay = intake.preserve_text(capture_bytes, **capture_args)
+        replay_index = replay.run_stage("index", fail_index)
+        check(
+            "wiki.capture.same-event-replay",
+            [captured.source_id, "unchanged", "failed", ["index"]],
+            [replay.source_id, replay.status, replay_index.status, effects],
+        )
+        changed = intake.preserve_text(capture_bytes + b"new bytes\n", **capture_args)
+        distinct = intake.preserve_text(
+            capture_bytes,
+            **{**capture_args, "event_id": "event-2"},
+        )
+        check(
+            "wiki.capture.changed-and-distinct-events-immutable",
+            3,
+            len({captured.source_id, changed.source_id, distinct.source_id}),
+        )
+        parent = intake.preserve_attachment(
+            b"\x89PNG\r\nsynthetic-original",
+            original_name="original.png",
+            origin="urn:acceptance:photo",
+            adapter="acceptance",
+            media_type="image/png",
+        )
+        child = intake.preserve_text(
+            "orioncapture derived description",
+            original_name="description.md",
+            origin="urn:acceptance:vision",
+            adapter="acceptance",
+            role="description",
+            attachments=(parent.source_id,),
+        )
+        check(
+            "wiki.capture.derivative-attachment-closure",
+            [parent.source_id],
+            [dependency.source_id for dependency in intake.read(child.source_id).dependencies],
+        )
+        with SourceIntake(
+            settings,
+            allows_path=lambda path: not path.startswith(f"_wiki/sources/{parent.source_id}"),
+        ) as restricted_intake:
+            try:
+                restricted_intake.read(child.source_id)
+            except WikiError:
+                closure_denied = True
+            else:
+                closure_denied = False
+        check("wiki.capture.unauthorized-parent-closure-denied", True, closure_denied)
+        source_path = vault / parent.path
+        source_path.write_bytes(b"tampered attachment")
+        try:
+            intake.read(child.source_id)
+        except WikiError:
+            tampered_refused = True
+        else:
+            tampered_refused = False
+        check("wiki.capture.tampered-parent-refused", True, tampered_refused)
+        before_retention = {
+            path.name: digest(path.read_bytes())
+            for path in (control / "sources").iterdir()
+            if path.is_file()
+        }
+        try:
+            intake.preserve_text(
+                "---\ndo_not_retain: true\n---\nPRIVATE-INTAKE-RETENTION-BODY",
+                original_name="private.md",
+                origin="urn:acceptance:private",
+                adapter="acceptance",
+            )
+        except WikiError:
+            retention_refused = True
+        else:
+            retention_refused = False
+        check("wiki.capture.retention-refused", True, retention_refused)
+        check(
+            "wiki.capture.retention-no-persistence",
+            before_retention,
+            {
+                path.name: digest(path.read_bytes())
+                for path in (control / "sources").iterdir()
+                if path.is_file()
+            },
+        )
+    current_note = vault / "ordinary.md"
+    current_note.write_text("orioncapture current ordinary body\n", encoding="utf-8")
+    old_index = BoundaryStore(
+        [
+            {
+                "chunk_id": "ordinary.md::0",
+                "content": "STALE-INDEX-BODY",
+                "metadata": {"note_path": "ordinary.md"},
+                "distance": 0.0,
+            }
+        ]
+    )
+    hits = search_sources(settings, "orioncapture", store=old_index, n_results=100)
+    check(
+        "wiki.source-search.current-and-preserved",
+        ["ordinary", "preserved"],
+        sorted({hit["source_kind"] for hit in hits}),
+    )
+    check(
+        "wiki.source-search.no-control-history-wiki-or-stale-excerpts",
+        True,
+        all(
+            hit["approved"] is False
+            and hit["status"] == "source-only"
+            and "STALE-INDEX-BODY" not in hit["content"]
+            and not hit["path"].startswith(("wiki/", "_wiki/history/", "_wiki/operations/"))
+            and hit["distance"] is None
+            for hit in hits
+        ),
+    )
+    check(
+        "wiki.source-search.tampered-closure-not-discoverable",
+        False,
+        any(hit.get("source_id") == child.source_id for hit in hits),
+    )
+    ordinary_hit = next(hit for hit in hits if hit["path"] == "ordinary.md")
+    check(
+        "wiki.source-search.current-digest",
+        digest(current_note.read_bytes()),
+        ordinary_hit["current_digest"],
+    )
+    cli_search = runner.invoke(
+        app.cli, ["--config", str(config), "search-sources", "orioncapture", "--limit", "100"]
+    )
+    check("wiki.source-cli.exit", 0, cli_search.exit_code)
+    check(
+        "wiki.source-cli.shared-current-policy",
+        search_sources(settings, "orioncapture", n_results=100),
+        json.loads(cli_search.output)["results"],
+    )
+    capture_draft = root / "capture-draft.md"
+    capture_draft.write_text(
+        "# Captured evidence\n\n## Current understanding\n\n"
+        f"Submitted orioncapture evidence. [[_wiki/sources/{captured.source_id}]]\n",
+        encoding="utf-8",
+    )
+    pending_capture = command(
+        "propose",
+        "--page",
+        "wiki/captured.md",
+        "--source",
+        captured.source_id,
+        "--draft-file",
+        str(capture_draft),
+    )
+    check(
+        "wiki.capture.explicit-source-curation-input", True, "Proposal:" in pending_capture.output
+    )
+    check("wiki.capture.proposal-is-not-approval", False, (vault / "wiki/captured.md").exists())
+    # These real forbidden namespace bodies match the query; absence must come
+    # from policy, not an accidentally irrelevant fixture.
+    check(
+        "wiki.source-search.current-wiki-relevance-control", True, b"Retention" in page.read_bytes()
+    )
+    namespace_hits = search_sources(settings, "Retention", n_results=100)
+    check(
+        "wiki.source-search.relevant-wiki-and-history-still-isolated",
+        True,
+        all(
+            not hit["path"].startswith(
+                ("wiki/", "_wiki/history/", "_wiki/pending/", "_wiki/operations/")
+            )
+            for hit in namespace_hits
+        ),
+    )
+    pending_hits = search_sources(settings, "orioncapture", n_results=100)
+    check(
+        "wiki.source-search.pending-proposal-not-a-source",
+        True,
+        all(
+            not hit["path"].startswith(("wiki/", "_wiki/pending/", "_wiki/operations/"))
+            for hit in pending_hits
+        ),
+    )
+
     check("wiki.no-index-side-effects", False, forbidden.exists())
     check("wiki.config-not-edited", True, config.read_bytes() == config_before)
     return {
-        "fixture": "synthetic CRLF/local UTF8 sources, explicit excluded _wiki, private HOME/cwd",
+        "fixture": (
+            "synthetic CRLF/local UTF8 sources, explicit excluded wiki/_wiki, private HOME/cwd"
+        ),
         "consumer": (
             "actual Click wiki commands -> configured client factory "
             "-> real generator/queue/applier"
@@ -5894,7 +6491,7 @@ async def wiki_query_case(home: Path, checks: list[dict[str, Any]]) -> dict[str,
     config = home / "query.toml"
     config.write_text(
         f"[vault]\npath = {json.dumps(str(vault))}\n"
-        'excluded_folders = ["_wiki"]\n'
+        'excluded_folders = ["wiki", "_wiki"]\n'
         '[llm]\nprovider = "ollama"\nthinking_model = "query-offline"\nmax_tokens = 1733\n',
         encoding="utf-8",
     )

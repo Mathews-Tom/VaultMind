@@ -124,6 +124,86 @@ class TestEmptyQuery:
         assert results == []
 
 
+class TestScopedSearchTransactions:
+    @pytest.mark.parametrize(
+        ("query", "note_paths", "expected_ids"),
+        [
+            ("scopedtoken", ["allowed.md"], ["allowed::0"]),
+            ("missingtoken", ["allowed.md"], []),
+            ("scopedtoken", [], []),
+        ],
+    )
+    def test_releases_read_lock_and_observes_other_connection(
+        self,
+        tmp_path: Path,
+        query: str,
+        note_paths: list[str],
+        expected_ids: list[str],
+    ) -> None:
+        db_path = tmp_path / "shared_bm25.db"
+        reader = BM25Index(db_path)
+        writer = BM25Index(db_path)
+        try:
+            writer._con.execute("PRAGMA busy_timeout = 100")
+            writer.upsert("allowed::0", "allowed.md", "Original", "scopedtoken")
+
+            assert [
+                row["chunk_id"] for row in reader.search(query, note_paths=note_paths)
+            ] == expected_ids
+
+            # A real write must commit without the first connection retaining
+            # its scoped SELECT's read lock or snapshot.
+            writer.upsert("allowed::0", "allowed.md", "Updated", "updatedtoken")
+            assert not reader._con.in_transaction
+            assert reader.search("scopedtoken", note_paths=["allowed.md"]) == []
+            assert [
+                (row["chunk_id"], row["note_title"])
+                for row in reader.search("updatedtoken", note_paths=["allowed.md"])
+            ] == [("allowed::0", "Updated")]
+            assert not reader._con.in_transaction
+            assert (
+                reader._con.execute("SELECT COUNT(*) FROM bm25_permitted_paths").fetchone()[0] == 0
+            )
+        finally:
+            writer.close()
+            reader.close()
+
+    def test_operational_error_fallback_finishes_transaction(
+        self, bm25: BM25Index, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        bm25.upsert("allowed::0", "allowed.md", "Original", "scopedtoken")
+        bm25._con.execute("DROP TABLE fts_chunks")
+
+        with caplog.at_level("WARNING", logger="vaultmind.indexer.bm25"):
+            assert bm25.search("private query body", note_paths=["allowed.md"]) == []
+
+        assert not bm25._con.in_transaction
+        assert bm25._con.execute("SELECT COUNT(*) FROM bm25_permitted_paths").fetchone()[0] == 0
+        assert caplog.messages == ["BM25 search failed"]
+
+    def test_scope_setup_failure_rolls_back_transaction(self, bm25: BM25Index) -> None:
+        def deny_scope_insert(
+            action: int,
+            table: str | None,
+            _column: str | None,
+            _database: str | None,
+            _trigger: str | None,
+        ) -> int:
+            if action == sqlite3.SQLITE_INSERT and table == "bm25_permitted_paths":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        bm25._con.set_authorizer(deny_scope_insert)
+        try:
+            with pytest.raises(sqlite3.DatabaseError):
+                bm25.search("scopedtoken", note_paths=["allowed.md"])
+        finally:
+            bm25._con.set_authorizer(None)
+
+        assert not bm25._con.in_transaction
+        assert bm25._con.execute("SELECT COUNT(*) FROM bm25_permitted_paths").fetchone()[0] == 0
+
+
 class TestLargeBatch:
     """Regression: upsert_batch with more rows than SQLITE_MAX_VARIABLE_NUMBER.
 

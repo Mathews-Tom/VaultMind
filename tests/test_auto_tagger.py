@@ -83,10 +83,10 @@ def _make_note(
 
 
 class TestSuggestTags:
-    def test_returns_known_tags(self) -> None:
+    def test_returns_known_tags(self, tmp_path: Path) -> None:
         client = FakeLLMClient(tags=["python", "automation"])
         config = FakeAutoTagConfig()
-        tagger = AutoTagger(config, client, "test-model")
+        tagger = AutoTagger(config, client, "test-model", vault_root=tmp_path)
 
         note = _make_note()
         result = tagger.suggest_tags(note, vault_tags={"python", "automation", "ml"})
@@ -95,10 +95,10 @@ class TestSuggestTags:
         assert "python" in result.suggested_tags
         assert "automation" in result.suggested_tags
 
-    def test_separates_novel_tags_into_new_tags(self) -> None:
+    def test_separates_novel_tags_into_new_tags(self, tmp_path: Path) -> None:
         client = FakeLLMClient(tags=["python", "novel-concept"], new_tags=["brand-new"])
         config = FakeAutoTagConfig()
-        tagger = AutoTagger(config, client, "test-model")
+        tagger = AutoTagger(config, client, "test-model", vault_root=tmp_path)
 
         note = _make_note()
         result = tagger.suggest_tags(note, vault_tags={"python"})
@@ -111,22 +111,22 @@ class TestSuggestTags:
         assert "python" in result.suggested_tags
         assert "novel-concept" not in result.suggested_tags
 
-    def test_short_note_returns_none(self) -> None:
+    def test_short_note_returns_none(self, tmp_path: Path) -> None:
         client = FakeLLMClient(tags=["python"])
         config = FakeAutoTagConfig(min_content_length=100)
-        tagger = AutoTagger(config, client, "test-model")
+        tagger = AutoTagger(config, client, "test-model", vault_root=tmp_path)
 
         note = _make_note(content="short")
         result = tagger.suggest_tags(note, vault_tags={"python"})
         assert result is None
 
-    def test_caller_supplied_approved_vocabulary_is_treated_as_known(self) -> None:
+    def test_caller_supplied_approved_vocabulary_is_treated_as_known(self, tmp_path: Path) -> None:
         """The caller (CLI) merges any previously-approved novel tags into
         `vault_tags` before calling — AutoTagger has no vocabulary state of
         its own to consult."""
         client = FakeLLMClient(tags=["custom-tag"])
         config = FakeAutoTagConfig()
-        tagger = AutoTagger(config, client, "test-model")
+        tagger = AutoTagger(config, client, "test-model", vault_root=tmp_path)
 
         note = _make_note()
         result = tagger.suggest_tags(note, vault_tags={"custom-tag"})
@@ -135,10 +135,10 @@ class TestSuggestTags:
         assert "custom-tag" in result.suggested_tags
         assert result.new_tags == []
 
-    def test_respects_max_tags(self) -> None:
+    def test_respects_max_tags(self, tmp_path: Path) -> None:
         client = FakeLLMClient(tags=["a", "b", "c", "d"])
         config = FakeAutoTagConfig(max_tags_per_note=2)
-        tagger = AutoTagger(config, client, "test-model")
+        tagger = AutoTagger(config, client, "test-model", vault_root=tmp_path)
 
         note = _make_note()
         result = tagger.suggest_tags(note, vault_tags={"a", "b", "c", "d"})
@@ -152,7 +152,7 @@ class TestApplyTags:
         note_path = tmp_path / "note.md"
         note_path.write_text("---\ntitle: Test\n---\nBody content.\n")
 
-        apply_tags(note_path, ["python", "automation"])
+        apply_tags(note_path, ["python", "automation"], vault_root=tmp_path)
 
         import frontmatter
 
@@ -163,7 +163,7 @@ class TestApplyTags:
         note_path = tmp_path / "note.md"
         note_path.write_text("---\ntitle: Test\ntags: [python]\n---\nBody content.\n")
 
-        apply_tags(note_path, ["python", "new-tag"])
+        apply_tags(note_path, ["python", "new-tag"], vault_root=tmp_path)
 
         import frontmatter
 
@@ -332,10 +332,10 @@ def test_cli_apply_reports_deduplicated_pending_and_prior_human_decision(
 
 
 class TestCollectVaultTags:
-    def test_collects_from_multiple_notes(self) -> None:
+    def test_collects_from_multiple_notes(self, tmp_path: Path) -> None:
         client = FakeLLMClient()
         config = FakeAutoTagConfig()
-        tagger = AutoTagger(config, client, "test-model")
+        tagger = AutoTagger(config, client, "test-model", vault_root=tmp_path)
 
         notes = [
             _make_note(path="a.md", tags=["python", "ml"]),

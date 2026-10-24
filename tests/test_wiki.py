@@ -20,6 +20,7 @@ import pytest
 from click.testing import CliRunner
 
 from vaultmind.config import Settings, load_settings
+from vaultmind.knowledge.intake import SourceIntake
 from vaultmind.llm.client import LLMResponse, Message
 from vaultmind.services.review_queue import Lane, ProposalKind, ProposalStatus, ReviewProposal
 from vaultmind.wiki.workspace import (
@@ -151,7 +152,7 @@ def fixture(tmp_path: Path) -> Fixture:
     config = root / "wiki.toml"
     config.write_text(
         f"[vault]\npath = {json.dumps(str(vault))}\n"
-        'excluded_folders = [".obsidian", ".git", ".trash", "_wiki"]\n'
+        'excluded_folders = [".obsidian", ".git", ".trash", "wiki", "_wiki"]\n'
         '[llm]\nprovider = "ollama"\nthinking_model = "fixture-model"\nmax_tokens = 1729\n',
         encoding="utf-8",
     )
@@ -286,8 +287,8 @@ def test_missing_exclusion_refuses_all_persistence(fixture: Fixture) -> None:
         encoding="utf-8",
     )
     before = fixture.config.read_bytes()
-    with pytest.raises(WikiError), WikiWorkspace(load_settings(fixture.config)) as workspace:
-        workspace.add_source(fixture.source(), "source-a")
+    with pytest.raises(ValueError, match="vault.excluded_folders"):
+        load_settings(fixture.config)
     assert not fixture.control.exists()
     assert fixture.config.read_bytes() == before
 
@@ -1095,3 +1096,46 @@ def test_review_marks_unterminated_lines_and_newline_only_transitions(fixture: F
         assert review.count("\\ No newline at end of file\n") == 1
         workspace.apply(newline_removed.proposal_id, proposal_digest(newline_removed.payload))
         assert fixture.page.read_bytes() == first
+
+
+def test_retained_derivative_parent_refuses_same_page_curation_before_provider(
+    fixture: Fixture,
+) -> None:
+    with WikiWorkspace(fixture.settings) as workspace:
+        intake = SourceIntake.from_workspace(workspace)
+        parent = intake.preserve_text(
+            "Original source\n",
+            original_name="original.txt",
+            origin="telegram:chat:4",
+            adapter="telegram",
+            event_id="4:21",
+            role="text",
+        )
+        derivative = intake.preserve_text(
+            "Extracted observation\n",
+            original_name="observation.md",
+            origin="derived:observation",
+            adapter="telegram",
+            event_id="4:21",
+            role="observation",
+            parents=[parent.source_id],
+        )
+        body = (
+            "# Observation\n\n## Current understanding\n\n"
+            f"Retained observation. [[_wiki/sources/{derivative.source_id}]]\n"
+        )
+        proposal = workspace.propose(
+            PAGE,
+            [derivative.source_id],
+            draft_file=fixture.draft(body),
+        )
+        workspace.apply(proposal.proposal_id, proposal_digest(proposal.payload))
+        accepted = fixture.page.read_bytes()
+        (fixture.vault / parent.path).write_bytes(b"Changed original\n")
+        provider = ScriptedWikiLLM(body)
+        before = files_under(fixture.vault)
+        with pytest.raises(WikiError):
+            workspace.propose(PAGE, [derivative.source_id], llm=provider)
+        assert provider.calls == []
+        assert fixture.page.read_bytes() == accepted
+        assert files_under(fixture.vault) == before

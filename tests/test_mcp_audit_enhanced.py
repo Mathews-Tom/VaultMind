@@ -48,7 +48,7 @@ class TestEnhancedAuditLogger:
         audit_logger.log("full", "vault_write", {"path": "a.md"}, "OK", change_detail=detail)
 
         entry = json.loads((tmp_path / "audit.jsonl").read_text().strip())
-        assert entry["change_detail"] == detail
+        assert entry["change_detail"] == {"type": "vault_write", "status": "OK"}
 
     def test_log_with_output_summary(self, audit_logger: AuditLogger, tmp_path: Path) -> None:
         summary = {"count": 5}
@@ -72,12 +72,25 @@ class TestEnhancedAuditLogger:
         assert len(rows) == 1
         assert "." in rows[0]["ts"]
 
-    def test_log_params_truncated_to_200(self, audit_logger: AuditLogger, tmp_path: Path) -> None:
-        long_value = "x" * 500
-        audit_logger.log("full", "vault_write", {"content": long_value}, "OK")
-
+    @pytest.mark.parametrize("tool", ["capture", "capture_note", "vault_write"])
+    def test_body_tools_redact_every_durable_field(
+        self, audit_logger: AuditLogger, tmp_path: Path, tool: str
+    ) -> None:
+        secret = "PRIVATE-REJECTED-BODY"
+        audit_logger.log(
+            "full",
+            tool,
+            {"content": secret, "title": secret, "path": secret},
+            "DENIED",
+            reason=f"Rejected {secret}",
+            change_detail={"title": secret, "note_path": secret},
+            output_summary={"error": secret},
+        )
         entry = json.loads((tmp_path / "audit.jsonl").read_text().strip())
-        assert len(entry["params"]["content"]) == 200
+        assert entry["params"] == {}
+        assert entry["reason"] == "DENIED"
+        assert secret not in json.dumps(entry)
+        assert secret not in json.dumps(audit_logger.query())
 
 
 # ---------------------------------------------------------------------------
@@ -205,9 +218,7 @@ class TestChangeDetailBuilders:
 
         detail = _build_change_detail("vault_write", args, result)
         assert detail is not None
-        assert detail["note_path"] == "notes/test.md"
-        assert "size_bytes" in detail
-        assert detail["size_bytes"] == len(b"hello world")
+        assert detail == {"type": "vault_write", "status": "ok"}
 
     def test_build_change_detail_capture(self) -> None:
         args = {"content": "capture this"}
@@ -215,8 +226,7 @@ class TestChangeDetailBuilders:
 
         detail = _build_change_detail("capture", args, result)
         assert detail is not None
-        assert detail["note_path"] == "00-inbox/note.md"
-        assert detail["title"] == "My Note"
+        assert detail == {"type": "capture", "status": "ok"}
 
     def test_build_change_detail_vault_search(self) -> None:
         args = {"query": "find stuff"}
@@ -243,7 +253,7 @@ class TestChangeDetailBuilders:
         summary = _build_output_summary("vault_write", result)
         assert summary is not None
         assert summary["status"] == "ok"
-        assert summary["path"] == "notes/test.md"
+        assert "path" not in summary
 
     def test_build_output_summary_unknown_returns_none(self) -> None:
         summary = _build_output_summary("nonexistent_tool", {})

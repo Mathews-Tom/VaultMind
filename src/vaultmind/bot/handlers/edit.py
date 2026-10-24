@@ -24,7 +24,8 @@ from vaultmind.llm.client import Message as LLMMessage
 from vaultmind.vault.security import (
     PathResolutionError,
     PathTraversalError,
-    validate_vault_path,
+    ReservedNamespaceError,
+    validate_ordinary_write_path,
 )
 
 if TYPE_CHECKING:
@@ -74,7 +75,15 @@ async def handle_edit(
         await message.answer("Empty note path or instruction after sanitization.")
         return
 
-    filepath = _resolve_note_path(ctx, note_query)
+    try:
+        requested_path = validate_ordinary_write_path(note_query, ctx.vault_root)
+        resolved_query = requested_path.relative_to(ctx.vault_root.resolve()).as_posix()
+        filepath = _resolve_note_path(ctx, resolved_query)
+        if filepath is not None:
+            filepath = validate_ordinary_write_path(str(filepath), ctx.vault_root)
+    except (PathTraversalError, PathResolutionError, ReservedNamespaceError):
+        await message.answer("Path not allowed.")
+        return
 
     if filepath is None:
         await message.answer(
@@ -83,7 +92,7 @@ async def handle_edit(
         )
         return
 
-    rel_path = filepath.relative_to(ctx.vault_root)
+    rel_path = filepath.relative_to(ctx.vault_root.resolve())
     original_body = frontmatter.load(str(filepath)).content
 
     await message.answer("\u270f\ufe0f Generating edit...")
@@ -186,13 +195,15 @@ async def handle_edit_callback(
             return
 
         try:
-            filepath = validate_vault_path(pending["path"], ctx.vault_root)
-        except (PathTraversalError, PathResolutionError):
+            filepath = validate_ordinary_write_path(pending["path"], ctx.vault_root)
+        except (PathTraversalError, PathResolutionError, ReservedNamespaceError):
             await callback.message.edit_text(  # type: ignore[union-attr]
                 "Path not allowed.",
             )
             await callback.answer()
             return
+
+        rel_path = filepath.relative_to(ctx.vault_root.resolve()).as_posix()
 
         if not filepath.exists():
             await callback.message.edit_text(  # type: ignore[union-attr]
@@ -210,6 +221,7 @@ async def handle_edit_callback(
         rationale = f"Instruction: {pending['instruction']}"
         write_superseded_block(
             filepath,
+            vault_root=ctx.vault_root,
             callout_type="superseded",
             title="Edited via bot",
             rationale=rationale,
@@ -228,11 +240,11 @@ async def handle_edit_callback(
             logger.exception("Failed to re-index edited note")
 
         if isinstance(ctx.lineage_store, LineageStore):
-            ctx.lineage_store.record(pending["path"], "edited", rationale)
+            ctx.lineage_store.record(rel_path, "edited", rationale)
 
-        logger.info("Edited note (superseded prior body): %s", pending["path"])
+        logger.info("Edited note (superseded prior body): %s", rel_path)
         await callback.message.edit_text(  # type: ignore[union-attr]
-            f"\u2705 Edit applied to `{pending['path']}` \u2014 prior text preserved "
+            f"\u2705 Edit applied to `{rel_path}` \u2014 prior text preserved "
             "under a dated superseded callout.",
             parse_mode="Markdown",
         )

@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import os
 import traceback
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 from vaultmind.vault.security import (
     PathResolutionError,
     PathTraversalError,
+    ReservedNamespaceError,
+    validate_ordinary_output_path,
+    validate_ordinary_write_path,
     validate_vault_path,
 )
 
@@ -230,3 +230,109 @@ class TestSymlinkLoops:
     ) -> None:
         with pytest.raises(PathTraversalError):
             validate_vault_path("../outside.md", looped_vault)
+
+
+@pytest.mark.parametrize("name", ["wiki", "_wiki", "WiKi", "_WiKi"])
+@pytest.mark.parametrize("suffix", ["", "/source.md", "/metadata.json", "/image.png", "/state.db"])
+def test_ordinary_writes_reject_reserved_roots(vault_root: Path, name: str, suffix: str) -> None:
+    with pytest.raises(ReservedNamespaceError):
+        validate_ordinary_write_path(name + suffix, vault_root)
+    assert not (vault_root / name).exists()
+
+
+def test_reserved_errors_redact_requested_filename_and_body(vault_root: Path) -> None:
+    sensitive = "private-body-with-newline\nand-token"
+    with pytest.raises(ReservedNamespaceError) as error:
+        validate_ordinary_write_path(f"_wiki/{sensitive}", vault_root)
+    assert sensitive not in _rendered(error.value)
+    assert str(vault_root) not in _rendered(error.value)
+
+
+@pytest.mark.parametrize("name", ["wiki", "_wiki"])
+def test_ordinary_writes_reject_lexical_reserved_escape(vault_root: Path, name: str) -> None:
+    with pytest.raises(ReservedNamespaceError):
+        validate_ordinary_write_path(f"{name}/../ordinary.json", vault_root)
+
+
+@pytest.mark.parametrize("name", ["wiki", "_wiki"])
+def test_ordinary_alias_into_reserved_tree_is_denied(vault_root: Path, name: str) -> None:
+    reserved = vault_root / name
+    reserved.mkdir()
+    original = reserved / "source.json"
+    original.write_bytes(b'{"immutable":true}')
+    (vault_root / "ordinary").symlink_to(reserved, target_is_directory=True)
+    with pytest.raises(ReservedNamespaceError):
+        validate_ordinary_write_path("ordinary/source.json", vault_root)
+    assert original.read_bytes() == b'{"immutable":true}'
+    # The general containment API remains available to authorized wiki writers.
+    assert validate_vault_path(f"{name}/source.json", vault_root) == original
+
+
+def test_reserved_tree_symlink_cannot_launder_ordinary_output(
+    vault_root: Path, tmp_path: Path
+) -> None:
+    destination = tmp_path / "retained"
+    destination.mkdir()
+    (vault_root / "_wiki").symlink_to(destination, target_is_directory=True)
+    with pytest.raises(ReservedNamespaceError):
+        validate_ordinary_write_path("_wiki/new.json", vault_root)
+    with pytest.raises(ReservedNamespaceError):
+        validate_ordinary_output_path(destination / "new.json", vault_root)
+    assert not (destination / "new.json").exists()
+
+
+def test_checked_ordinary_path_resolves_safe_alias(vault_root: Path, tmp_path: Path) -> None:
+    (vault_root / "ordinary").symlink_to(vault_root / "subdir", target_is_directory=True)
+    alias_root = tmp_path / "vault-alias"
+    alias_root.symlink_to(vault_root, target_is_directory=True)
+    assert validate_ordinary_write_path("ordinary/state.json", alias_root) == (
+        vault_root / "subdir" / "state.json"
+    )
+    assert validate_ordinary_write_path("subdir/wiki/image.png", vault_root) == (
+        vault_root / "subdir" / "wiki" / "image.png"
+    )
+
+
+def test_ordinary_containment_and_loop_failures_remain_closed(vault_root: Path) -> None:
+    with pytest.raises(PathTraversalError):
+        validate_ordinary_write_path("../outside.json", vault_root)
+    (vault_root / "cycle").symlink_to(vault_root / "cycle")
+    with pytest.raises(PathResolutionError):
+        validate_ordinary_write_path("cycle/data.json", vault_root)
+    with pytest.raises(PathResolutionError):
+        validate_ordinary_output_path(vault_root / "cycle" / "data.json", vault_root)
+
+
+def test_external_outputs_are_allowed_but_aliases_into_wiki_are_not(
+    vault_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    monkeypatch.chdir(external)
+    assert validate_ordinary_output_path(Path("state.db"), vault_root) == external / "state.db"
+    reserved = vault_root / "_wiki"
+    reserved.mkdir()
+    (external / "alias").symlink_to(reserved, target_is_directory=True)
+    with pytest.raises(ReservedNamespaceError):
+        validate_ordinary_output_path(external / "alias" / "state.db", vault_root)
+    assert not (reserved / "state.db").exists()
+
+
+def test_absolute_case_alias_output_is_reserved(vault_root: Path) -> None:
+    with pytest.raises(ReservedNamespaceError):
+        validate_ordinary_output_path(vault_root / "WIKI" / "export.json", vault_root)
+    with pytest.raises(ReservedNamespaceError):
+        validate_ordinary_write_path(str(vault_root / "_WIKI" / "image.png"), vault_root)
+
+
+def test_lexical_reserved_request_through_separate_vault_alias_is_denied(
+    vault_root: Path, tmp_path: Path
+) -> None:
+    alias = tmp_path / "selected-vault-alias"
+    alias.symlink_to(vault_root, target_is_directory=True)
+    request = alias / "_wiki" / ".." / "ordinary.json"
+    with pytest.raises(ReservedNamespaceError):
+        validate_ordinary_output_path(request, vault_root)
+    with pytest.raises(ReservedNamespaceError):
+        validate_ordinary_write_path(str(request), vault_root)
+    assert not (vault_root / "ordinary.json").exists()

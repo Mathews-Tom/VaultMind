@@ -62,28 +62,39 @@ async def handle_message(
         await message.answer("\u26d4 Unauthorized")
         return
 
-    san = sanitize_text(text, max_length=MAX_LLM_INPUT_LENGTH, operation="message_routing")
-    text = san.text
-    if not text:
-        await message.answer("Empty input after sanitization.")
-        return
+    original = text
+    # Classify the unsliced input so capture never accepts an 8k truncation.
+    # Non-capture traffic still uses the ordinary bounded LLM view below.
+    result = _router.classify(original)
 
-    # Escape hatch: old behavior (all text -> capture)
+    # Escape hatch: old behavior (all text -> capture).
     if ctx.settings.routing.capture_all:
-        await capture_fn(ctx, message, text)  # type: ignore[operator]
+        await capture_fn(ctx, message, original, raw_original=original)  # type: ignore[operator]
         return
 
     # Sticky thinking sessions -- continue if active
     user_id = message.from_user.id if message.from_user else 0
     if ctx.thinking.has_active_session(user_id):
-        await think_fn(ctx, message, text, last_exchanges)  # type: ignore[operator]
+        bounded = sanitize_text(
+            original, max_length=MAX_LLM_INPUT_LENGTH, operation="message_routing"
+        )
+        await think_fn(ctx, message, bounded.text, last_exchanges)  # type: ignore[operator]
         return
 
-    # Classify and dispatch
-    result = _router.classify(text)
-
     if result.intent is Intent.capture:
-        await capture_fn(ctx, message, result.content)  # type: ignore[operator]
+        await capture_fn(ctx, message, result.content, raw_original=original)  # type: ignore[operator]
+        return
+
+    san = sanitize_text(original, max_length=MAX_LLM_INPUT_LENGTH, operation="message_routing")
+    text = san.text
+    if not text:
+        await message.answer("Empty input after sanitization.")
+        return
+
+    # Bound non-capture inputs only after the capture branch.
+    result = _router.classify(text)
+    if result.intent is Intent.capture:
+        await capture_fn(ctx, message, result.content, raw_original=original)  # type: ignore[operator]
     elif result.intent is Intent.greeting:
         await handle_greeting(message)
     elif result.intent is Intent.question:

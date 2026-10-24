@@ -8,13 +8,13 @@ all audio formats that Telegram sends (OGG/Opus).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from contextlib import nullcontext
+from pathlib import Path
+from typing import TYPE_CHECKING, BinaryIO
 
 from openai import OpenAI
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from vaultmind.config import VoiceConfig
 
 logger = logging.getLogger(__name__)
@@ -27,11 +27,11 @@ class Transcriber:
         self._config = config
         self._client = OpenAI(api_key=api_key)
 
-    def transcribe(self, audio_path: Path) -> str:
-        """Transcribe an audio file to text.
+    def transcribe(self, audio_path: Path | BinaryIO) -> str:
+        """Transcribe an audio file or transient binary stream without altering text.
 
         Args:
-            audio_path: Path to the audio file (OGG, MP3, WAV, etc.).
+            audio_path: Audio path or an in-memory stream with a filename.
 
         Returns:
             Transcribed text.
@@ -40,7 +40,9 @@ class Transcriber:
             RuntimeError: If transcription fails.
         """
         try:
-            with open(audio_path, "rb") as f:
+            with (
+                audio_path.open("rb") if isinstance(audio_path, Path) else nullcontext(audio_path)
+            ) as f:
                 if self._config.language:
                     response = self._client.audio.transcriptions.create(
                         model=self._config.whisper_model,
@@ -53,10 +55,11 @@ class Transcriber:
                         file=f,
                     )
 
-            text: str = response.text.strip()
-            logger.info("Transcribed %s: %d chars", audio_path.name, len(text))
+            text: str = response.text
+            logger.info("Transcribed audio: %d chars", len(text))
             return text
 
-        except Exception as e:
-            logger.error("Transcription failed for %s: %s", audio_path.name, e)
-            raise RuntimeError(f"Transcription failed: {e}") from e
+        except Exception as exc:
+            error = type(exc).__name__
+            logger.error("Transcription failed (%s)", error)
+            raise RuntimeError(f"Transcription failed ({error})") from None

@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vaultmind.bot.formatter import TelegramFormatter
 from vaultmind.bot.handlers.utils import _is_authorized
+from vaultmind.vault.security import (
+    PathResolutionError,
+    PathTraversalError,
+    ReservedNamespaceError,
+    validate_ordinary_write_path,
+)
 
 if TYPE_CHECKING:
     from aiogram.types import Message
@@ -38,9 +45,14 @@ async def handle_daily(ctx: HandlerContext, message: Message) -> None:
 
     today = datetime.now()
     filename = today.strftime("%Y-%m-%d") + ".md"
-    daily_dir = ctx.vault_root / ctx.settings.vault.daily_folder
-    daily_dir.mkdir(parents=True, exist_ok=True)
-    filepath = daily_dir / filename
+    try:
+        filepath = validate_ordinary_write_path(
+            str(Path(ctx.settings.vault.daily_folder) / filename), ctx.vault_root
+        )
+    except (PathTraversalError, PathResolutionError, ReservedNamespaceError):
+        await message.answer("Path not allowed.")
+        return
+    filepath.parent.mkdir(parents=True, exist_ok=True)
 
     if filepath.exists():
         note = ctx.parser.parse_file(filepath)

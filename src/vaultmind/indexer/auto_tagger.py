@@ -19,7 +19,11 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from vaultmind.vault.security import validate_ordinary_write_path
+
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from vaultmind.config import AutoTagConfig
     from vaultmind.llm.client import LLMClient
     from vaultmind.vault.models import Note
@@ -71,17 +75,20 @@ class AutoTagger:
         config: AutoTagConfig,
         llm_client: LLMClient,
         model: str,
+        *,
+        vault_root: Path,
     ) -> None:
         self._config = config
         self._client = llm_client
         self._model = model
+        self._vault_root = vault_root
 
     def suggest_tags(
         self,
         note: Note,
         vault_tags: set[str],
     ) -> TagSuggestion | None:
-        """Generate tag suggestions for a single note using the LLM.
+        """Generate tag suggestions only for an ordinary note in the selected vault.
 
         Args:
             note: The note to classify.
@@ -93,6 +100,8 @@ class AutoTagger:
             TagSuggestion or None if the note is too short.
         """
         from vaultmind.llm.client import LLMError, Message
+
+        validate_ordinary_write_path(str(note.path), self._vault_root)
 
         body = note.body_without_frontmatter().strip()
         if len(body) < self._config.min_content_length:
@@ -149,6 +158,8 @@ class AutoTagger:
         vault_tags: set[str],
     ) -> list[TagSuggestion]:
         """Generate tag suggestions for multiple notes."""
+        for note in notes:
+            validate_ordinary_write_path(str(note.path), self._vault_root)
         suggestions: list[TagSuggestion] = []
         for note in notes:
             result = self.suggest_tags(note, vault_tags)

@@ -1,16 +1,10 @@
-"""Retrieval scoring runner — exercises the same retrieval call
-`bot/handlers/recall.py::handle_recall` uses for `/recall`, and scores it
-against a golden question set.
+"""Score source discovery, not approved-answer quality.
 
-Deterministic scoring (no LLM call):
-  - recall@k / MRR over `answerable: true` questions, using each hit's
-    `metadata["note_path"]` against the question's `expected_notes`.
-  - a score-floor "honest decline" check over `answerable: false` questions:
-    correct only for explicitly weak retrieval. Missing vector evidence is
-    unknown, not proof that no answer was retrieved. Fusion rank is not evidence.
-
-LLM-scored cite-or-decline (see `vaultmind.bench.llm_score`) is layered on
-top separately and is never required for `run_bench`.
+The runner and Telegram `/recall` share `knowledge.sources.search_sources`.
+Candidates are hydrated from the actual authorized current vault files before
+source-retrieval recall@k/MRR and raw-distance decline evidence are scored.
+Missing vector evidence is unknown; source-only matches are never approved wiki
+answers. Optional LLM cite-or-decline scoring is a separate source experiment.
 """
 
 from __future__ import annotations
@@ -19,25 +13,18 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from vaultmind.indexer.ranking import (
-    RetrievalConfidence,
-    apply_authority,
-    retrieval_confidence,
-)
+from vaultmind.indexer.ranking import RetrievalConfidence, retrieval_confidence
+from vaultmind.knowledge.sources import search_sources
 
 if TYPE_CHECKING:
     from vaultmind.bench.golden import GoldenQuestion
+    from vaultmind.config import Settings
 
 DEFAULT_SCORE_FLOOR = 0.5
 
 
 class RetrievalStore(Protocol):
-    """Structural shape of the store methods `/recall` calls.
-
-    Matches `VaultStore.search`/`VaultStore.hybrid_search` — anything with
-    this shape (including a test double or a fixture-backed store) can be
-    scored by the runner.
-    """
+    """Optional source-ranking backend, always scoped before its result limit."""
 
     def search(
         self, query: str, n_results: int = 5, where: dict[str, Any] | None = None
@@ -78,23 +65,15 @@ class BenchReport:
 
 
 def run_query(
-    store: RetrievalStore,
+    settings: Settings,
     query: str,
     k: int,
-    hybrid_enabled: bool,
-    ranking_config: Any = None,
+    *,
+    store: RetrievalStore | None = None,
+    allows_path: Callable[[str], bool] | None = None,
 ) -> list[dict[str, Any]]:
-    """Run the exact retrieval call `handle_recall` makes for `/recall`.
-
-    Mirrors `bot/handlers/recall.py::handle_recall`'s branch on
-    `settings.search.hybrid_enabled` and its `apply_authority()` re-ranking
-    step — the bench exercises the identical live path, not a parallel one.
-    """
-    if hybrid_enabled:
-        hits = store.hybrid_search(query, n_results=k)
-    else:
-        hits = store.search(query, n_results=k)
-    return apply_authority(hits, ranking_config)
+    """Exercise the same current-file, source-only path as Telegram `/recall`."""
+    return search_sources(settings, query, store=store, n_results=k, allows_path=allows_path)
 
 
 def _note_path(hit: dict[str, Any]) -> str:
@@ -185,18 +164,20 @@ DeclineScorer = Callable[["GoldenQuestion", "list[dict[str, Any]]"], bool]
 
 def run_bench(
     golden: list[GoldenQuestion],
-    store: RetrievalStore,
+    settings: Settings,
     k: int,
-    hybrid_enabled: bool,
-    score_floor: float = DEFAULT_SCORE_FLOOR,
+    *,
+    store: RetrievalStore | None = None,
+    allows_path: Callable[[str], bool] | None = None,
+    score_floor: float | None = None,
     decline_scorer: DeclineScorer | None = None,
-    ranking_config: Any = None,
 ) -> BenchReport:
-    """Run the full golden set through the live retrieval path and score it."""
+    """Score source retrieval over the real current-file path and scope."""
+    floor = settings.bench.score_floor if score_floor is None else score_floor
     results: list[QuestionResult] = []
     for question in golden:
-        hits = run_query(store, question.question, k, hybrid_enabled, ranking_config)
-        result = score_question(question, hits, score_floor)
+        hits = run_query(settings, question.question, k, store=store, allows_path=allows_path)
+        result = score_question(question, hits, floor)
         if decline_scorer is not None:
             result = replace(result, llm_decline_correct=decline_scorer(question, hits))
         results.append(result)

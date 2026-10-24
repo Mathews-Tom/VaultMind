@@ -148,8 +148,29 @@ class CommandHandlers:
 
     # --- Delegated handlers ---
 
-    async def handle_capture(self, message: Message, text: str) -> None:
-        await handle_capture(self._ctx, message, text)
+    async def handle_capture(
+        self,
+        message: Message,
+        text: str,
+        *,
+        raw_original: str | None = None,
+        origin: str | None = None,
+        adapter: str = "telegram-text",
+        role: str = "text",
+        original_retained: bool = True,
+        revision: str | None = None,
+    ) -> None:
+        await handle_capture(
+            self._ctx,
+            message,
+            text,
+            raw_original=raw_original,
+            origin=origin,
+            adapter=adapter,
+            role=role,
+            original_retained=original_retained,
+            revision=revision,
+        )
 
     async def handle_photo(self, message: Message) -> None:
         await capture_module.handle_photo_capture(self._ctx, message)
@@ -310,12 +331,6 @@ class CommandHandlers:
 
     def _find_notes_by_date(self, start: str, end: str) -> list[tuple[str, str, str]]:
         return _find_notes_by_date(self._ctx, start, end)
-
-    @staticmethod
-    def _slugify(text: str) -> str:
-        from vaultmind.bot.handlers.capture import _slugify
-
-        return _slugify(text)
 
     @staticmethod
     def _split_message(text: str, max_len: int = 4000) -> list[str]:

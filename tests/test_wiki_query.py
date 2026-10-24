@@ -73,7 +73,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Settings, Pa
     config = tmp_path / "query.toml"
     config.write_text(
         f"[vault]\npath = {json.dumps(str(vault))}\n"
-        'excluded_folders = ["_wiki"]\n'
+        'excluded_folders = ["wiki", "_wiki"]\n'
         '[llm]\nprovider = "ollama"\nthinking_model = "query-fixture"\nmax_tokens = 1729\n'
     )
     settings = load_settings(config)
@@ -273,7 +273,7 @@ def test_changes_during_completion_are_refused(world: tuple[Settings, Path]) -> 
 
 
 def test_empty_workspace_does_not_create_control_tree(tmp_path: Path) -> None:
-    settings = Settings(vault={"path": tmp_path, "excluded_folders": ["_wiki"]})
+    settings = Settings(vault={"path": tmp_path, "excluded_folders": ["wiki", "_wiki"]})
     before = snapshot(tmp_path)
     assert list_pages(settings) == []
     assert lint_pages(settings) == []

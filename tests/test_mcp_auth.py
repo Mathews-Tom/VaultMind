@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import frontmatter
 import pytest
 
-from vaultmind.config import MCPProfileConfig, VaultConfig
+from vaultmind.config import MCPProfileConfig, Settings, VaultConfig
 from vaultmind.mcp.auth import AuditLogger, ProfileEnforcer, ProfileError, ProfilePolicy
 from vaultmind.mcp.profiles import load_profile
 from vaultmind.mcp.server import _dispatch_tool
@@ -176,7 +177,7 @@ class TestAuditLogger:
         )
         entry = json.loads(log_path.read_text().strip())
         assert entry["result"] == "DENIED"
-        assert entry["reason"] == "write disabled"
+        assert entry["reason"] == "DENIED"
 
     def test_audit_log_is_valid_jsonl(self, tmp_path: Path) -> None:
         log_path = tmp_path / "audit.jsonl"
@@ -188,12 +189,12 @@ class TestAuditLogger:
         for line in lines:
             json.loads(line)  # Should not raise
 
-    def test_audit_log_truncates_large_params(self, tmp_path: Path) -> None:
+    def test_audit_log_redacts_body_params(self, tmp_path: Path) -> None:
         log_path = tmp_path / "audit.jsonl"
         audit_logger = AuditLogger(log_path)
         audit_logger.log("test", "tool", {"content": "x" * 1000}, "OK")
         entry = json.loads(log_path.read_text().strip())
-        assert len(entry["params"]["content"]) <= 200
+        assert "content" not in entry["params"]
 
 
 class TestLoadProfile:
@@ -482,6 +483,9 @@ def _note_dispatch(
         _Unused(),  # type: ignore[arg-type]
         VaultParser(VaultConfig(path=root)),  # type: ignore[arg-type]
         enforcer=enforcer,
+        settings=Settings(
+            _env_file=None, vault=VaultConfig(path=root), search={"hybrid_enabled": False}
+        ),
         **kwargs,  # type: ignore[arg-type]
     )
 
@@ -537,6 +541,9 @@ class TestNoteResultBoundary:
     def test_search_filters_before_top_k_and_preserves_note_type(
         self, linked_vault: Path, planner_policy: ProfilePolicy
     ) -> None:
+        (linked_vault / "02-projects/open-note.md").write_text(
+            "---\ntype: permanent\n---\n\nCurrent allowed body\n", encoding="utf-8"
+        )
         store = _RankedStore(
             [
                 *[_hit("04-resources/private-secret.md") for _ in range(30)],
@@ -551,7 +558,12 @@ class TestNoteResultBoundary:
             ProfileEnforcer(planner_policy, linked_vault),
             store,
         )
-        assert result == {"results": [_hit("02-projects/open-note.md")], "count": 1}
+        assert result["count"] == 1
+        assert result["approved"] is False
+        assert result["results"][0]["path"] == "02-projects/open-note.md"
+        assert "Current allowed body" in result["results"][0]["content"]
+        assert result["results"][0]["distance"] is None
+        assert "private-secret" not in str(result)
 
     @pytest.mark.parametrize("profile", ["planner", "full"])
     def test_search_defensively_omits_invalid_store_provenance(
@@ -582,9 +594,16 @@ class TestNoteResultBoundary:
             ProfileEnforcer(load_profile(profile), linked_vault),
             store,
         )
-        assert result == {"results": [valid], "count": 1}
+        assert result["count"] == 1
+        hit = result["results"][0]
+        assert hit["path"] == "02-projects/open-note.md"
+        assert hit["content"] == frontmatter.loads((linked_vault / hit["path"]).read_text()).content
+        assert hit["status"] == "source-only" and hit["approved"] is False
+        assert hit["distance"] is None
 
-    def test_full_search_retains_valid_private_hits_and_scores(self, linked_vault: Path) -> None:
+    def test_full_search_hydrates_private_hits_without_stale_scores(
+        self, linked_vault: Path
+    ) -> None:
         hits = [_hit("04-resources/private-secret.md"), _hit("02-projects/hub.md", distance=0.12)]
         result = _note_dispatch(
             "vault_search",
@@ -593,7 +612,16 @@ class TestNoteResultBoundary:
             ProfileEnforcer(load_profile("full"), linked_vault),
             _RankedStore(hits),
         )
-        assert result == {"results": hits, "count": 2}
+        assert result["count"] == 2
+        assert {hit["path"] for hit in result["results"]} == {
+            "04-resources/private-secret.md",
+            "02-projects/hub.md",
+        }
+        for hit in result["results"]:
+            current = frontmatter.loads((linked_vault / hit["path"]).read_text())
+            assert hit["content"] == current.content
+            assert hit["status"] == "source-only" and hit["approved"] is False
+            assert hit["distance"] is None
 
     @pytest.mark.parametrize("folder", [None, "", "."])
     def test_list_is_virtual_allowed_root_aggregate(
@@ -833,22 +861,6 @@ class TestNoteResultBoundary:
         assert (linked_vault / result["path"]).read_text() == "# Written\n\nbody"
         assert store.paths == ["02-projects/new/note.md"]
 
-    def test_full_search_retains_valid_literal_provenance(self, linked_vault: Path) -> None:
-        (linked_vault / "02-projects/alias.md").symlink_to("open-note.md")
-        hits = [
-            _hit("./02-projects/open-note.md"),
-            _hit(str(linked_vault / "02-projects/open-note.md")),
-            _hit("02-projects/alias.md"),
-        ]
-        result = _note_dispatch(
-            "vault_search",
-            {"query": "query"},
-            linked_vault,
-            ProfileEnforcer(load_profile("full"), linked_vault),
-            _RankedStore(hits),
-        )
-        assert result == {"results": hits, "count": 3}
-
     def test_restricted_search_defensively_rejects_private_hits(self, linked_vault: Path) -> None:
         class IgnoringFilterStore(_RankedStore):
             def search(
@@ -864,7 +876,13 @@ class TestNoteResultBoundary:
             ProfileEnforcer(load_profile("planner"), linked_vault),
             IgnoringFilterStore([_hit("04-resources/private-secret.md"), valid]),
         )
-        assert result == {"results": [valid], "count": 1}
+        assert result["status"] == "source-only" and result["approved"] is False
+        assert result["count"] == 1
+        hit = result["results"][0]
+        assert hit["path"] == "02-projects/open-note.md"
+        assert hit["content"] == "Open body."
+        assert hit["distance"] is None
+        assert "private-secret" not in str(result)
 
     def test_full_suggestion_omits_unverified_provenance(self, linked_vault: Path) -> None:
         from vaultmind.config import NoteSuggestionsConfig
@@ -890,3 +908,135 @@ class TestNoteResultBoundary:
         )
         assert result["count"] == 1
         assert result["suggestions"][0]["path"] == "02-projects/open-note.md"
+
+
+class TestSourceDiscoveryBoundary:
+    def test_scope_before_top_k_current_hydration_and_no_control_history(
+        self, tmp_path: Path
+    ) -> None:
+        import hashlib
+
+        current = "---\ntitle: Current\n---\n\nCurrent text, never retired text.\n"
+        for relative, text in {
+            "02-projects/current.md": current,
+            "04-resources/private.md": "PRIVATE-UNAUTHORIZED",
+            "wiki/approved.md": "APPROVED-WIKI-NOT-A-SOURCE",
+            "_wiki/history/retired.md": "RETIRED-CONTROL-HISTORY",
+        }.items():
+            path = tmp_path / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        store = _RankedStore(
+            [
+                *[_hit("04-resources/private.md") for _ in range(20)],
+                _hit("wiki/approved.md"),
+                _hit("_wiki/history/retired.md"),
+                {**_hit("02-projects/current.md"), "content": "STALE-INDEX-EXCERPT"},
+            ]
+        )
+        before = {
+            path.relative_to(tmp_path).as_posix(): path.read_bytes()
+            for path in tmp_path.rglob("*")
+            if path.is_file()
+        }
+        result = _note_dispatch(
+            "vault_search",
+            {"query": "Current", "n_results": 1},
+            tmp_path,
+            ProfileEnforcer(load_profile("planner"), tmp_path),
+            store,
+        )
+        assert result["count"] == 1 and result["approved"] is False
+        hit = result["results"][0]
+        assert hit["path"] == "02-projects/current.md"
+        assert hit["content"] == frontmatter.loads(current).content
+        assert hit["current_digest"] == hashlib.sha256(current.encode()).hexdigest()
+        assert hit["distance"] is None
+        assert hit["source_kind"] == "ordinary"
+        assert hit["status"] == "source-only" and hit["approved"] is False
+        assert "PRIVATE-UNAUTHORIZED" not in str(result)
+        assert "APPROVED-WIKI-NOT-A-SOURCE" not in str(result)
+        assert "RETIRED-CONTROL-HISTORY" not in str(result)
+        assert "STALE-INDEX-EXCERPT" not in str(result)
+        assert store.calls[0][2] == {"note_path": {"$in": ["02-projects/current.md"]}}
+        assert before == {
+            path.relative_to(tmp_path).as_posix(): path.read_bytes()
+            for path in tmp_path.rglob("*")
+            if path.is_file()
+        }
+
+    def test_preserved_dependency_closure_authorized_before_search_output(
+        self, tmp_path: Path
+    ) -> None:
+        from vaultmind.knowledge.intake import SourceIntake
+
+        settings = Settings(_env_file=None, vault=VaultConfig(path=tmp_path))
+        with SourceIntake(settings) as intake:
+            parent = intake.preserve_text(
+                "PRIVATE-PARENT", original_name="parent.md", origin="fixture", adapter="fixture"
+            )
+            child = intake.preserve_text(
+                "searchable child",
+                original_name="child.md",
+                origin="fixture",
+                adapter="fixture",
+                parents=(parent.source_id,),
+            )
+        all_scope = ProfileEnforcer(load_profile("full"), tmp_path)
+        allowed = _note_dispatch("vault_search", {"query": "searchable"}, tmp_path, all_scope)
+        assert [hit["source_id"] for hit in allowed["results"]] == [child.source_id]
+        assert allowed["results"][0]["approved"] is False
+
+        class DenyParent(ProfileEnforcer):
+            def allows_path(self, relative: str) -> bool:
+                return parent.source_id not in relative and super().allows_path(relative)
+
+        denied = _note_dispatch(
+            "vault_search",
+            {"query": "searchable"},
+            tmp_path,
+            DenyParent(load_profile("full"), tmp_path),
+        )
+        assert denied["results"] == [] and denied["count"] == 0
+        assert "searchable child" not in str(denied)
+        assert "PRIVATE-PARENT" not in str(denied)
+
+    @pytest.mark.parametrize(
+        "relative",
+        [
+            "wiki/new.md",
+            "_wiki/new.md",
+            "Wiki/new.md",
+            "_WIKI/new.md",
+        ],
+    )
+    def test_ordinary_write_never_enters_reserved_namespace(
+        self, tmp_path: Path, relative: str
+    ) -> None:
+        from vaultmind.vault.security import ReservedNamespaceError
+
+        with pytest.raises(ReservedNamespaceError):
+            _note_dispatch(
+                "vault_write",
+                {"path": relative, "content": "REJECTED"},
+                tmp_path,
+                ProfileEnforcer(load_profile("full"), tmp_path),
+            )
+        assert list(tmp_path.iterdir()) == []
+
+    def test_ordinary_symlink_write_cannot_mutate_retained_source(self, tmp_path: Path) -> None:
+        from vaultmind.vault.security import ReservedNamespaceError
+
+        path = tmp_path / "_wiki/sources/kept.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("exact preserved bytes", encoding="utf-8")
+        (tmp_path / "02-projects").mkdir()
+        (tmp_path / "02-projects/alias.md").symlink_to(path)
+        with pytest.raises(ReservedNamespaceError):
+            _note_dispatch(
+                "vault_write",
+                {"path": "02-projects/alias.md", "content": "REJECTED"},
+                tmp_path,
+                ProfileEnforcer(load_profile("full"), tmp_path),
+            )
+        assert path.read_text() == "exact preserved bytes"

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from vaultmind.research.analyzer import analyze_sources
 from vaultmind.research.searcher import search_youtube
-from vaultmind.vault.security import validate_vault_path
+from vaultmind.vault.security import validate_ordinary_write_path
 
 if TYPE_CHECKING:
     from vaultmind.indexer import VaultStore
@@ -58,8 +58,7 @@ def _create_source_note(
 ) -> Path:
     """Create an individual source note."""
     filename = re.sub(r'[<>:"/\\|?*]', "_", title)[:80] + ".md"
-    note_path = output_dir / filename
-    validate_vault_path(str(note_path), vault_root)
+    note_path = validate_ordinary_write_path(str(output_dir / filename), vault_root)
 
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     note_content = f"""\
@@ -107,6 +106,12 @@ async def run_research_pipeline(
     if config is None:
         config = ResearchConfig()
 
+    vault_root = vault_root.resolve()
+    output_folder = validate_ordinary_write_path(config.output_folder, vault_root)
+    dir_name = _sanitize_dirname(query)
+    output_dir = validate_ordinary_write_path(str(output_folder / dir_name), vault_root)
+    summary_path = validate_ordinary_write_path(str(output_dir / "summary.md"), vault_root)
+
     # 1. Search
     logger.info("Searching YouTube for: %s", query)
     results = await search_youtube(query, max_results=config.max_results)
@@ -139,8 +144,7 @@ async def run_research_pipeline(
         return PipelineResult(query=query, analysis_summary="No transcripts available.")
 
     # 3. Create source notes
-    dir_name = _sanitize_dirname(query)
-    output_dir = vault_root / config.output_folder / dir_name
+    output_dir = validate_ordinary_write_path(str(output_dir), vault_root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     source_paths: list[Path] = []
@@ -156,6 +160,7 @@ async def run_research_pipeline(
         source_paths.append(path)
 
     # 4. LLM analysis
+    summary_path = validate_ordinary_write_path(str(summary_path), vault_root)
     logger.info("Running LLM analysis across %d sources", len(sources))
     analysis = await analyze_sources(
         sources=sources,
@@ -204,8 +209,7 @@ authority: 3
 
 {analysis.recommendations}
 """
-    summary_path = output_dir / "summary.md"
-    validate_vault_path(str(summary_path), vault_root)
+    summary_path = validate_ordinary_write_path(str(summary_path), vault_root)
     summary_path.write_text(summary_content, encoding="utf-8")
 
     # 6. Index all notes

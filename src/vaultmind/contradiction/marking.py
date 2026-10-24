@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING
 
 import frontmatter
 
+from vaultmind.vault.security import validate_ordinary_write_path
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -38,6 +40,7 @@ CALLOUT_TYPE = "warning"
 def write_superseded_block(
     path: Path,
     *,
+    vault_root: Path,
     callout_type: str,
     title: str,
     rationale: str,
@@ -47,17 +50,17 @@ def write_superseded_block(
     timestamp: datetime | None = None,
     new_content: str | None = None,
 ) -> bool:
-    """Write a non-destructive supersede marker to `path`.
+    """Write a non-destructive supersede marker to an ordinary note in `vault_root`.
 
     Adds `frontmatter_value` to the list at `frontmatter_key` (idempotent —
     a repeat identical value is a no-op, returns `False`) and prepends a
     `> [!callout_type] title` Obsidian callout above the existing body.
     Existing content is never removed or rewritten. When `new_content` is
-    given, it is placed above the callout (and, beneath it, the fully
-    preserved prior body) so a bot-applied edit's new text becomes what
-    search/recall see as primary while the prior text stays intact
-    underneath. Returns `True` if the file was written.
+    given, it is placed above the callout and the fully preserved prior body.
+    This ordering does not guarantee current-content retrieval isolation.
+    Returns `True` if the file was written.
     """
+    path = validate_ordinary_write_path(str(path), vault_root)
     with open(path, encoding="utf-8") as f:
         post = frontmatter.load(f)
 
@@ -93,6 +96,8 @@ def mark_contradicted(
     winner_path: str,
     winner_title: str,
     rationale: str,
+    *,
+    vault_root: Path,
 ) -> bool:
     """Mark `loser_path` as contradicted by `winner_path`, non-destructively.
 
@@ -104,6 +109,7 @@ def mark_contradicted(
     """
     return write_superseded_block(
         loser_path,
+        vault_root=vault_root,
         callout_type=CALLOUT_TYPE,
         title=f"Contradicted by [[{winner_title}]]",
         rationale=rationale,

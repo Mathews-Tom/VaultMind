@@ -7,6 +7,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from vaultmind.knowledge.discovery import LEXICAL_LIMITATION, MAX_QUERY_PAGES, discover_pages
+from vaultmind.knowledge.intake import SourceIntake
 from vaultmind.knowledge.sections import _page
 from vaultmind.llm.client import Message
 from vaultmind.wiki.workspace import WikiError, WikiWorkspace, _safe_text, _scalar
@@ -35,20 +36,15 @@ claims to their supplied sources. Structural citation checks do not establish tr
 """
 
 
-def _source_identities(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        dict(
-            id=source["id"],
-            path=f"_wiki/sources/{source['id']}.md",
-            sha256=source["sha256"],
-            metadata_sha256=source["metadata_sha256"],
-            uri=source["metadata"]["uri"],
-        )
-        for source in payload["sources"]
-    ]
+def _source_identities(
+    payload: dict[str, Any], identities: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    return [identities[source["id"]] for source in payload["sources"]]
 
 
-def _evidence(payloads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str], set[str]]:
+def _evidence(
+    payloads: list[dict[str, Any]], identities: dict[str, dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[str], set[str]]:
     evidence: list[dict[str, Any]] = []
     unresolved: list[str] = []
     conflict_ids: set[str] = set()
@@ -56,7 +52,7 @@ def _evidence(payloads: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], lis
         _, sections, conflict = _page(payload)
         if conflict:
             unresolved.append(payload["page"])
-        sources = _source_identities(payload)
+        sources = _source_identities(payload, identities)
         for section_index, (heading, text) in enumerate(sections, 1):
             identity = f"p{page_index}-s{section_index}"
             evidence.append(
@@ -158,7 +154,8 @@ def query_knowledge(
         or len(set(pages)) != len(pages)
     ):
         raise WikiError(f"Select between 1 and {MAX_QUERY_PAGES} unique current wiki pages")
-    with WikiWorkspace(settings, read_only=True) as workspace:
+    identities: dict[str, dict[str, Any]] = {}
+    with WikiWorkspace(settings, read_only=True, allows_path=allows_path) as workspace:
         # Preflight the whole provenance tree before opening any evidence. The
         # current MCP authorization policy grants scope by first folder.
         if allows_path is not None and (
@@ -187,7 +184,11 @@ def query_knowledge(
                 )
                 if reason is not None:
                     return _empty_result(reason)
-    evidence, unresolved, conflict_ids = _evidence(payloads)
+            intake = SourceIntake.from_workspace(workspace, allows_path=allows_path)
+            for payload in payloads:
+                for snapshot in payload["sources"]:
+                    identities[snapshot["id"]] = intake.read(snapshot["id"]).identity()
+    evidence, unresolved, conflict_ids = _evidence(payloads, identities)
     selected = [payload["page"] for payload in payloads]
     prompt = json.dumps(
         dict(question=question, evidence=evidence, unresolved_conflicts=unresolved),
@@ -213,7 +214,7 @@ def query_knowledge(
         except Exception:
             raise WikiError("Wiki answer provider failed; no answer was accepted") from None
         result = _response(completion.text, {row["id"] for row in evidence}, conflict_ids)
-    with WikiWorkspace(settings, read_only=True) as workspace:
+    with WikiWorkspace(settings, read_only=True, allows_path=allows_path) as workspace:
         if allows_path is not None and (
             not allows_path("_wiki") or any(not allows_path(page) for page in selected)
         ):
@@ -224,7 +225,7 @@ def query_knowledge(
                     raise WikiError("Selected wiki evidence changed during the query")
     sources: dict[str, dict[str, Any]] = {}
     for payload in payloads:
-        for source in _source_identities(payload):
+        for source in _source_identities(payload, identities):
             sources[source["id"]] = source
     return dict(
         **result,
