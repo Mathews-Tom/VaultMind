@@ -22,6 +22,8 @@ Completed proposals are historical evidence: their payload identity, hashes, sou
 
 A prepared operation that was not confirmed complete holds the page against both new proposals and reapplication. There is no supported in-place resolution command in this command set. Stop maintenance on the affected page and preserve its current bytes, sources, prior history, queue and operation records for manual diagnosis; do not edit those records to force a retry. A failed proposal with no operation record can instead be replaced with a fresh reviewed proposal after correcting its cause.
 
+Content rollback in a consistent completed workspace is a new reviewed update, not replacement of the current file with old bytes. Copy the desired historical Markdown body into an external draft, omit its controlled YAML frontmatter, preserve every currently retained source citation, and retain attributed conflicts or supply an explicit reviewed resolution with a reason. Propose against the current page, review the new diff/digest, then apply; this preserves the pre-restore current page as another history revision. The [README restoration procedure](../README.md#restore-earlier-wording-through-review) gives concrete commands. It does not repair incomplete operations or missing provenance.
+
 Path checks reject traversal, unsafe IDs, nonregular files and user-controlled symlinks, including control storage. Explicit source/draft paths may expand administrator-owned ancestor aliases with protected root-owned parent directories, such as macOS's system temporary-directory spelling; leaf symlinks remain refused. Retention-marked inputs fail before source/proposal persistence. Wiki-owned locking serializes cooperating wiki commands and paths/identities are rechecked immediately before replacement. This is neither an all-writer lock nor global multi-file atomicity: an editor or script ignoring the lock can still race replacement. Keep edits quiescent while applying; a stale proposal must not overwrite an observed edit. These local guarantees do not repair held legacy reindex/watcher behavior or qualify native providers.
 
 `wiki/query.py` supplies read-only list, query and lint over one-level current pages. Read-only workspace/queue access does not initialize control directories, migrate databases, or write accepted state. Empty list/lint do not create a workspace. Approved current inspection requires exact latest completed applied bytes and matching source/metadata, operation and history identities. Pending/unapproved/manual-changed pages, restored older versions, incomplete operations and missing preserved sources are refused; list never presents them as accepted. Lint instead returns per-page `valid`, `unresolved` or `invalid` diagnostics, with body-redacted details; CLI prints all rows and exits 1 only for invalid rows. Structurally valid unresolved conflicts remain inspectable.
@@ -254,6 +256,28 @@ Required runtime inputs are the nonempty `PATH` with usable Git, the actual Pyth
 These controls are credential hygiene, **not a filesystem, process or network sandbox**. They do not make PATH executables or repository-local Git configuration trustworthy, block inherited file descriptors or system credential stores, or replace OS isolation. Existing network guards are fixture instrumentation. Hosting/shipping operations and separately authorized coding-agent authentication remain outside this offline-consumer boundary; production commands are unchanged.
 
 Reviewed assets resolve relative to the verifier, not the caller's working directory. Receipts identify the Git revision, verifier, dependencies, reviewed source and actual imported runtime; private planning files and ignored history are not inputs. The imported package is fingerprinted separately from the reviewed checkout; differing code fails acceptance. Missing required public assets also fail explicitly. The globally ignored `.docs` directory stays local and must not be force-added to support verification. Add `--receipt-out /temporary/path/receipt.json` to retain a JSON outcome; consumer failures emit a failed outcome and exit nonzero.
+
+For a noneditable local-wheel check, build once into a fresh external directory and install the frozen runtime dependencies plus `mcp`. From the repository root, with Python 3.12 and `uv` available:
+
+```bash
+REPO="$PWD"
+T="$(mktemp -d)"
+mkdir -p "$T/home"
+uv export --frozen --no-dev --extra mcp --no-emit-project --format requirements-txt --output-file "$T/dependencies.txt"
+uv build --wheel --out-dir "$T/dist"
+uv venv --python 3.12 "$T/installed"
+uv pip install --python "$T/installed/bin/python" --requirement "$T/dependencies.txt" "$T"/dist/*.whl
+cd "$T"
+vm() { env -i PATH="$PATH" HOME="$T/home" ANONYMIZED_TELEMETRY=False "$T/installed/bin/vaultmind" "$@"; }
+vm --version
+vm --help
+env -i PATH="$PATH" HOME="$T/home" ANONYMIZED_TELEMETRY=False "$T/installed/bin/python" -I -c 'import vaultmind; print(vaultmind.__file__)'
+for CASE in retrieval mcp approval config wiki wiki-query; do
+  env -i PATH="$PATH" HOME="$T/home" ANONYMIZED_TELEMETRY=False "$T/installed/bin/python" -I "$REPO/scripts/verify_acceptance.py" --case "$CASE" --offline --receipt-out "$T/$CASE.json" || exit
+done
+```
+
+The fresh `dist` directory must contain only the newly built wheel; record its full SHA-256 and source revision rather than selecting an old artifact. The printed import must be under the new environment's `site-packages`, not `src/`; receipts must show matching reviewed/runtime package hashes and the sibling installed console where used. The public verifier still needs the checkout's reviewed scripts/assets and committed migration history: this is not a claim that those verification assets ship inside the wheel. Repeat the README's source/create/update/query and reviewed-restore procedure with `vm --config /absolute/synthetic/config.toml wiki ...`, outside the checkout on fresh synthetic state. Scripted generator/query consumers establish engineering behavior, not live-model quality, native-watcher repair, private-vault readiness or release publication.
 
 CI retains lint, strict source typing, full pytest and formatting checks. A separate fail-fast matrix runs each of `retrieval`, `mcp`, `approval`, `config`, `wiki` and `wiki-query` offline on Python 3.12 and 3.13 with `dev+mcp`, explicit interpreter selection and a temporary HOME. The query case exercises actual Click list/query/lint, approved current-page/source validation and the configured generation boundary with a scripted client. These are synthetic source-consumer checks, not hosted-model qualification or installed-wheel evidence. Wheel verification must invoke this reviewed script with the wheel environment's Python from outside the checkout, without source-path injection or an editable install.
 

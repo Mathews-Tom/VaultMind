@@ -138,6 +138,19 @@ Generated results use `supported`, `conflicting` or `unsupported`. Supported/con
 
 These read-only commands create no proposal, approval, page/history update or automatic promotion. Citation/schema validation does **not** prove that a claim follows from the text or is true: inspect the complete sections and preserved sources yourself. Legacy RAG remains unchanged; these explicit wiki commands are not a default replacement for `/recall` or the thinking partner. SOURCE/offline use does not qualify an installed package or a live provider.
 
+### Restore earlier wording through review
+
+Do not copy a historical page over `wiki/report-cache.md`: older accepted bytes fail current-approval validation. Open the desired `_wiki/history/report-cache/*.md` revision in an editor, copy its Markdown body into an external `restore-draft.md`, and remove the historical YAML frontmatter. Keep every currently retained source citation. In the example above, restore the original 30-day project-note paragraph but retain the attributed 30-day/7-day `Conflicting information` block from `draft-b.md`; restoring wording does not settle that disagreement. An intentional resolution instead needs an explicit reason and citations to both sources.
+
+```bash
+uv run vaultmind --config /tmp/wiki-demo.toml wiki propose --page wiki/report-cache.md --source source-a --source source-b --draft-file restore-draft.md
+uv run vaultmind --config /tmp/wiki-demo.toml wiki review RESTORE_PROPOSAL_ID
+uv run vaultmind --config /tmp/wiki-demo.toml wiki apply RESTORE_PROPOSAL_ID --expect RESTORE_REVIEWED_SHA256
+uv run vaultmind --config /tmp/wiki-demo.toml wiki lint
+```
+
+Use the newly printed proposal ID and reviewed digest. Propose/review leave the current page unchanged; apply preserves that current page as another complete historical revision, retains both original sources and stamps a fresh accepted revision. This restores selected content, not old approval metadata or a byte-for-byte snapshot. The example remains `unresolved` with lint exit 0. This procedure applies only to a consistent completed workspace; it cannot clear an incomplete-operation hold or replace missing sources/control records.
+
 ## Quick Start
 
 ### Prerequisites
