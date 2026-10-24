@@ -14,6 +14,7 @@ import json
 import os
 import posixpath
 import re
+import sqlite3
 import stat
 import tempfile
 import unicodedata
@@ -197,7 +198,7 @@ class WikiWorkspace:
     lazily, under the wiki lock, only when a command needs them.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, read_only: bool = False) -> None:
         self.settings = settings
         self.root = settings.vault.path
         if "_wiki" not in settings.vault.excluded_folders:
@@ -205,6 +206,7 @@ class WikiWorkspace:
         _no_symlinks(self.root)
         self._queue: ReviewQueue | None = None
         self._active_id: str | None = None
+        self._read_only = read_only
         self._closed = False
 
     def __enter__(self) -> WikiWorkspace:
@@ -254,6 +256,8 @@ class WikiWorkspace:
     def _locked(self) -> Iterator[None]:
         if self._closed:
             raise WikiError("Wiki workspace is closed")
+        if self._read_only:
+            raise WikiError("Read-only wiki inspection cannot perform a write operation")
         try:
             self._controls()
             self._path("_wiki").mkdir(exist_ok=True)
@@ -273,6 +277,80 @@ class WikiWorkspace:
                 "Wiki filesystem operation failed; inspect paths and operation state"
             ) from None
 
+    @contextmanager
+    def reading(self) -> Iterator[None]:
+        """Inspect accepted state without creating locks, queues or migrations."""
+        if self._closed or not self._read_only:
+            raise WikiError("Page inspection requires an open read-only wiki workspace")
+        try:
+            self._controls()
+            lock_path = self._path("_wiki/wiki.lock")
+            if not lock_path.exists():
+                if self.page_paths():
+                    raise WikiError("Wiki approval lock is missing")
+                yield
+                return
+            fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as lock:
+                if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
+                    raise WikiError("Wiki approval lock must be a regular file")
+                fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+                try:
+                    self._controls()
+                    yield
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        except sqlite3.Error:
+            raise WikiError("Cannot read wiki approval state; inspect the existing queue") from None
+        except OSError:
+            raise WikiError("Cannot read wiki files; inspect paths and approval state") from None
+
+    def page_paths(self) -> list[str]:
+        """Discover only direct current-page Markdown paths, without reading bodies."""
+        directory = self._path("wiki")
+        if not directory.exists():
+            return []
+        return sorted(f"wiki/{path.name}" for path in directory.iterdir() if path.suffix == ".md")
+
+    def approved_page(self, page: str) -> dict[str, Any]:
+        """Return the latest exact approved payload; caller holds ``reading()``."""
+        if not self._read_only:
+            raise WikiError("Approved page inspection requires a read-only workspace")
+        current = self._current(page)
+        if current is None:
+            raise WikiError("Current wiki page is missing")
+        completed = self._completed_page_operations(page)
+        try:
+            applied = self.queue.list_applied(ProposalKind.WIKI_PAGE)
+        except (ValueError, TypeError, KeyError):
+            raise WikiError("Wiki approval queue contains invalid records") from None
+        if any(not isinstance(proposal.payload, dict) for proposal in applied):
+            raise WikiError("Wiki approval queue contains invalid payloads")
+        expected = {
+            proposal.proposal_id for proposal in applied if proposal.payload.get("page") == page
+        }
+        if expected != {proposal.proposal_id for proposal in completed}:
+            raise WikiError("Applied wiki approval has missing operation evidence")
+        if not completed:
+            raise WikiError("Wiki page has no completed approval")
+        # ReviewQueue stamps local naive datetimes; do not reinterpret their zone.
+        if any(
+            proposal.resolved is None or proposal.resolved.tzinfo is not None
+            for proposal in completed
+        ):
+            raise WikiError("Wiki approval completion time is invalid")
+        latest_time = max(
+            proposal.resolved for proposal in completed if proposal.resolved is not None
+        )
+        latest = [proposal for proposal in completed if proposal.resolved == latest_time]
+        if len(latest) != 1:
+            raise WikiError("Wiki page has ambiguous latest approval")
+        payload = latest[0].payload
+        if current != payload["after"].encode("utf-8"):
+            raise WikiError("Current wiki page changed after its latest approval")
+        self._validate_payload(payload)
+        return payload
+
     @property
     def queue(self) -> ReviewQueue:
         """The existing queue, with a real applier; caller operations hold the lock."""
@@ -281,6 +359,7 @@ class WikiWorkspace:
             self._queue = ReviewQueue(
                 self._path("_wiki/review_queue.db"),
                 appliers={ProposalKind.WIKI_PAGE: self._apply_payload},
+                read_only=self._read_only,
             )
         return self._queue
 
@@ -808,12 +887,12 @@ class WikiWorkspace:
                 raise WikiError("Completed operation has missing previous page history")
         return operation
 
-    def _guard_page_operations(self, page: str) -> set[str]:
-        """Do not bypass a page's interrupted apply with a different proposal."""
-        approved_sources: set[str] = set()
+    def _completed_page_operations(self, page: str) -> list[ReviewProposal]:
+        """Validate historical evidence and refuse every incomplete page operation."""
+        completed: list[ReviewProposal] = []
         directory = self._path("_wiki/operations")
         if not directory.exists():
-            return approved_sources
+            return completed
         for path in directory.iterdir():
             _no_symlinks(path)
             if not path.is_file() or path.suffix != ".json" or not _HASH.fullmatch(path.stem):
@@ -830,8 +909,16 @@ class WikiWorkspace:
             ):
                 state = self._state(proposal, validated)
                 raise WikiError(f"Page has an {state}; no new proposal or blind replay")
-            approved_sources.update(source["id"] for source in proposal.payload["sources"])
-        return approved_sources
+            completed.append(proposal)
+        return completed
+
+    def _guard_page_operations(self, page: str) -> set[str]:
+        """Do not bypass a page's interrupted apply with a different proposal."""
+        return {
+            source["id"]
+            for proposal in self._completed_page_operations(page)
+            for source in proposal.payload["sources"]
+        }
 
     def _state(self, proposal: ReviewProposal, operation: dict[str, Any] | None) -> str:
         if operation is None:

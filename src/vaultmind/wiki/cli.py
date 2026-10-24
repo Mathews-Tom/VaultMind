@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -37,9 +38,29 @@ def _workspace(ctx: click.Context) -> Iterator[tuple[WikiWorkspace, Settings]]:
         ) from None
 
 
+@contextmanager
+def _read_settings(ctx: click.Context) -> Iterator[Settings]:
+    """Load settings without opening the default writable workspace."""
+    from vaultmind.config import load_settings
+    from vaultmind.wiki.workspace import WikiError
+
+    try:
+        settings = load_settings(ctx.obj.get("config_path"))
+    except Exception as exc:
+        raise click.ClickException(f"Wiki configuration failed ({type(exc).__name__}).") from None
+    try:
+        yield settings
+    except WikiError as exc:
+        raise click.ClickException(str(exc)) from None
+    except Exception as exc:
+        raise click.ClickException(
+            f"Wiki operation failed ({type(exc).__name__}); no automatic retry was attempted."
+        ) from None
+
+
 @click.group("wiki")
 def wiki_group() -> None:
-    """Preserve sources and explicitly review single-page wiki changes."""
+    """Preserve, review and query explicitly selected source-backed wiki pages."""
 
 
 @wiki_group.command("add")
@@ -95,3 +116,52 @@ def apply(ctx: click.Context, proposal_id: str, expected: str) -> None:
     """Apply only the reviewed payload, rejecting stale or incomplete operations."""
     with _workspace(ctx) as (workspace, _settings):
         click.echo(workspace.apply(proposal_id, expected))
+
+
+@wiki_group.command("list")
+@click.pass_context
+def list_current_pages(ctx: click.Context) -> None:
+    """List approved current pages without constructing a provider or writer."""
+    from vaultmind.wiki.query import list_pages
+
+    with _read_settings(ctx) as settings:
+        click.echo(json.dumps(list_pages(settings), ensure_ascii=False, indent=2))
+
+
+@wiki_group.command("query")
+@click.argument("question")
+@click.option(
+    "--page", "pages", multiple=True, required=True, help="Approved current wiki/SLUG.md."
+)
+@click.option(
+    "--evidence-only", is_flag=True, help="Inspect complete sections without a model call."
+)
+@click.pass_context
+def query_current_pages(
+    ctx: click.Context, question: str, pages: tuple[str, ...], evidence_only: bool
+) -> None:
+    """Answer QUESTION from only the explicitly selected approved current pages."""
+    from vaultmind.wiki.query import query_pages
+
+    with _read_settings(ctx) as settings:
+        llm = None
+        if not evidence_only:
+            from vaultmind.cli import _create_llm_client, _require_llm_key
+
+            _require_llm_key(settings)
+            llm = _create_llm_client(settings)
+        result = query_pages(settings, question, list(pages), evidence_only=evidence_only, llm=llm)
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+@wiki_group.command("lint")
+@click.pass_context
+def lint_current_pages(ctx: click.Context) -> None:
+    """Diagnose current pages; exit 1 if any page is invalid."""
+    from vaultmind.wiki.query import lint_pages
+
+    with _read_settings(ctx) as settings:
+        rows = lint_pages(settings)
+        click.echo(json.dumps(rows, ensure_ascii=False, indent=2))
+    if any(row["status"] == "invalid" for row in rows):
+        ctx.exit(1)

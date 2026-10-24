@@ -114,6 +114,30 @@ A wrong digest, changed source/metadata, tampered payload or stale page fails ex
 
 Omit `--draft-file` only when deliberately requesting one bounded completion from the configured LLM provider. This requires the normal provider key and sends selected/retained sources and the current page to that provider; errors are not converted into a draft fallback. The scripted offline consumer exercises this adapter, not live-model factual quality or native/private-vault operation. See [architecture](docs/architecture.md#manual-wiki-boundary) and [configuration](docs/configuration.md#manual-wiki-configuration) for limits.
 
+Inspect the accepted page without constructing a provider or writer:
+
+```bash
+uv run vaultmind --config /tmp/wiki-demo.toml wiki list
+uv run vaultmind --config /tmp/wiki-demo.toml wiki query "What retention policy is supported?" --page wiki/report-cache.md --evidence-only
+uv run vaultmind --config /tmp/wiki-demo.toml wiki lint
+```
+
+These commands print pretty JSON. List returns approved current pages with their title, full SHA-256 and unresolved-conflict flag; invalid or unapproved current files fail instead of appearing accepted. Lint prints `page`, `status` and body-redacted `detail` for each page. Its statuses are `valid`, `unresolved` and `invalid`; only `invalid` makes the command exit 1. An unresolved but structurally valid disagreement is not a lint failure.
+
+Evidence-only query returns `status: "evidence"`, an empty answer/citations, and complete current-page sections. Each evidence row has a deterministic ID such as `p1-s1`, page path/hash, heading, full section text, and preserved source identities/hashes/metadata hashes/URI. IDs follow explicit page order; they are references within that result, not permanent global section identifiers. Source citations describe the selected current page's preserved provenance, not a retrieval of raw source bodies.
+
+For one deliberately configured model completion, omit `--evidence-only`:
+
+```bash
+uv run vaultmind --config /tmp/wiki-demo.toml wiki query "What retention policy is supported?" --page wiki/report-cache.md
+```
+
+Repeat `--page` to select 1–8 unique approved current pages. Questions are limited to 4096 characters; the full UTF-8 question/evidence envelope is limited to 128 KiB. Oversized input fails explicitly, without truncation or a provider call. No related pages, pending drafts, history, raw-source bodies or indexes are silently added. The current bytes must match the latest completed applied proposal, including preserved source/metadata and operation/history identities; manual edits, copied-back old versions, missing sources and incomplete operations fail closed.
+
+Generated results use `supported`, `conflicting` or `unsupported`. Supported/conflicting answers require unique citations to supplied section IDs; unsupported answers have no citations. An unresolved `Conflicting information` section without a reviewed `Resolution` cannot silently become a winner: the result must be conflicting (citing every unresolved conflict section) or unsupported. Invalid output, invented IDs and provider failures are errors, not fallback answers. Selected identities are checked again after completion to reject evidence that changed during generation.
+
+These read-only commands create no proposal, approval, page/history update or automatic promotion. Citation/schema validation does **not** prove that a claim follows from the text or is true: inspect the complete sections and preserved sources yourself. Legacy RAG remains unchanged; these explicit wiki commands are not a default replacement for `/recall` or the thinking partner. SOURCE/offline use does not qualify an installed package or a live provider.
+
 ## Quick Start
 
 ### Prerequisites

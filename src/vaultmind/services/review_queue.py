@@ -256,11 +256,21 @@ class ReviewQueue:
         db_path: Path,
         thresholds: AutonomyThresholds = DEFAULT_THRESHOLDS,
         appliers: Mapping[ProposalKind, Applier] | None = None,
+        *,
+        read_only: bool = False,
     ) -> None:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        if read_only:
+            self._conn = sqlite3.connect(
+                db_path.absolute().as_uri() + "?mode=ro",
+                uri=True,
+                check_same_thread=False,
+            )
+        else:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._migrate()
+        if not read_only:
+            self._migrate()
         self._thresholds = thresholds
         self._appliers: dict[ProposalKind, Applier] = dict(appliers or {})
 
@@ -423,6 +433,14 @@ class ReviewQueue:
             (ProposalStatus.FAILED.value,),
         ).fetchall()
         return [_row_to_proposal(r) for r in rows]
+
+    def list_applied(self, kind: ProposalKind) -> list[ReviewProposal]:
+        """Read completed mutations of one kind, including rows with lost external evidence."""
+        rows = self._conn.execute(
+            "SELECT * FROM review_proposals WHERE status = ? AND kind = ? ORDER BY resolved ASC",
+            (ProposalStatus.APPLIED.value, kind.value),
+        ).fetchall()
+        return [_row_to_proposal(row) for row in rows]
 
     def fatigue_stats(self) -> FatigueStats:
         """Approval-fatigue snapshot across every proposal ever routed."""
