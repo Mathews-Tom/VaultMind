@@ -319,10 +319,12 @@ class WikiWorkspace:
         current = self._current(page)
         if current is None:
             raise WikiError("Current wiki page is missing")
-        completed = self._completed_page_operations(page)
         try:
+            completed = self._completed_page_operations(page)
             applied = self.queue.list_applied(ProposalKind.WIKI_PAGE)
-        except (ValueError, TypeError, KeyError):
+        except WikiError:
+            raise
+        except (sqlite3.Error, ValueError, TypeError, KeyError):
             raise WikiError("Wiki approval queue contains invalid records") from None
         if any(not isinstance(proposal.payload, dict) for proposal in applied):
             raise WikiError("Wiki approval queue contains invalid payloads")
@@ -348,7 +350,7 @@ class WikiWorkspace:
         payload = latest[0].payload
         if current != payload["after"].encode("utf-8"):
             raise WikiError("Current wiki page changed after its latest approval")
-        self._validate_payload(payload)
+        self._validate_payload(payload, validate_candidate=False)
         return payload
 
     @property

@@ -39,15 +39,17 @@ def _sections(body: str) -> list[tuple[str, str]]:
     lines: list[str] = []
     fence = ""
     for line in body.splitlines(keepends=True):
-        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
         if marker:
-            token = marker.group(1)
-            if not fence:
+            token, rest = marker.groups()
+            if not fence and not (token[0] == "`" and "`" in rest):
                 fence = token
-            elif token[0] == fence[0] and len(token) >= len(fence):
+                lines.append(line)
+                continue
+            if fence and token[0] == fence[0] and len(token) >= len(fence) and not rest.strip():
                 fence = ""
-            lines.append(line)
-            continue
+                lines.append(line)
+                continue
         match = re.match(r"^#{1,6} ([^\r\n]+)", line) if not fence else None
         if match:
             if lines:

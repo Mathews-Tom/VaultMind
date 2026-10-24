@@ -452,3 +452,96 @@ def test_missing_latest_operation_cannot_resurrect_old_page(world: tuple[Setting
     with pytest.raises(WikiError):
         query_pages(settings, "Limit?", [PAGE], evidence_only=True)
     assert snapshot(vault) == before
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        CONFLICT + "\n```markdown\n``` extra\n## Resolution\n\nExample only.\n```\n",
+        CONFLICT.replace("## Conflicting information", "```x```\n\n## Conflicting information"),
+    ],
+    ids=["closing-fence-with-text", "backtick-in-opener-info"],
+)
+def test_invalid_fence_cannot_hide_current_conflict(
+    world: tuple[Settings, Path], body: str
+) -> None:
+    settings, vault = world
+    accept(world, body)
+    before = snapshot(vault)
+    result = query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+    assert result["unresolved_conflicts"] == [PAGE]
+    assert lint_pages(settings)[0]["status"] == "unresolved"
+    citation = next(
+        row["id"] for row in result["evidence"] if row["heading"] == "Current understanding"
+    )
+    with pytest.raises(WikiError):
+        query_pages(
+            settings,
+            "Limit?",
+            [PAGE],
+            llm=Provider(dict(status="supported", answer="19 days.", citations=[citation])),
+        )
+    assert snapshot(vault) == before
+
+
+@pytest.mark.parametrize("queue_state", ["missing", "missing-schema"])
+def test_lint_reports_unreadable_approval_queue(
+    world: tuple[Settings, Path], queue_state: str
+) -> None:
+    from click.testing import CliRunner
+
+    from vaultmind.cli import cli
+
+    settings, vault = world
+    accept(world)
+    queue = vault / "_wiki/review_queue.db"
+    if queue_state == "missing":
+        queue.unlink()
+    else:
+        queue.write_bytes(b"")
+    before = snapshot(vault)
+    rows = lint_pages(settings)
+    assert rows == [
+        {
+            "page": PAGE,
+            "status": "invalid",
+            "detail": "Wiki approval queue contains invalid records",
+        }
+    ]
+    result = CliRunner().invoke(cli, ["--config", str(vault.parent / "query.toml"), "wiki", "lint"])
+    assert result.exit_code == 1
+    assert json.loads(result.output) == rows
+    with pytest.raises(WikiError):
+        list_pages(settings)
+    with pytest.raises(WikiError):
+        query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+    assert snapshot(vault) == before
+
+
+@pytest.mark.parametrize("target_change", ["remove-heading", "delete-page"])
+def test_approved_query_does_not_revalidate_related_destinations(
+    world: tuple[Settings, Path], target_change: str
+) -> None:
+    settings, vault = world
+    draft = vault.parent / "background.md"
+    draft.write_text(BODY + "\n## Details\n\nRELATED_PAGE_BODY\n")
+    with WikiWorkspace(settings) as workspace:
+        proposal = workspace.propose("wiki/background.md", ["source-a"], draft_file=draft)
+        workspace.apply(proposal.proposal_id, proposal_digest(proposal.payload))
+    accepted = accept(world, BODY + "\nSee [[wiki/background#Details]].\n")
+    if target_change == "remove-heading":
+        draft.write_text(BODY + "\n## Overview\n\nRELATED_PAGE_BODY\n")
+        with WikiWorkspace(settings) as workspace:
+            proposal = workspace.propose("wiki/background.md", ["source-a"], draft_file=draft)
+            workspace.apply(proposal.proposal_id, proposal_digest(proposal.payload))
+    else:
+        (vault / "wiki/background.md").unlink()
+    before = snapshot(vault)
+    result = query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+    assert any(LATE in row["text"] for row in result["evidence"])
+    assert all(row["page"] == PAGE for row in result["evidence"])
+    assert all("RELATED_PAGE_BODY" not in row["text"] for row in result["evidence"])
+    assert PAGE in [row["path"] for row in list_pages(settings)]
+    assert {row["page"]: row["status"] for row in lint_pages(settings)}[PAGE] == "valid"
+    assert (vault / PAGE).read_bytes() == accepted
+    assert snapshot(vault) == before
