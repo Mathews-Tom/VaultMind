@@ -26,15 +26,50 @@ Content rollback in a consistent completed workspace is a new reviewed update, n
 
 Path checks reject traversal, unsafe IDs, nonregular files and user-controlled symlinks, including control storage. Explicit source/draft paths may expand administrator-owned ancestor aliases with protected root-owned parent directories, such as macOS's system temporary-directory spelling; leaf symlinks remain refused. Retention-marked inputs fail before source/proposal persistence. Wiki-owned locking serializes cooperating wiki commands and paths/identities are rechecked immediately before replacement. This is neither an all-writer lock nor global multi-file atomicity: an editor or script ignoring the lock can still race replacement. Keep edits quiescent while applying; a stale proposal must not overwrite an observed edit. These local guarantees do not repair held legacy reindex/watcher behavior or qualify native providers.
 
-`wiki/query.py` supplies read-only list, query and lint over one-level current pages. Read-only workspace/queue access does not initialize control directories, migrate databases, or write accepted state. Empty list/lint do not create a workspace. Approved current inspection requires exact latest completed applied bytes and matching source/metadata, operation and history identities. Pending/unapproved/manual-changed pages, restored older versions, incomplete operations and missing preserved sources are refused; list never presents them as accepted. Lint instead returns per-page `valid`, `unresolved` or `invalid` diagnostics, with body-redacted details; CLI prints all rows and exits 1 only for invalid rows. Structurally valid unresolved conflicts remain inspectable.
+`wiki/query.py` owns read-only list and lint; `knowledge/query.py` owns the shared
+answer/evidence operation used by root CLI `ask` and explicit `wiki query`.
+Read-only workspace/queue access does not initialize control directories,
+migrate databases or write accepted state. Empty list/lint create no workspace.
+Approved inspection requires exact latest completed applied bytes and matching
+source/metadata, operation and history identities. Pending, unapproved or
+manually changed pages, restored older versions, incomplete operations and
+missing sources are refused. Lint returns body-redacted per-page `valid`,
+`unresolved` or `invalid` diagnostics and exits 1 only for invalid rows.
 
 Inspection keeps the completed proposal's approval-time link validation; it does not follow or re-resolve related-page destinations against today's pages. Removing a related page or heading therefore does not invalidate an unchanged selected page. Preserved source identities remain mandatory, and fresh proposals and pending applies still validate every candidate link. A missing or schema-incomplete approval queue produces per-page `invalid` lint diagnostics without creating or repairing queue state.
 
-Query selects 1–8 unique explicit current page paths, without hidden traversal, raw-source bodies, pending/history content, Chroma or FTS. A question is at most 4096 characters and the complete UTF-8 question/evidence envelope is at most 128 KiB; oversize fails before completion, never truncates. Full selected sections, not prefixes, become evidence rows with deterministic page-order/section-order IDs (`p1-s1`, etc.), page path/hash, heading/text and preserved source ID/path/hash/metadata hash/URI citations. These result-local section IDs are not permanent identifiers. `--evidence-only` constructs no provider or writer and returns `status: evidence` with empty answer/citations.
+`knowledge/discovery.py` automatically discovers approved current pages for
+`ask`. Effective adapter path/provenance permissions precede body reads, ranking,
+counts and output. All permitted current candidates are validated before
+deterministic lexical ranking over title, headings and body; invalid permitted
+state fails closed even when unrelated to the question. Selection is limited to
+eight pages, with deterministic path tie-breaks and disclosed lexical/selection
+limits. No lexical match or an empty corpus returns deterministic unsupported
+without a provider; missed synonyms do not establish absence from the wiki.
+Explicit `wiki query --page` selects 1–8 unique current paths through the same
+core, bypassing ranking only.
+
+Neither route adds linked pages, raw-source bodies, pending/history content,
+Chroma or FTS. Questions are at most 4096 characters and the complete UTF-8
+question/evidence envelope at most 128 KiB; overflow fails without truncation
+or dropping a selected page. Complete sections become evidence rows with
+result-local page-order/section-order IDs (`p1-s1`, etc.), page path/hash,
+heading/text and preserved source ID/path/hash/metadata hash/URI citations.
+Evidence-only returns `status: evidence` for a nonempty selection and empty
+answer/citations. Lazy provider construction occurs only after valid complete
+evidence is assembled; empty, no-match, invalid, denied and oversized requests
+construct no provider.
 
 Generated query calls the existing configured client once with structured question/evidence/conflict data, treated as untrusted content, and validates a strict `status`/`answer`/`citations` response. `supported` and `conflicting` require unique known section IDs; `unsupported` has no citations. A selected unresolved `Conflicting information` section without a reviewed `Resolution` requires conflicting (citing every unresolved conflict section) or unsupported output, not an implicit winner. Invalid schema/citations or provider failure raises a redacted error, without fallback/retry. Current/source/operation identities are revalidated after completion before returning. The returned object includes evidence and unresolved page paths.
 
-Neither citation membership nor structural conflict checks prove factual truth or semantic entailment. Readers must inspect sections and preserved sources. These commands never promote answers, submit proposals, apply changes or mutate page/history/accepted state. Legacy RAG/defaults remain unchanged. The [README procedure](../README.md#manual-source-backed-wiki) gives real SOURCE commands; synthetic offline adapters do not establish independently installed-wheel, live-model, private-vault, Telegram or native-watcher qualification.
+Neither citation membership nor structural conflict checks prove factual truth
+or semantic entailment. Readers must inspect sections and preserved sources.
+Queries never promote answers, submit proposals or mutate accepted state. They
+never fall back to raw notes, graph, memory, web or previous answers. Existing
+Telegram and MCP answering/retrieval routes remain unchanged; root CLI `ask`
+is not a transport-wide cutover. The [README procedure](../README.md#manual-source-backed-wiki)
+gives real SOURCE commands; synthetic offline adapters do not establish
+installed-wheel, live-model, private-vault, Telegram or native qualification.
 
 ## Module Map
 

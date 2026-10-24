@@ -71,17 +71,46 @@ Read commands use the same explicit TOML and precedence:
 
 ```bash
 uv run vaultmind --config /tmp/wiki-demo.toml wiki list
-uv run vaultmind --config /tmp/wiki-demo.toml wiki query "What does the current page support?" --page wiki/report-cache.md --evidence-only
+uv run vaultmind --config /tmp/wiki-demo.toml ask "What does the current page support?" --evidence-only
 uv run vaultmind --config /tmp/wiki-demo.toml wiki lint
 ```
 
 List, lint and evidence-only query construct no provider or writer and need no provider key. They print pretty JSON. They inspect only approved current one-level pages and verify latest completed apply, exact page bytes, source/metadata hashes and operation/history identities; arbitrary manual edits, older accepted bytes restored over current, incomplete operations and missing sources are not accepted evidence. Lint supplies per-page body-redacted diagnostics (`valid`, `unresolved`, `invalid`) and exits 1 only when an invalid row exists. Valid unresolved conflicts are not errors.
 
-For generated query, omit `--evidence-only`; normal `[llm].provider`, `thinking_model`, `max_tokens` and key validation apply. One completion sends the explicit question and complete selected current sections with provenance, not raw-source bodies, pending/history content, indexes or implicitly related pages. Repeat `--page` to select 1–8 unique current pages. The question limit is 4096 characters; the complete question/evidence JSON envelope limit is 128 KiB of UTF-8. These fixed bounds are separate from proposal limits above and are not configurable TOML fields. Oversize fails without truncation or a provider call.
+For generated ask, omit `--evidence-only`; normal `[llm].provider`,
+`thinking_model`, `max_tokens` and key validation apply only when valid selected
+evidence needs a completion. Provider construction is lazy: empty/no-match,
+evidence-only, invalid, denied and oversized requests construct no provider.
+Automatic discovery validates all permitted current pages before lexical ranking;
+an invalid unrelated page fails closed. It selects at most eight pages and
+discloses that bound and the possibility of missing synonyms. Empty/no-match
+returns `unsupported`, not an exhaustive claim that the wiki lacks the answer.
 
-Evidence-only results have `status: evidence` and empty answer/citations. Evidence includes result-local section IDs such as `p1-s1`, full section text/heading, current page path/hash and preserved source identities, hashes, metadata hashes and URI. Generated `supported`/`conflicting` answers must cite supplied IDs; `unsupported` has no citations. Unresolved conflict sections without reviewed resolution require conflicting (citing all unresolved conflict sections) or unsupported results. Invented citations, invalid responses and provider failures fail explicitly without fallback; selected identities are rechecked after completion. Citation membership does not prove truth or entailment.
+Explicit `wiki query QUESTION --page wiki/report-cache.md` uses the same core;
+repeat `--page` for 1–8 unique current pages. It bypasses ranking, not validation.
+One completion sends complete selected current sections with provenance, never
+raw-source bodies, pending/history content, indexes or implicitly related pages.
+Questions are limited to 4096 characters and the complete question/evidence JSON
+envelope to 128 KiB of UTF-8. These fixed bounds are not configurable TOML fields.
+Overflow fails without truncation, dropping selected pages or a provider call.
 
-None of these reads creates a proposal, automatically promotes an answer, changes accepted state or replaces legacy RAG defaults. Configuration does not make source-checkout or synthetic offline use an installed-package/live-provider qualification.
+Nonempty evidence-only results have `status: evidence` and empty answer/citations;
+empty automatic results have `status: unsupported` with a bounded reason code.
+Results disclose selected page revisions, source identities, selection mode and
+limits. Evidence includes result-local section IDs such as `p1-s1`, full section
+text/heading, page path/hash and preserved source identities, hashes, metadata
+hashes and URI. Generated `supported`/`conflicting` answers must cite supplied IDs;
+`unsupported` has no citations. Unresolved conflict sections without reviewed
+resolution require conflicting (citing all unresolved conflict sections) or
+unsupported results. Invented citations, invalid responses and provider failures
+fail explicitly without fallback; selected identities are rechecked after
+completion. Citation membership does not prove truth or entailment.
+
+None of these reads creates a proposal, promotes an answer or changes accepted
+state. No raw-note, graph, memory, web or prior-answer fallback is used.
+Existing Telegram and MCP routes remain unchanged; root CLI `ask` does not
+replace their answering policies. Configuration does not make source-checkout
+or synthetic offline use an installed-package/live-provider qualification.
 
 For source inputs that must not be retained, use YAML frontmatter with either `do_not_retain: true` or `retention: do-not-retain`. Such inputs are rejected before body/proposal persistence; malformed retention values fail rather than being coerced. Do not use this as a secret scanner: only add data you are authorized to preserve and, for generated proposals, send to the provider.
 

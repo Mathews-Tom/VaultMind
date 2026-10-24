@@ -5886,9 +5886,7 @@ async def wiki_query_case(home: Path, checks: list[dict[str, Any]]) -> dict[str,
     from click.testing import CliRunner
 
     import vaultmind.cli as app
-    from vaultmind.config import load_settings
     from vaultmind.llm.client import LLMResponse
-    from vaultmind.wiki.workspace import WikiWorkspace, proposal_digest
 
     check = make_checker(checks)
     vault = home / "vault"
@@ -5900,7 +5898,6 @@ async def wiki_query_case(home: Path, checks: list[dict[str, Any]]) -> dict[str,
         '[llm]\nprovider = "ollama"\nthinking_model = "query-offline"\nmax_tokens = 1733\n',
         encoding="utf-8",
     )
-    settings = load_settings(config)
     source = home / "source.md"
     source.write_text("# Policy\n\n19 days versus 7 days; unresolved.\n", encoding="utf-8")
     page = "wiki/policy.md"
@@ -5932,11 +5929,20 @@ async def wiki_query_case(home: Path, checks: list[dict[str, Any]]) -> dict[str,
         def complete_multimodal(self, *args: Any, **kwargs: Any) -> LLMResponse:
             raise AssertionError("Unexpected multimodal completion")
 
-    def accept(body: str) -> None:
+    def accept(body: str, target: str = page, source_id: str = "policy") -> None:
         draft.write_text(body, encoding="utf-8")
-        with WikiWorkspace(settings) as workspace:
-            proposal = workspace.propose(page, ["policy"], draft_file=draft)
-            workspace.apply(proposal.proposal_id, proposal_digest(proposal.payload))
+        proposed = command(
+            "propose", "--page", target, "--source", source_id, "--draft-file", str(draft)
+        )
+        identity = re.search(r"^Proposal: ([0-9a-f]{64})$", proposed.output, re.M)
+        if identity is None:
+            raise AssertionError("CLI did not return an unambiguous proposal identity")
+        proposal_id = identity.group(1)
+        reviewed = command("review", proposal_id)
+        digest = re.search(r"^SHA256: ([0-9a-f]{64})$", reviewed.output, re.M)
+        if digest is None:
+            raise AssertionError("CLI did not return an unambiguous reviewed digest")
+        command("apply", proposal_id, "--expect", digest.group(1))
 
     def files() -> dict[str, bytes]:
         return {
@@ -5964,24 +5970,72 @@ async def wiki_query_case(home: Path, checks: list[dict[str, Any]]) -> dict[str,
             ok=ok,
         )
 
-    with WikiWorkspace(settings) as workspace:
-        workspace.add_source(source, "policy", uri="urn:offline:policy")
+    def ask(
+        question: str = "What is the retention?", *, evidence: bool = False, ok: bool = True
+    ) -> Any:
+        result = runner.invoke(
+            app.cli,
+            ["--config", str(config), "ask", question, *(["--evidence-only"] if evidence else [])],
+        )
+        check("wiki-query.cli.ask.exit", ok, result.exit_code == 0)
+        if not ok:
+            check("wiki-query.ask.explicit-error", True, bool(result.output.strip()))
+        return result
+
+    with patch.object(app, "_create_llm_client", side_effect=AssertionError("Unexpected model")):
+        empty_before = files()
+        empty = json.loads(ask().output)
+        check("wiki-query.empty.status", "unsupported", empty["status"])
+        check("wiki-query.empty.reason", "no_eligible_pages", empty["reason"])
+        check("wiki-query.empty.readonly", True, empty_before == files())
+
+    command("add", str(source), "--id", "policy", "--uri", "urn:offline:policy")
     accept(
         "# Policy\n\n## Current understanding\n\n"
         + "Background. " * 60
         + late
         + " [[_wiki/sources/policy]]\n"
     )
+    gardening_source = home / "gardening.md"
+    gardening_source.write_text("# Gardening\n\nWater seedlings weekly.\n", encoding="utf-8")
+    command("add", str(gardening_source), "--id", "gardening", "--uri", "urn:offline:garden")
+    gardening_page = "wiki/gardening.md"
+    accept(
+        "# Gardening\n\n## Current understanding\n\n"
+        "Water seedlings weekly. [[_wiki/sources/gardening]]\n",
+        gardening_page,
+        "gardening",
+    )
     before = files()
     with patch.object(app, "_create_llm_client", side_effect=AssertionError("Unexpected model")):
         listed = json.loads(command("list").output)
-        check("wiki-query.list.current-only", [page], [row["path"] for row in listed])
+        check(
+            "wiki-query.list.current-only",
+            [gardening_page, page],
+            [row["path"] for row in listed],
+        )
         check(
             "wiki-query.lint.valid",
-            ["valid"],
+            ["valid", "valid"],
             [row["status"] for row in json.loads(command("lint").output)],
         )
         evidence = json.loads(query(evidence=True).output)
+        automatic = json.loads(ask(evidence=True).output)
+        for field in ("evidence", "citations", "selected_pages", "sources", "unresolved_conflicts"):
+            check("wiki-query.automatic-explicit." + field, evidence[field], automatic[field])
+        check("wiki-query.automatic.selected", [page], automatic["selection"]["selected_pages"])
+        check("wiki-query.automatic.mode", "automatic", automatic["selection"]["mode"])
+        no_match = json.loads(ask("xylophone zeppelin").output)
+        check("wiki-query.no-match.status", "unsupported", no_match["status"])
+        check("wiki-query.no-match.reason", "no_lexical_support", no_match["reason"])
+        ask("q" * 4097, ok=False)
+        invalid = vault / gardening_page
+        accepted_gardening = invalid.read_bytes()
+        invalid.write_bytes(accepted_gardening + b"\nUnreviewed unrelated edit.\n")
+        try:
+            ask(evidence=True, ok=False)
+        finally:
+            invalid.write_bytes(accepted_gardening)
     late_row = next(row for row in evidence["evidence"] if late in row["text"])
     check("wiki-query.full-late-evidence", True, late_row["text"].index(late) > 500)
     check("wiki-query.source-provenance", "policy", late_row["sources"][0]["id"])
@@ -5995,6 +6049,17 @@ async def wiki_query_case(home: Path, checks: list[dict[str, Any]]) -> dict[str,
             }
             result = json.loads(query().output)
             check("wiki-query.generated." + status, status, result["status"])
+            automatic_result = json.loads(ask().output)
+            check(
+                "wiki-query.automatic-generated." + status,
+                result["status"],
+                automatic_result["status"],
+            )
+            check(
+                "wiki-query.generated-citation-parity",
+                result["citations"],
+                automatic_result["citations"],
+            )
         check("wiki-query.configured-model", "query-offline", calls[-1]["model"])
         check("wiki-query.configured-tokens", 1733, calls[-1]["max_tokens"])
         check(
@@ -6013,26 +6078,48 @@ async def wiki_query_case(home: Path, checks: list[dict[str, Any]]) -> dict[str,
     preserved.write_bytes(original)
     check("wiki-query.restored", "evidence", json.loads(query(evidence=True).output)["status"])
     accept(
-        "# Policy\n\n## Current understanding\n\nUnresolved.\n\n"
-        "## Conflicting information\n\n19 versus 7 days. [[_wiki/sources/policy]]\n"
+        "# Policy\n\n## Current understanding\n\nRetention remains unresolved.\n\n"
+        "## Conflicting information\n\nRetention is 19 versus 7 days. "
+        "[[_wiki/sources/policy]]\n"
     )
     conflict = json.loads(query(evidence=True).output)
     check("wiki-query.conflict-page", [page], conflict["unresolved_conflicts"])
     check(
         "wiki-query.lint.unresolved",
-        ["unresolved"],
+        ["valid", "unresolved"],
         [row["status"] for row in json.loads(command("lint").output)],
     )
     ids = [row["id"] for row in conflict["evidence"] if "## Conflicting information" in row["text"]]
+    conflict_before = files()
     with patch.object(app, "_create_llm_client", return_value=QueryLLM()):
         response = {"status": "conflicting", "answer": "19 and 7 days conflict.", "citations": ids}
         check("wiki-query.conflict-attribution", ids, json.loads(query().output)["citations"])
+        check("wiki-query.automatic-conflict", ids, json.loads(ask().output)["citations"])
         response = {"status": "supported", "answer": "19 days wins.", "citations": ids}
         query(ok=False)
+        ask(ok=False)
+    check("wiki-query.conflict-readonly", True, conflict_before == files())
+    for index in range(8):
+        accept(
+            f"# Retention alternative {index}\n\n## Current understanding\n\n"
+            "Retention remains unresolved. [[_wiki/sources/policy]]\n",
+            f"wiki/retention-{index}.md",
+        )
+    bounded_before = files()
+    with patch.object(app, "_create_llm_client", side_effect=AssertionError("Unexpected model")):
+        bounded = json.loads(ask(evidence=True).output)
+    check("wiki-query.bounded.count", 8, len(bounded["selection"]["selected_pages"]))
+    check("wiki-query.bounded.disclosed", True, bounded["selection"]["limited"])
+    check("wiki-query.lexical-limit.disclosed", True, bool(bounded["selection"]["limitation"]))
+    check("wiki-query.bounded-readonly", True, bounded_before == files())
     return {
-        "consumer": "real Click list/query/lint, configured client, current-page/source validation",
+        "consumer": "real Click add/propose/review/apply/list/ask/query/lint, configured client",
         "model_calls": len(calls),
         "observed_statuses": ["evidence", "supported", "unsupported", "conflicting"],
+        "synthetic_limits": (
+            "Deterministic lexical discovery only; scripted generator, not model quality. "
+            "No live provider, embeddings, Telegram, MCP cutover or private-vault evidence."
+        ),
     }
 
 

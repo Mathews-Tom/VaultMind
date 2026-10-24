@@ -10,8 +10,9 @@ from typing import Any
 import pytest
 
 from vaultmind.config import Settings, load_settings
+from vaultmind.knowledge.query import query_knowledge
 from vaultmind.llm.client import LLMResponse
-from vaultmind.wiki.query import lint_pages, list_pages, query_pages
+from vaultmind.wiki.query import lint_pages, list_pages
 from vaultmind.wiki.workspace import WikiError, WikiWorkspace, proposal_digest
 
 PAGE = "wiki/cache.md"
@@ -97,7 +98,7 @@ def test_full_evidence_and_readonly_inspection(world: tuple[Settings, Path]) -> 
     settings, vault = world
     accept(world)
     before = snapshot(vault)
-    result = query_pages(settings, "What is the limit?", [PAGE], evidence_only=True)
+    result = query_knowledge(settings, "What is the limit?", [PAGE], evidence_only=True)
     assert result["status"] == "evidence"
     assert result["answer"] == "" and result["citations"] == []
     late = next(row for row in result["evidence"] if LATE in row["text"])
@@ -117,7 +118,7 @@ def test_full_evidence_and_readonly_inspection(world: tuple[Settings, Path]) -> 
 def test_generation_uses_configured_boundary(world: tuple[Settings, Path], status: str) -> None:
     settings, vault = world
     accept(world)
-    evidence = query_pages(settings, "Limit?", [PAGE], evidence_only=True)["evidence"]
+    evidence = query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)["evidence"]
     citation = next(row["id"] for row in evidence if LATE in row["text"])
     client = Provider(
         dict(
@@ -127,7 +128,7 @@ def test_generation_uses_configured_boundary(world: tuple[Settings, Path], statu
         )
     )
     before = snapshot(vault)
-    result = query_pages(settings, "Limit?", [PAGE], llm=client)
+    result = query_knowledge(settings, "Limit?", [PAGE], llm_factory=lambda: client)
     assert result["status"] == status
     assert result["citations"] == ([citation] if status == "supported" else [])
     assert len(client.calls) == 1
@@ -143,18 +144,21 @@ def test_generation_uses_configured_boundary(world: tuple[Settings, Path], statu
 def test_unresolved_conflict_requires_attributed_conflict(world: tuple[Settings, Path]) -> None:
     settings, _ = world
     accept(world, CONFLICT)
-    evidence = query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+    evidence = query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)
     ids = [row["id"] for row in evidence["evidence"] if "## Conflicting information" in row["text"]]
     assert evidence["unresolved_conflicts"] == [PAGE]
     assert lint_pages(settings)[0]["status"] == "unresolved"
     client = Provider(dict(status="conflicting", answer="19 and 7 days conflict.", citations=ids))
-    assert query_pages(settings, "Limit?", [PAGE], llm=client)["citations"] == ids
+    result = query_knowledge(settings, "Limit?", [PAGE], llm_factory=lambda: client)
+    assert result["citations"] == ids
     with pytest.raises(WikiError):
-        query_pages(
+        query_knowledge(
             settings,
             "Limit?",
             [PAGE],
-            llm=Provider(dict(status="supported", answer="19 days.", citations=ids)),
+            llm_factory=lambda: Provider(
+                dict(status="supported", answer="19 days.", citations=ids)
+            ),
         )
 
 
@@ -175,7 +179,7 @@ def test_invalid_generation_has_no_fallback_or_effects(
     accept(world)
     before = snapshot(vault)
     with pytest.raises(WikiError) as error:
-        query_pages(settings, "Limit?", [PAGE], llm=Provider(response))
+        query_knowledge(settings, "Limit?", [PAGE], llm_factory=lambda: Provider(response))
     assert "PRIVATE_PROVIDER_BODY" not in str(error.value)
     assert snapshot(vault) == before
 
@@ -189,11 +193,11 @@ def test_missing_source_lint_and_exact_restoration(world: tuple[Settings, Path])
     before = snapshot(vault)
     assert lint_pages(settings)[0]["status"] == "invalid"
     with pytest.raises(WikiError):
-        query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+        query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)
     assert snapshot(vault) == before
     source.write_bytes(original)
     assert lint_pages(settings)[0]["status"] == "valid"
-    assert query_pages(settings, "Limit?", [PAGE], evidence_only=True)["evidence"]
+    assert query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)["evidence"]
 
 
 @pytest.mark.parametrize(
@@ -214,7 +218,7 @@ def test_explicit_page_bounds_precede_provider(
     accept(world)
     client = Provider(dict(status="unsupported", answer="Unknown.", citations=[]))
     with pytest.raises(WikiError):
-        query_pages(settings, "Limit?", pages, llm=client)
+        query_knowledge(settings, "Limit?", pages, llm_factory=lambda: client)
     assert client.calls == []
 
 
@@ -225,33 +229,33 @@ def test_stale_current_pending_and_unapproved_scope(world: tuple[Settings, Path]
     current = (vault / PAGE).read_bytes()
     (vault / PAGE).write_bytes(old)
     with pytest.raises(WikiError):
-        query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+        query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)
     (vault / PAGE).write_bytes(current)
     draft = vault.parent / "pending.md"
     draft.write_text(BODY.replace("19 days", "23 days"))
     with WikiWorkspace(settings) as workspace:
         workspace.propose(PAGE, ["source-a"], draft_file=draft)
-    result = query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+    result = query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)
     text = "\n".join(row["text"] for row in result["evidence"])
     assert "21 days" in text and "23 days" not in text
     (vault / "wiki/unapproved.md").write_bytes(current)
     with pytest.raises(WikiError):
-        query_pages(settings, "Limit?", ["wiki/unapproved.md"], evidence_only=True)
+        query_knowledge(settings, "Limit?", ["wiki/unapproved.md"], evidence_only=True)
 
 
 def test_question_and_context_bounds_before_call(
     world: tuple[Settings, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import vaultmind.wiki.query as module
+    import vaultmind.knowledge.query as module
 
     settings, _ = world
     accept(world)
     client = Provider(dict(status="unsupported", answer="Unknown.", citations=[]))
     with pytest.raises(WikiError):
-        query_pages(settings, "x" * 4097, [PAGE], llm=client)
+        query_knowledge(settings, "x" * 4097, [PAGE], llm_factory=lambda: client)
     monkeypatch.setattr(module, "MAX_QUERY_CONTEXT_BYTES", 128)
     with pytest.raises(WikiError):
-        query_pages(settings, "Limit?", [PAGE], llm=client)
+        query_knowledge(settings, "Limit?", [PAGE], llm_factory=lambda: client)
     assert client.calls == []
 
 
@@ -264,7 +268,7 @@ def test_changes_during_completion_are_refused(world: tuple[Settings, Path]) -> 
         mutate=lambda: source.write_bytes(b"changed while answering"),
     )
     with pytest.raises(WikiError):
-        query_pages(settings, "Limit?", [PAGE], llm=client)
+        query_knowledge(settings, "Limit?", [PAGE], llm_factory=lambda: client)
     assert len(client.calls) == 1
 
 
@@ -296,7 +300,7 @@ def test_approved_identity_corruption_is_not_queryable(
         path.write_bytes(b"unreviewed historical replacement")
     before = snapshot(vault)
     with pytest.raises(WikiError):
-        query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+        query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)
     assert lint_pages(settings)[0]["status"] == "invalid"
     assert snapshot(vault) == before
 
@@ -421,18 +425,20 @@ def test_readonly_workspace_rejects_mutation(world: tuple[Settings, Path]) -> No
 def test_fenced_resolution_cannot_hide_current_conflict(world: tuple[Settings, Path]) -> None:
     settings, _ = world
     accept(world, CONFLICT + "\n```markdown\n## Resolution\n\nExample only.\n```\n")
-    result = query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+    result = query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)
     assert result["unresolved_conflicts"] == [PAGE]
     assert lint_pages(settings)[0]["status"] == "unresolved"
     citation = next(
         row["id"] for row in result["evidence"] if row["heading"] == "Current understanding"
     )
     with pytest.raises(WikiError):
-        query_pages(
+        query_knowledge(
             settings,
             "Limit?",
             [PAGE],
-            llm=Provider(dict(status="supported", answer="19 days.", citations=[citation])),
+            llm_factory=lambda: Provider(
+                dict(status="supported", answer="19 days.", citations=[citation])
+            ),
         )
 
 
@@ -450,7 +456,7 @@ def test_missing_latest_operation_cannot_resurrect_old_page(world: tuple[Setting
     with pytest.raises(WikiError):
         list_pages(settings)
     with pytest.raises(WikiError):
-        query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+        query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)
     assert snapshot(vault) == before
 
 
@@ -468,18 +474,20 @@ def test_invalid_fence_cannot_hide_current_conflict(
     settings, vault = world
     accept(world, body)
     before = snapshot(vault)
-    result = query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+    result = query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)
     assert result["unresolved_conflicts"] == [PAGE]
     assert lint_pages(settings)[0]["status"] == "unresolved"
     citation = next(
         row["id"] for row in result["evidence"] if row["heading"] == "Current understanding"
     )
     with pytest.raises(WikiError):
-        query_pages(
+        query_knowledge(
             settings,
             "Limit?",
             [PAGE],
-            llm=Provider(dict(status="supported", answer="19 days.", citations=[citation])),
+            llm_factory=lambda: Provider(
+                dict(status="supported", answer="19 days.", citations=[citation])
+            ),
         )
     assert snapshot(vault) == before
 
@@ -509,7 +517,7 @@ def test_lint_reports_unreadable_approval_queue(
     with pytest.raises(WikiError):
         list_pages(settings)
     with pytest.raises(WikiError):
-        query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+        query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)
     assert snapshot(vault) == before
 
 
@@ -532,7 +540,7 @@ def test_approved_query_does_not_revalidate_related_destinations(
     else:
         (vault / "wiki/background.md").unlink()
     before = snapshot(vault)
-    result = query_pages(settings, "Limit?", [PAGE], evidence_only=True)
+    result = query_knowledge(settings, "Limit?", [PAGE], evidence_only=True)
     assert any(LATE in row["text"] for row in result["evidence"])
     assert all(row["page"] == PAGE for row in result["evidence"])
     assert all("RELATED_PAGE_BODY" not in row["text"] for row in result["evidence"])

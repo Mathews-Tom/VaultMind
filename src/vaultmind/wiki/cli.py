@@ -141,16 +141,12 @@ def query_current_pages(
     ctx: click.Context, question: str, pages: tuple[str, ...], evidence_only: bool
 ) -> None:
     """Answer QUESTION from only the explicitly selected approved current pages."""
-    from vaultmind.wiki.query import query_pages
+    from vaultmind.cli import _query_approved_knowledge
 
     with _read_settings(ctx) as settings:
-        llm = None
-        if not evidence_only:
-            from vaultmind.cli import _create_llm_client, _require_llm_key
-
-            _require_llm_key(settings)
-            llm = _create_llm_client(settings)
-        result = query_pages(settings, question, list(pages), evidence_only=evidence_only, llm=llm)
+        result = _query_approved_knowledge(
+            settings, question, list(pages), evidence_only=evidence_only
+        )
         click.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 

@@ -1,6 +1,7 @@
 """CLI entry point for VaultMind.
 
 Commands:
+    vaultmind ask         — Ask approved current knowledge with automatic page selection
     vaultmind index       — Full index of the vault
     vaultmind bot         — Start the Telegram bot
     vaultmind mcp-serve   — Start the MCP server
@@ -29,6 +30,7 @@ from vaultmind.wiki.cli import wiki_group
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+    from vaultmind.config import Settings
     from vaultmind.indexer.bm25 import BM25Index
     from vaultmind.indexer.embedding_cache import EmbeddingCache
     from vaultmind.llm.client import LLMClient
@@ -104,6 +106,25 @@ def _create_llm_client(settings: object) -> LLMClient:
         provider=settings.llm.provider,
         api_key=settings.llm_api_key,
         base_url=base_url,
+    )
+
+
+def _query_approved_knowledge(
+    settings: Settings,
+    question: str,
+    pages: list[str] | None = None,
+    *,
+    evidence_only: bool = False,
+) -> dict[str, Any]:
+    """Supply the same lazy configured provider to automatic and explicit queries."""
+    from vaultmind.knowledge.query import query_knowledge
+
+    def factory() -> LLMClient:
+        _require_llm_key(settings)
+        return _create_llm_client(settings)
+
+    return query_knowledge(
+        settings, question, pages, evidence_only=evidence_only, llm_factory=factory
     )
 
 
@@ -224,6 +245,36 @@ def cli(ctx: click.Context, verbose: bool, config: str | None) -> None:
     _setup_logging(verbose, stderr=ctx.invoked_subcommand == "mcp-serve")
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = Path(config) if config else None
+
+
+@cli.command("ask")
+@click.argument("question")
+@click.option(
+    "--evidence-only", is_flag=True, help="Inspect complete approved evidence without a model call."
+)
+@click.pass_context
+def ask(ctx: click.Context, question: str, evidence_only: bool) -> None:
+    """Answer QUESTION from automatically selected approved current pages."""
+    import json
+
+    from vaultmind.config import load_settings
+    from vaultmind.wiki.workspace import WikiError
+
+    try:
+        settings = load_settings(ctx.obj.get("config_path"))
+    except Exception as exc:
+        raise click.ClickException(
+            f"Knowledge configuration failed ({type(exc).__name__})."
+        ) from None
+    try:
+        result = _query_approved_knowledge(settings, question, evidence_only=evidence_only)
+    except WikiError as exc:
+        raise click.ClickException(str(exc)) from None
+    except Exception as exc:
+        raise click.ClickException(
+            f"Knowledge operation failed ({type(exc).__name__}); no automatic retry was attempted."
+        ) from None
+    click.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 @cli.command()
