@@ -24,6 +24,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 from vaultmind import __version__
+from vaultmind.wiki.cli import wiki_group
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -2483,6 +2484,9 @@ def source_run(ctx: click.Context, name: str) -> None:
         f"[green]✓[/green] Connector '{name}' run complete:"
         f" {result.items_fetched} fetched, {result.items_ingested} ingested"
     )
+
+
+cli.add_command(wiki_group)
 
 
 if __name__ == "__main__":

@@ -72,6 +72,7 @@ class ProposalKind(StrEnum):
     DUPLICATE_MERGE = "duplicate_merge"
     MATURATION_SYNTHESIS = "maturation_synthesis"
     SOURCE_INGESTION = "source_ingestion"
+    WIKI_PAGE = "wiki_page"
 
 
 class Impact(StrEnum):

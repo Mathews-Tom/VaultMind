@@ -62,7 +62,7 @@ jobs:
       fail-fast: true
       matrix:
         python-version: ["3.12", "3.13"]
-        case: [retrieval, mcp, approval, config]
+        case: [retrieval, mcp, approval, config, wiki]
     env:
       UV_PYTHON: ${{ matrix.python-version }}
 

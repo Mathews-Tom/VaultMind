@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline acceptance: retrieval, MCP note scope, approval and configuration consumers."""
+"""Offline acceptance: retrieval, MCP, approval, configuration and manual wiki consumers."""
 
 from __future__ import annotations
 
@@ -5359,9 +5359,531 @@ async def config_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any
     }
 
 
+async def wiki_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Exercise the public manual wiki commands with synthetic state and a scripted provider."""
+    import difflib
+    import sqlite3
+    import stat
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    import vaultmind.cli as app
+    from vaultmind.config import VAULTMIND_HOME
+    from vaultmind.llm.client import LLMResponse
+    from vaultmind.wiki.workspace import WikiWorkspace, proposal_digest
+
+    home = home.resolve()
+    check = make_checker(checks)
+    check("wiki.isolation.home", str(home), str(Path(os.environ["HOME"]).resolve()))
+    check("wiki.isolation.cwd", str(home), str(Path.cwd().resolve()))
+    check(
+        "wiki.isolation.application-home",
+        str(home / ".vaultmind"),
+        str(VAULTMIND_HOME.resolve()),
+    )
+    root = home / "wiki-case"
+    vault = root / "vault"
+    vault.mkdir(parents=True)
+    forbidden = root / "forbidden-indexes"
+    config = root / "config.toml"
+    config.write_text(
+        f"[vault]\npath = {json.dumps(str(vault))}\n"
+        'excluded_folders = [".obsidian", ".git", ".trash", "_wiki"]\n'
+        '[llm]\nprovider = "ollama"\nthinking_model = "fixture-wiki-model"\nmax_tokens = 1777\n'
+        f"[chroma]\npersist_dir = {json.dumps(str(forbidden / 'chroma'))}\n"
+        f"[search]\nbm25_db_path = {json.dumps(str(forbidden / 'bm25.db'))}\n"
+        f"[graph]\npersist_path = {json.dumps(str(forbidden / 'graph.json'))}\n",
+        encoding="utf-8",
+    )
+    config_before = config.read_bytes()
+    source_a = root / "source-a.md"
+    source_b = root / "source-b.md"
+    source_a.write_bytes(b"# Initial cache policy\r\n\r\nThe project note recommends 30 days.\r\n")
+    source_b.write_bytes(
+        b"# Operations policy\n\nThe operations note recommends 7 days; scope is unresolved.\n"
+    )
+    initial_body = (
+        "# Report cache policy\n\n## Current understanding\n\n"
+        "The project note recommends 30 days. [[_wiki/sources/source-a]]\n\n"
+        "[Original source](../_wiki/sources/source-a.md#initial-cache-policy)\n"
+    )
+    conflict_body = (
+        "# Report cache policy\n\n## Current understanding\n\n"
+        "Retention duration is unresolved across the two sources.\n\n"
+        "## Conflicting information\n\n"
+        "- The project note recommends 30 days. [[_wiki/sources/source-a]]\n"
+        "- The operations note recommends 7 days, with unresolved scope. "
+        "[[_wiki/sources/source-b]]\n"
+    )
+    page = vault / "wiki/report-cache.md"
+    control = vault / "_wiki"
+    runner = CliRunner()
+    model_calls: list[dict[str, Any]] = []
+    factory_calls: list[tuple[str, str, int]] = []
+    responses: list[str | Exception] = []
+
+    class WikiLLM:
+        provider_name = "scripted-wiki-acceptance"
+
+        def complete(
+            self,
+            messages: list[Message],
+            model: str,
+            max_tokens: int = 4096,
+            system: str | None = None,
+        ) -> LLMResponse:
+            model_calls.append(
+                {
+                    "messages": [m.content for m in messages],
+                    "system": system,
+                    "model": model,
+                    "max_tokens": max_tokens,
+                }
+            )
+            if not responses:
+                raise AssertionError("Unexpected additional wiki completion")
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return LLMResponse(text=response, model=model, usage={})
+
+        def complete_multimodal(
+            self,
+            messages: list[MultimodalMessage],
+            model: str,
+            max_tokens: int = 4096,
+            system: str | None = None,
+        ) -> LLMResponse:
+            raise AssertionError("Wiki must not request a multimodal completion")
+
+    def factory(settings: Any) -> WikiLLM:
+        factory_calls.append(
+            (settings.llm.provider, settings.llm.thinking_model, settings.llm.max_tokens)
+        )
+        return WikiLLM()
+
+    def command(*args: str, ok: bool = True) -> Any:
+        result = runner.invoke(app.cli, ["--config", str(config), "wiki", *args])
+        check("wiki.cli." + ".".join(args[:1]) + ".exit", ok, result.exit_code == 0)
+        if not ok:
+            check("wiki.cli.error-is-explicit", True, bool(result.output.strip()))
+        return result
+
+    def queued(proposal_id: str) -> dict[str, Any]:
+        with sqlite3.connect(control / "review_queue.db") as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute(
+                "SELECT * FROM review_proposals WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+        if row is None:
+            raise AssertionError("CLI printed a proposal that is absent from its queue")
+        return {**dict(row), "payload": json.loads(row["payload"])}
+
+    def propose(body: str, *, generated: bool = False, source: str = "source-a") -> str:
+        args = ["propose", "--page", "wiki/report-cache.md", "--source", source]
+        if generated:
+            responses.append(body)
+        else:
+            draft = root / "draft.md"
+            draft.write_text(body, encoding="utf-8")
+            args += ["--draft-file", str(draft)]
+        result = command(*args)
+        match = re.search(r"^Proposal: ([0-9a-f]{64})$", result.output, re.M)
+        if match is None:
+            raise AssertionError("CLI did not return an unambiguous proposal identity")
+        return match.group(1)
+
+    def reviewed(proposal_id: str) -> tuple[dict[str, Any], str]:
+        row = queued(proposal_id)
+        payload = row["payload"]
+        review = command("review", proposal_id).output
+        expected_digest = proposal_digest(payload)
+        check("wiki.review.digest", True, f"SHA256: {expected_digest}" in review)
+        before = payload["before"]
+        after = payload["after"]
+        exact_diff = "".join(
+            difflib.unified_diff(
+                before.splitlines(keepends=True),
+                after.splitlines(keepends=True),
+                fromfile="a/wiki/report-cache.md",
+                tofile="b/wiki/report-cache.md",
+            )
+        )
+        check("wiki.review.exact-diff", True, exact_diff in review)
+        for source in payload["sources"]:
+            check("wiki.review.source-id", True, source["id"] in review)
+            check("wiki.review.full-source-hash", True, source["sha256"] in review)
+        check("wiki.review.block", "BLOCK", row["lane"])
+        check("wiki.review.pending", "pending", row["status"])
+        return payload, expected_digest
+
+    def history() -> dict[str, str]:
+        return {
+            str(path.relative_to(control)): digest(path.read_bytes())
+            for path in (control / "history").rglob("*.md")
+        }
+
+    with patch.object(app, "_create_llm_client", side_effect=factory):
+        added = command("add", str(source_a), "--id", "source-a", "--uri", "urn:example:project")
+        check("wiki.add.full-hash-printed", True, digest(source_a.read_bytes()) in added.output)
+        check(
+            "wiki.add.original-bytes",
+            True,
+            source_a.read_bytes() == (control / "sources/source-a.md").read_bytes(),
+        )
+        first_id = propose(initial_body, generated=True)
+        first, first_digest = reviewed(first_id)
+        check("wiki.create.not-applied-before-review", False, page.exists())
+        check(
+            "wiki.create.exact-original-source-context",
+            True,
+            source_a.read_bytes().decode() in "\n".join(model_calls[0]["messages"]),
+        )
+        command("apply", first_id, "--expect", first_digest)
+        first_bytes = first["after"].encode()
+        check("wiki.create.accepted-exact-candidate", True, page.read_bytes() == first_bytes)
+        check("wiki.create.queue-real-applied", "applied", queued(first_id)["status"])
+        check(
+            "wiki.create.source-still-original",
+            True,
+            source_a.read_bytes() == (control / "sources/source-a.md").read_bytes(),
+        )
+        markdown_target = page.parent / "../_wiki/sources/source-a.md"
+        check(
+            "wiki.markdown.source-resolves-from-actual-page",
+            str((control / "sources/source-a.md").resolve()),
+            str(markdown_target.resolve()),
+        )
+        check(
+            "wiki.markdown.resolved-original-bytes",
+            True,
+            markdown_target.read_bytes() == source_a.read_bytes(),
+        )
+        fifo = root / "nonregular-source.md"
+        os.mkfifo(fifo)
+        queue_before_fifo = (control / "review_queue.db").read_bytes()
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import json, socket, sys\n"
+                "attempts = []\n"
+                "def guard(event, args):\n"
+                "    if event in {'socket.getaddrinfo', 'socket.gethostbyname', "
+                "'socket.gethostbyaddr'} or (event in {'socket.connect', 'socket.sendto'} "
+                "and args[0].family != socket.AF_UNIX):\n"
+                "        attempts.append(event)\n"
+                "        raise RuntimeError('Network forbidden in wiki FIFO acceptance')\n"
+                "sys.addaudithook(guard)\n"
+                "from click.testing import CliRunner\n"
+                "from vaultmind.cli import cli\n"
+                "result = CliRunner().invoke(cli, sys.argv[1:])\n"
+                "print(json.dumps({'exit_code': result.exit_code, 'output': result.output, "
+                "'network_attempts': attempts}))\n",
+                "--config",
+                str(config),
+                "wiki",
+                "add",
+                str(fifo),
+                "--id",
+                "nonregular",
+            ],
+            cwd=home,
+            env={
+                "HOME": str(home),
+                "PATH": os.environ["PATH"],
+                "ANONYMIZED_TELEMETRY": "False",
+            },
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        check("wiki.nonregular.subprocess-completes", 0, child.returncode)
+        refusal = json.loads(child.stdout)
+        check("wiki.nonregular.child-network-attempts", [], refusal["network_attempts"])
+        check("wiki.nonregular.explicit-refusal", True, bool(refusal["output"].strip()))
+        check("wiki.nonregular.unsuccessful", True, refusal["exit_code"] != 0)
+        check("wiki.nonregular.still-fifo", True, stat.S_ISFIFO(fifo.lstat().st_mode))
+        check("wiki.nonregular.current-unchanged", True, page.read_bytes() == first_bytes)
+        check(
+            "wiki.nonregular.queue-unchanged",
+            True,
+            (control / "review_queue.db").read_bytes() == queue_before_fifo,
+        )
+        check(
+            "wiki.nonregular.original-source-unchanged",
+            True,
+            (control / "sources/source-a.md").read_bytes() == source_a.read_bytes(),
+        )
+        check(
+            "wiki.nonregular.no-source-record", False, (control / "sources/nonregular.md").exists()
+        )
+
+        command("add", str(source_b), "--id", "source-b", "--uri", "urn:example:operations")
+        update_id = propose(conflict_body, generated=True, source="source-b")
+        update, update_digest = reviewed(update_id)
+        check("wiki.update.before-exact-current", True, update["before"].encode() == first_bytes)
+        check(
+            "wiki.update.retained-and-selected-provenance",
+            ["source-a", "source-b"],
+            sorted(s["id"] for s in update["sources"]),
+        )
+        context = "\n".join(model_calls[1]["messages"])
+        for name, data in (
+            ("retained-source", source_a.read_bytes()),
+            ("selected-source", source_b.read_bytes()),
+            ("current-page", first_bytes),
+        ):
+            check("wiki.update.generator-has-complete-" + name, True, data.decode() in context)
+        check("wiki.update.pending-leaves-current-exact", True, page.read_bytes() == first_bytes)
+        command("apply", update_id, "--expect", update_digest)
+        accepted = update["after"].encode()
+        check("wiki.update.accepted-exact-reviewed-candidate", True, page.read_bytes() == accepted)
+        check("wiki.update.conflict-body-preserved", True, conflict_body.strip() in update["after"])
+        check(
+            "wiki.update.only-one-current-page",
+            ["report-cache.md"],
+            sorted(p.name for p in page.parent.glob("*.md")),
+        )
+        check(
+            "wiki.update.complete-prior-page-preserved",
+            True,
+            (control / "history/report-cache" / f"{update_id}.md").read_bytes() == first_bytes,
+        )
+        for identifier, original in (("source-a", source_a), ("source-b", source_b)):
+            check(
+                "wiki.update.original-" + identifier,
+                True,
+                original.read_bytes() == (control / "sources" / f"{identifier}.md").read_bytes(),
+            )
+
+        original_history = history()
+        metadata = (control / "sources/source-a.json").read_bytes()
+        command("add", str(source_a), "--id", "source-a")
+        command("apply", update_id, "--expect", update_digest)
+        check("wiki.noop.current-unchanged", True, page.read_bytes() == accepted)
+        check("wiki.noop.history-unchanged", original_history, history())
+        check(
+            "wiki.noop.source-metadata-unchanged",
+            True,
+            metadata == (control / "sources/source-a.json").read_bytes(),
+        )
+        command("apply", update_id, "--expect", "0" * 64, ok=False)
+        check("wiki.wrong-digest.current-unchanged", True, page.read_bytes() == accepted)
+
+        # Every negative uses a different payload so no failed proposal is silently retried.
+        stale_id = propose(
+            conflict_body + "\nReviewer note: stale-base check.\n", source="source-b"
+        )
+        _, stale_digest = reviewed(stale_id)
+        edited = accepted + b"\nManual edit that must survive stale rejection.\n"
+        page.write_bytes(edited)
+        command("apply", stale_id, "--expect", stale_digest, ok=False)
+        check("wiki.stale.edit-preserved", True, page.read_bytes() == edited)
+        page.write_bytes(accepted)
+        command("apply", stale_id, "--expect", stale_digest, ok=False)
+        check("wiki.stale.failed-not-retried", True, page.read_bytes() == accepted)
+
+        for target in ("source-bytes", "source-metadata"):
+            proposal_id = propose(
+                conflict_body + f"\nReviewer note: {target}.\n", source="source-b"
+            )
+            _, expected = reviewed(proposal_id)
+            path = control / (
+                "sources/source-b.md" if target == "source-bytes" else "sources/source-b.json"
+            )
+            original = path.read_bytes()
+            if target == "source-bytes":
+                path.write_bytes(original + b"\nchanged after review\n")
+            else:
+                changed = json.loads(original)
+                changed["uri"] = "urn:example:tampered"
+                path.write_text(json.dumps(changed), encoding="utf-8")
+            command("apply", proposal_id, "--expect", expected, ok=False)
+            check("wiki.tamper." + target + ".unchanged-page", True, page.read_bytes() == accepted)
+            path.write_bytes(original)
+
+        tampered_id = propose(
+            conflict_body + "\nReviewer note: payload identity.\n", source="source-b"
+        )
+        payload, _ = reviewed(tampered_id)
+        payload["after"] += "\nUnreviewed persisted payload replacement.\n"
+        payload["after_sha256"] = digest(payload["after"].encode())
+        with sqlite3.connect(control / "review_queue.db") as db:
+            db.execute(
+                "UPDATE review_proposals SET payload = ? WHERE proposal_id = ?",
+                (json.dumps(payload), tampered_id),
+            )
+        command("apply", tampered_id, "--expect", proposal_digest(payload), ok=False)
+        check(
+            "wiki.tamper.recomputed-digest-does-not-reidentify-proposal",
+            True,
+            page.read_bytes() == accepted,
+        )
+
+        failure_secret = "PRIVATE_PROVIDER_EXCEPTION_BODY"
+        responses.append(RuntimeError(failure_secret))
+        failed = command(
+            "propose", "--page", "wiki/report-cache.md", "--source", "source-b", ok=False
+        )
+        check("wiki.provider.error-body-not-disclosed", False, failure_secret in failed.output)
+        check("wiki.provider.no-fallback-page", True, page.read_bytes() == accepted)
+        check("wiki.provider.single-call-no-retry", 3, len(model_calls))
+        check(
+            "wiki.factory.configured-values",
+            [("ollama", "fixture-wiki-model", 1777)] * 3,
+            factory_calls,
+        )
+
+        invalid = root / "invalid.md"
+        for target in ("../outside.md", "wiki/nested/page.md", "_wiki/history/old.md"):
+            invalid.write_text(initial_body, encoding="utf-8")
+            command(
+                "propose",
+                "--page",
+                target,
+                "--source",
+                "source-a",
+                "--draft-file",
+                str(invalid),
+                ok=False,
+            )
+        for link in (
+            "[[_wiki/sources/missing]]",
+            "[[../outside]]",
+            "[[_wiki/history/report-cache/old]]",
+            "[bad](../../outside.md)",
+        ):
+            invalid.write_text(conflict_body + "\n" + link + "\n", encoding="utf-8")
+            command(
+                "propose",
+                "--page",
+                "wiki/report-cache.md",
+                "--source",
+                "source-b",
+                "--draft-file",
+                str(invalid),
+                ok=False,
+            )
+        command("add", str(source_a), "--id", "../escape", ok=False)
+        check(
+            "wiki.invalid-references-and-paths.current-unchanged",
+            True,
+            page.read_bytes() == accepted,
+        )
+
+        # Retention refusal must not persist the marker/body in source, queue or logs.
+        rejected_body = "PRIVATE_DO_NOT_RETAIN_CONTENT"
+        retained_files = {
+            str(p.relative_to(vault)): p.read_bytes() for p in vault.rglob("*") if p.is_file()
+        }
+        for marker in (
+            "do_not_retain: true",
+            "retention: do-not-retain",
+            'do_not_retain: "true"',
+            "retention: [do-not-retain]",
+        ):
+            invalid.write_text(f"---\n{marker}\n---\n{rejected_body}", encoding="utf-8")
+            refused = command("add", str(invalid), "--id", "do-not-retain", ok=False)
+            check(
+                "wiki.retention.no-source",
+                False,
+                (control / "sources/do-not-retain.md").exists(),
+            )
+            check("wiki.retention.no-body-output", False, rejected_body in refused.output)
+        check(
+            "wiki.retention.no-body-persisted",
+            False,
+            any(rejected_body.encode() in p.read_bytes() for p in vault.rglob("*") if p.is_file()),
+        )
+        check(
+            "wiki.retention.accepted-state-unchanged",
+            True,
+            all((vault / name).read_bytes() == data for name, data in retained_files.items()),
+        )
+
+        # A symlink swap after review must fail before touching its external target.
+        symlink_id = propose(
+            conflict_body + "\nReviewer note: output symlink.\n", source="source-b"
+        )
+        _, symlink_digest = reviewed(symlink_id)
+        outside = root / "outside.md"
+        outside.write_bytes(b"external sentinel\n")
+        page.unlink()
+        page.symlink_to(outside)
+        command("apply", symlink_id, "--expect", symlink_digest, ok=False)
+        check(
+            "wiki.symlink.external-target-unchanged",
+            True,
+            outside.read_bytes() == b"external sentinel\n",
+        )
+        page.unlink()
+        page.write_bytes(accepted)
+
+        # Simulate process loss after the real replacement, before the completion receipt.
+        interrupted_id = propose(
+            conflict_body + "\nReviewer note: interrupted operation.\n", source="source-b"
+        )
+        interrupted, interrupted_digest = reviewed(interrupted_id)
+        replace = WikiWorkspace._replace_page
+
+        def interrupted_replace(self: Any, target: Path, content: bytes) -> None:
+            replace(self, target, content)
+            raise RuntimeError("synthetic interruption after replacement")
+
+        with patch.object(WikiWorkspace, "_replace_page", interrupted_replace):
+            command("apply", interrupted_id, "--expect", interrupted_digest, ok=False)
+        actual_after_interruption = page.read_bytes()
+        check(
+            "wiki.interruption.replacement-really-happened",
+            True,
+            actual_after_interruption == interrupted["after"].encode(),
+        )
+        state = json.loads((control / "operations" / f"{interrupted_id}.json").read_text())
+        check("wiki.interruption.prepared-not-completed", "prepared", state["state"])
+        check(
+            "wiki.interruption.queue-not-applied",
+            False,
+            queued(interrupted_id)["status"] == "applied",
+        )
+        reopened_review = command("review", interrupted_id).output.lower()
+        check("wiki.interruption.reopen-reports-incomplete", True, "incomplete" in reopened_review)
+        command("apply", interrupted_id, "--expect", interrupted_digest, ok=False)
+        check(
+            "wiki.interruption.no-blind-replay",
+            True,
+            page.read_bytes() == actual_after_interruption,
+        )
+        check(
+            "wiki.interruption.original-prior-page-preserved",
+            True,
+            (control / "history/report-cache" / f"{interrupted_id}.md").read_bytes() == accepted,
+        )
+
+    check("wiki.no-index-side-effects", False, forbidden.exists())
+    check("wiki.config-not-edited", True, config.read_bytes() == config_before)
+    return {
+        "fixture": "synthetic CRLF/local UTF8 sources, explicit excluded _wiki, private HOME/cwd",
+        "consumer": (
+            "actual Click wiki commands -> configured client factory "
+            "-> real generator/queue/applier"
+        ),
+        "model_calls": len(model_calls),
+        "limits": (
+            "No live provider, embedding, private vault, editor, watcher "
+            "or installed-wheel qualification."
+        ),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", required=True, choices=["retrieval", "mcp", "approval", "config"])
+    parser.add_argument(
+        "--case", required=True, choices=["retrieval", "mcp", "approval", "config", "wiki"]
+    )
     parser.add_argument("--offline", required=True, action="store_true")
     parser.add_argument("--receipt-out", type=Path)
     args = parser.parse_args()
@@ -5444,6 +5966,19 @@ def main() -> int:
             limitations="Fixture-only offline proof; not native model/provider/Telegram "
             "qualification; source finalization (M15) not claimed.",
         )
+    if args.case == "wiki":
+        receipt.update(
+            transport="in-process real Click wiki add/propose/review/apply and persisted queue",
+            boundary_substitutions=[
+                "scripted LLM at configured cli._create_llm_client only",
+                "synthetic sources, isolated HOME/cwd and explicit fixture TOML",
+                "interruption injected at page replacement after real replacement",
+            ],
+            limitations=(
+                "Manual lifecycle engineering only; no live provider, embeddings, private vault, "
+                "editor, watcher, installed artifact or OS-wide concurrency proof."
+            ),
+        )
     attempts: list[str] = []
 
     def forbid_network(event: str, arguments: tuple[Any, ...]) -> None:
@@ -5461,6 +5996,7 @@ def main() -> int:
             "mcp": "vm-m12-mcp-",
             "approval": "vm-m13-approval-",
             "config": "vm-m21-config-",
+            "wiki": "vm-m31-wiki-",
         }[args.case]
         with (
             tempfile.TemporaryDirectory(prefix=prefix) as directory,
@@ -5477,6 +6013,8 @@ def main() -> int:
                 case = approval_case(home, receipt["checks"])
             elif args.case == "config":
                 case = config_case(home, receipt["checks"])
+            elif args.case == "wiki":
+                case = wiki_case(home, receipt["checks"])
             else:
                 case = mcp_case(home, receipt["checks"])
             receipt.update(asyncio.run(case))
