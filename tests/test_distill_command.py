@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 import pytest
 
 from vaultmind.bot.handlers.distill import handle_distill
-from vaultmind.config import DistillConfig
+from vaultmind.config import DistillConfig, Settings, VaultConfig
 from vaultmind.llm.client import LLMResponse
 from vaultmind.memory.store import EpisodeStore
 from vaultmind.pipeline.distill import DISTILL_SYSTEM_PROMPT
@@ -23,44 +23,6 @@ from vaultmind.vault.models import Note
 # ---------------------------------------------------------------------------
 # Test helpers / stubs
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class _FakeVaultConfig:
-    path: Path
-    inbox_folder: str = "00-inbox"
-    excluded_folders: list[str] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.excluded_folders is None:
-            self.excluded_folders = []
-
-
-@dataclass
-class _FakeLLMConfig:
-    thinking_model: str = "test-model"
-
-
-@dataclass
-class _FakeTelegramConfig:
-    allowed_user_ids: list[int] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.allowed_user_ids is None:
-            self.allowed_user_ids = []  # empty = allow all
-
-
-@dataclass
-class _FakeSettings:
-    vault: _FakeVaultConfig
-    telegram: Any = None
-    llm: Any = None
-
-    def __post_init__(self) -> None:
-        if self.telegram is None:
-            self.telegram = _FakeTelegramConfig()
-        if self.llm is None:
-            self.llm = _FakeLLMConfig()
 
 
 _DISTILL_JSON = {
@@ -109,6 +71,8 @@ def _make_message(user_id: int = 42) -> AsyncMock:
     msg = AsyncMock()
     msg.from_user = _make_from_user(user_id)
     msg.answer = AsyncMock()
+    msg.chat.id = 70
+    msg.message_id = 8
     return msg
 
 
@@ -119,11 +83,24 @@ def _make_note_stub(path: Path, vault_root: Path) -> Note:
 
 def _make_thinking(*, has_session: bool, history: list[dict[str, str]] | None = None) -> MagicMock:
     thinking = MagicMock()
-    thinking.has_active_session.return_value = has_session
-    session = MagicMock()
-    session.history = history or []
-    session.last_active = time.time()
-    thinking._get_session.return_value = session
+    selected_at = time.time()
+
+    def snapshot(user_id: int) -> dict[str, Any] | None:
+        if not has_session:
+            return None
+        return dict(
+            version=1,
+            kind="selected-session",
+            user_id=user_id,
+            session_name="default",
+            created_at=selected_at,
+            last_active=selected_at,
+            history=deepcopy(history or []),
+            summaries=[],
+            participants=[dict(role="user", user_id=user_id), dict(role="assistant")],
+        )
+
+    thinking.snapshot_for_distillation.side_effect = snapshot
     return thinking
 
 
@@ -136,8 +113,9 @@ def _make_ctx(
     vault_root = tmp_path / "vault"
     vault_root.mkdir()
 
-    cfg = _FakeVaultConfig(path=vault_root)
-    settings = _FakeSettings(vault=cfg)
+    settings = Settings(vault=VaultConfig(path=vault_root))
+    settings.telegram.allowed_user_ids = []
+    settings.llm.thinking_model = "test-model"
 
     parser = MagicMock()
     parser.parse_file.side_effect = lambda fp: _make_note_stub(fp, vault_root)
@@ -150,6 +128,7 @@ def _make_ctx(
     ctx.parser = parser
     ctx.llm_client = _make_llm_client()
     ctx.episode_store = episode_store
+    ctx.gap_store = None
     return ctx
 
 
@@ -295,3 +274,73 @@ class TestDistillEpisodicWiring:
         await handle_distill(ctx, message, _default_config(), {})
 
         assert "Extracted" not in _reply_text(message)
+
+
+@pytest.mark.asyncio
+async def test_manual_snapshot_precedes_first_await_and_retains_selection(tmp_path: Path) -> None:
+    history = [dict(user="selected question", assistant="selected answer")]
+    ctx = _make_ctx(tmp_path, _make_thinking(has_session=True, history=history), MagicMock())
+    message = _make_message()
+
+    async def answer(*args: object, **kwargs: object) -> None:
+        history.append(dict(user="late question", assistant="late answer"))
+
+    message.answer.side_effect = answer
+    await handle_distill(ctx, message, _default_config(), {})
+    model_input = ctx.llm_client.complete.call_args_list[0].kwargs["messages"][0].content
+    assert "selected question" in model_input and "late question" not in model_input
+    snapshots = [
+        json.loads(path.read_text())
+        for path in (ctx.vault_root / "_wiki/sources").glob("*.md")
+        if '"kind":"selected-session"' in path.read_text()
+    ]
+    assert len(snapshots) == 1
+    assert len(snapshots[0]["history"]) == 1
+    assert snapshots[0]["selection"]["event_id"] == "70:8:42"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_manual_delivery_does_not_repeat_producer(tmp_path: Path) -> None:
+    ctx = _make_ctx(
+        tmp_path,
+        _make_thinking(has_session=True, history=[dict(user="q", assistant="a")]),
+        MagicMock(),
+    )
+    message = _make_message()
+    await handle_distill(ctx, message, _default_config(), {})
+    await handle_distill(ctx, message, _default_config(), {})
+    assert ctx.llm_client.complete.call_count == 1
+    assert ctx.store.index_single_note.call_count == 1
+    assert "preserved and unapproved" in _reply_text(message)
+
+
+@pytest.mark.asyncio
+async def test_manual_retention_refusal_never_calls_model(tmp_path: Path) -> None:
+    ctx = _make_ctx(
+        tmp_path,
+        _make_thinking(
+            has_session=True, history=[dict(user="---\ndo_not_retain: true\n---\nsecret")]
+        ),
+        MagicMock(),
+    )
+    message = _make_message()
+    await handle_distill(ctx, message, _default_config(), {})
+    ctx.llm_client.complete.assert_not_called()
+    ctx.store.index_single_note.assert_not_called()
+    assert not (ctx.vault_root / "_wiki").exists()
+
+
+@pytest.mark.asyncio
+async def test_index_failure_reports_preserved_unapproved_projection(tmp_path: Path) -> None:
+    store = MagicMock()
+    store.index_single_note.side_effect = RuntimeError("index unavailable")
+    ctx = _make_ctx(
+        tmp_path,
+        _make_thinking(has_session=True, history=[dict(user="q", assistant="a")]),
+        store,
+    )
+    message = _make_message()
+    await handle_distill(ctx, message, _default_config(), {})
+    assert "index: failed" in _reply_text(message)
+    assert "unapproved" in _reply_text(message)
+    assert len(list((ctx.vault_root / "qa-artifacts").glob("*.md"))) == 1

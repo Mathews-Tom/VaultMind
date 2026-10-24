@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -11,7 +10,7 @@ from vaultmind.llm.client import LLMClient, Message
 
 logger = logging.getLogger(__name__)
 
-_ANALYSIS_SYSTEM_PROMPT = """\
+ANALYSIS_SYSTEM_PROMPT = """\
 You are a research analyst. Analyze the provided sources and produce a comparative analysis.
 
 Output valid JSON with these keys:
@@ -24,6 +23,7 @@ Output valid JSON with these keys:
 When referencing specific sources, use [[Source Title]] wikilink syntax.
 Focus on cross-source patterns, not per-source summaries.
 """
+ANALYSIS_MAX_TOKENS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,14 +35,8 @@ class AnalysisResult:
     recommendations: str = ""
 
 
-async def analyze_sources(
-    sources: list[dict[str, str]],
-    query: str,
-    llm_client: LLMClient,
-    model: str,
-) -> AnalysisResult:
-    """Send all source content to LLM for comparative analysis."""
-    # Build source context (truncate long transcripts)
+def render_analysis_request(sources: list[dict[str, str]], query: str) -> str:
+    """Render the exact model input; full originals are retained separately."""
     source_blocks: list[str] = []
     for src in sources:
         title = src["title"]
@@ -51,22 +45,28 @@ async def analyze_sources(
 
     combined = "\n\n---\n\n".join(source_blocks)
 
-    user_msg = (
+    return (
         f"Research query: {query}\n\n"
         f"Sources ({len(sources)} total):\n\n{combined}\n\n"
         "Produce a comparative analysis as JSON."
     )
 
-    messages = [Message(role="user", content=user_msg)]
 
-    response = await asyncio.to_thread(
-        llm_client.complete,
-        messages=messages,
+def analyze_sources(
+    request_text: str,
+    llm_client: LLMClient,
+    model: str,
+    *,
+    system: str = ANALYSIS_SYSTEM_PROMPT,
+    max_tokens: int = ANALYSIS_MAX_TOKENS,
+) -> AnalysisResult:
+    """Analyze an already retained request without reading or writing files."""
+    response = llm_client.complete(
+        messages=[Message(role="user", content=request_text)],
         model=model,
-        max_tokens=4096,
-        system=_ANALYSIS_SYSTEM_PROMPT,
+        max_tokens=max_tokens,
+        system=system,
     )
-
     return _parse_analysis(response.text)
 
 
@@ -82,13 +82,21 @@ def _parse_analysis(text: str) -> AnalysisResult:
             cleaned = cleaned.split("```", 1)[1].split("```", 1)[0]
 
         data = json.loads(cleaned)
+        if not isinstance(data, dict):
+            raise ValueError("Analysis must be an object")
+        text_keys = ("summary", "comparative_insights", "gaps", "recommendations")
+        if any(not isinstance(data.get(key, ""), str) for key in text_keys):
+            raise ValueError("Analysis fields must be text")
+        themes = data.get("key_themes", [])
+        if not isinstance(themes, list) or any(not isinstance(theme, str) for theme in themes):
+            raise ValueError("Analysis themes must be a text list")
         return AnalysisResult(
             summary=data.get("summary", ""),
-            key_themes=data.get("key_themes", []),
+            key_themes=themes,
             comparative_insights=data.get("comparative_insights", ""),
             gaps=data.get("gaps", ""),
             recommendations=data.get("recommendations", ""),
         )
-    except (json.JSONDecodeError, IndexError):
+    except (ValueError, IndexError):
         logger.warning("Could not parse LLM analysis as JSON, using raw text")
         return AnalysisResult(summary=text[:2000])

@@ -137,11 +137,21 @@ Photo-original retention follows `save_originals`; audio is transient and voice
 questions do not create captured sources. A provider-derived description or
 transcript does not establish original retention or factual accuracy.
 
-These preservation guarantees cover the named intake adapters, not every
-independent producer. Research, connectors, maturation, bookmarking and
-conversation distillation retain their existing domain paths and limits; their
-generated notes are neither automatically intake-preserved nor wiki-approved.
-Enabling such a producer never makes its output factual authority for answering.
+Research, connector ingestion, explicit conversation distillation, enabled non-query idle finalization and maturation now use the same preserved-source boundary before model transforms. Research retains the available search/transcript-segment representation and complete joined transcript, not an HTTP wire response; connectors retain the fetched `SourceItem` strings. Exact generation requests retain the selected messages, system prompt where used, model and token limit. Parsed/rendered generated artifacts are separate parent-linked, explicitly unapproved sources, not a promise to archive raw provider responses.
+
+`pipeline/distill.py::generate_distillation`, `pipeline/synthesis.py::generate_synthesis` and `research/analyzer.py::analyze_sources` generate content in memory without writing notes. Their caller-owned orchestration preserves inputs and requests, validates retained dependency closures, then retains and projects successful output. Reported source IDs can enter the existing selected-page `wiki propose → review → apply` workflow. Updating an existing page still preserves prior provenance and conflicting inputs and requires the exact reviewed digest. A generated `permanent` type, authority value or source/maturation approval cannot publish approved wiki knowledge.
+
+Connector validation runs before new queue persistence as well as before source capture, so do-not-retain, malformed or oversized original fields cannot evade policy inside a JSON payload. Existing eight-field `SOURCE_INGESTION` rows retain their source-capture meaning and the applier still returns a relative ordinary-note path. Provider failure can retain the existing plain-source projection UX, labeled `generation_status: failed` and unapproved; it is not successful synthesis. New per-item outcomes distinguish retained IDs, verified projection, generation and finalizer disposition. A returned asynchronous finalizer has no durable index/event receipt, so those fields remain unknown rather than inferred from an applied proposal. Existing cursor/run-summary, delayed-approval, failure and restart limitations remain; neither capture nor approval supplies cross-store atomicity or exactly-once delivery.
+
+A prequeue policy rejection creates neither a proposal nor a preserved source. It is reported as an item/run error with a body-redacted rejected-item identifier. The existing fetched cursor/ETag can still advance past that item: the cursor is not a durable completion checkpoint, and rejected-item recovery remains unsupported. Do not preserve forbidden bodies in failed proposals, relax retention rules, reset the cursor or infer an automatic retry.
+
+Checkpoint storage retains fetched upstream tokens, which can include an item's GUID. Diagnostic/run-error redaction is not a guarantee that rejected strings are absent from checkpoint metadata. This existing connector limitation requires a separately scoped retention/checkpoint decision; it is not repaired by preserved-source capture.
+
+Retained-projection verification annotates the outcome; it does not prevent the existing raw-note finalizer from indexing a legitimately edited, permitted ordinary projection. Such a mismatch remains `unverified`, generation remains unknown where unproven, and index/event fields remain unknown without a durable receipt. Destination authorization still runs before this diagnostic boundary: reserved paths and out-of-vault aliases refuse before indexing or event publication. Raw finalization never repairs provenance or approves wiki knowledge.
+
+Manual `/distill` copies the complete available selected conversation revision, participants and authenticated transport identity before awaiting. Last-exchange timestamps are identified as monotonic, not occurrence dates. Idle finalization retains archived history and stored summaries before completion; summaries are labeled historical generated material, not replacement model turns. Query handling still never starts a producer. Independent episode and gap effects remain separately enabled domain operations, not answer evidence or page approval.
+
+Maturation retains every selected note's exact bytes and declared retained parents before synthesis; missing, nonregular, forbidden, oversized or over-closure selections refuse before a completion instead of silently dropping notes. Its existing fingerprint-only review operation creates only an unapproved ordinary projection, and completion state changes only after that projection succeeds. Failed or interrupted stages are not automatically replayed. Bookmarking and other independent domain commands retain their guarded ordinary-note paths and limits; this migration does not claim that every domain artifact is intake-preserved or wiki-approved.
 
 `knowledge/sources.py::search_sources(settings, query, *, store=None, n_results=5, note_type=None, allows_path=None)` serves CLI `search-sources`, Telegram `/recall`, MCP `vault_search` and benchmark queries. It enumerates authorized current ordinary Markdown and validated preserved text before ranking/limits/counts, independently of approval. Results carry `source-only`, `approved: false`, current-byte digests and provenance. Current wiki pages, history, queue/control files and unsafe aliases are excluded. Optional indexed paths assist ranking; displayed content always comes from current bytes. Raw distance is retained only for an exact current indexed chunk. The shared parser orders tags deterministically in chunk prefixes so unchanged tagged sources have the same indexed/current representation across processes; old differing prefix variants remain unknown rather than supplying stale confidence. Lexical-only or stale chunks remain unknown. Permissions apply before body reads, including the full retained-source dependency closure.
 
@@ -255,9 +265,9 @@ src/vaultmind/
 │
 ├── pipeline/        # Zettelkasten maturation + conversation distillation
 │   ├── clustering.py    # DBSCAN clustering of semantically related notes
-│   ├── synthesis.py     # LLM synthesis (cluster → permanent Zettelkasten note)
-│   ├── maturation.py    # Pipeline orchestrator (clustering → digest → synthesis)
-│   └── distill.py       # distill_conversation() — session/`/distill` → qa-artifact note
+│   ├── synthesis.py     # Pure in-memory generate_synthesis()
+│   ├── maturation.py    # Retained snapshots → unapproved synthesis/projection
+│   └── distill.py       # Retained conversation orchestration + pure generation
 │
 ├── services/        # Background job scheduling + graduated autonomy review queue
 │   ├── scheduler.py     # State-aware compound loop scheduler with event triggering
@@ -513,7 +523,7 @@ Fleeting/literature notes → DBSCAN clustering (embeddings)
                             LLM synthesis → Permanent note with [[wikilinks]]
 ```
 
-The pipeline identifies clusters of semantically related fleeting notes ready to be synthesized into permanent Zettelkasten notes. Dismissed clusters are tracked and re-surface after a configurable expiry.
+The pipeline identifies clusters of semantically related fleeting notes ready for unapproved permanent-note synthesis. Dismissed clusters re-surface after a configurable expiry. Cluster review authorizes this producer operation only; promoting its reported retained source ID into approved knowledge requires the separate exact wiki review/apply workflow described above.
 
 ### Belief Evolution
 

@@ -1,28 +1,20 @@
-"""LLM synthesis for Zettelkasten maturation.
-
-Given a cluster of source notes, synthesizes a permanent Zettelkasten note
-with validated frontmatter and wikilinks.
-"""
+"""Filesystem-free generation for retained Zettelkasten source snapshots."""
 
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import frontmatter
 
-from vaultmind.vault.security import validate_ordinary_write_path
+from vaultmind.llm.client import Message
+from vaultmind.wiki.workspace import _metadata, _safe_text
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Sequence
 
     from vaultmind.llm.client import LLMClient
-    from vaultmind.pipeline.clustering import NoteCluster
-
-logger = logging.getLogger(__name__)
 
 WIKILINK_PATTERN = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 
@@ -45,123 +37,55 @@ Output the complete note content including frontmatter fenced by ---."""
 
 
 @dataclass(frozen=True, slots=True)
-class SynthesisResult:
-    """Result of a synthesis attempt."""
+class SynthesisGeneration:
+    """Generated content, not a persistence or approval result."""
 
     success: bool
-    content: str
-    output_path: str
-    error: str
+    content: str = ""
+    error: str = ""
 
 
-def synthesize_cluster(
-    cluster: NoteCluster,
-    vault_root: Path,
-    inbox_folder: str,
-    llm: LLMClient,
-    model: str,
-    max_tokens: int = 1500,
-) -> SynthesisResult:
-    """Synthesize a permanent note from a cluster of source notes.
-
-    Reads source note content, calls LLM, validates output, writes to inbox.
-
-    Returns:
-        SynthesisResult with success status and output path or error.
-    """
-    from vaultmind.llm.client import Message
-
-    vault_root = vault_root.resolve()
-    inbox_path = validate_ordinary_write_path(inbox_folder, vault_root)
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
-    slug = cluster.top_entity.lower().replace(" ", "-")[:50]
-    filename = f"synthesis-{slug}-{today}.md"
-    output_path = validate_ordinary_write_path(str(inbox_path / filename), vault_root)
-
-    # Read source notes
-    source_contents: list[str] = []
-    for note_path in cluster.note_paths:
-        full_path = vault_root / note_path
-        if full_path.exists():
-            text = full_path.read_text(encoding="utf-8")
-            source_contents.append(f"### {note_path}\n{text}")
-
-    if not source_contents:
-        return SynthesisResult(
-            success=False,
-            content="",
-            output_path="",
-            error="No source notes found on disk",
-        )
-
-    prompt = SYNTHESIS_PROMPT.format(
-        source_notes_content="\n\n---\n\n".join(source_contents),
-        entity_list=cluster.top_entity,
+def render_synthesis_prompt(
+    source_notes: Sequence[tuple[str, str]], entity: str, today: str
+) -> str:
+    """Render the complete selected source texts without filesystem access."""
+    return SYNTHESIS_PROMPT.format(
+        source_notes_content="\n\n---\n\n".join(
+            f"### {path}\n{text}" for path, text in source_notes
+        ),
+        entity_list=entity,
         today=today,
     )
 
-    response = llm.complete(
-        messages=[Message(role="user", content=prompt)],
-        model=model,
-        max_tokens=max_tokens,
-    )
 
-    content = response.text.strip()
-
-    # Validate
-    validation_error = _validate_synthesis(content, vault_root)
-    if validation_error:
-        logger.error("Synthesis validation failed: %s", validation_error)
-        return SynthesisResult(
-            success=False,
-            content=content,
-            output_path="",
-            error=validation_error,
-        )
-
-    # Write to inbox
-    inbox_path = validate_ordinary_write_path(str(inbox_path), vault_root)
-    inbox_path.mkdir(parents=True, exist_ok=True)
-
-    # Avoid overwriting
-    counter = 1
-    while output_path.exists():
-        filename = f"synthesis-{slug}-{today}-{counter}.md"
-        output_path = validate_ordinary_write_path(str(inbox_path / filename), vault_root)
-        counter += 1
-
-    output_path.write_text(content, encoding="utf-8")
-    rel_path = str(output_path.relative_to(vault_root))
-    logger.info("Wrote synthesized note to %s", rel_path)
-
-    return SynthesisResult(
-        success=True,
-        content=content,
-        output_path=rel_path,
-        error="",
-    )
-
-
-def _validate_synthesis(content: str, vault_root: Path) -> str:
-    """Validate synthesized content. Returns error string or empty on success."""
-    # Check frontmatter parses
+def generate_synthesis(
+    prompt_text: str,
+    llm: LLMClient,
+    model: str,
+    max_tokens: int = 1500,
+) -> SynthesisGeneration:
+    """Generate and validate a permanent-note-shaped artifact only in memory."""
+    if not prompt_text.strip():
+        return SynthesisGeneration(False, error="No source notes supplied")
     try:
+        response = llm.complete(
+            messages=[Message(role="user", content=prompt_text)],
+            model=model,
+            max_tokens=max_tokens,
+        )
+    except Exception:
+        return SynthesisGeneration(False, error="LLM call failed")
+    content = response.text.strip()
+    try:
+        _metadata(_safe_text(content.encode("utf-8"), "Generated synthesis"))
         post = frontmatter.loads(content)
         if not post.metadata:
-            return "No YAML frontmatter found"
-    except Exception as e:
-        return f"YAML frontmatter parse error: {e}"
-
-    # Check wikilinks resolve
-    wikilinks = WIKILINK_PATTERN.findall(content)
-    unresolved: list[str] = []
-    for link in wikilinks:
-        # Search vault for matching file
-        matches = list(vault_root.rglob(f"{link}.md"))
-        if not matches:
-            unresolved.append(link)
-
-    if unresolved:
-        return f"Unresolved wikilinks: {', '.join(unresolved)}"
-
-    return ""
+            return SynthesisGeneration(False, content, "No YAML frontmatter found")
+        post.metadata["type"] = "permanent"
+        post.metadata["status"] = "unapproved"
+        post.metadata["approved"] = False
+        post.metadata["source"] = "synthesized"
+        rendered = str(frontmatter.dumps(post))
+    except ValueError as exc:
+        return SynthesisGeneration(False, content, f"Invalid synthesis: {exc}")
+    return SynthesisGeneration(True, rendered)

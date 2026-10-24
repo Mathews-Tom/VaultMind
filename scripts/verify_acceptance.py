@@ -4102,6 +4102,7 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
     from vaultmind.contradiction.detector import ContradictionDetector
     from vaultmind.contradiction.policy import resolve_conflict
     from vaultmind.indexer.duplicate_detector import DuplicateDetector
+    from vaultmind.knowledge.intake import SourceIntake
     from vaultmind.memory.gaps import GapStore
     from vaultmind.pipeline.maturation import MaturationPipeline
     from vaultmind.services.review_delivery import DeliveryStatus, deliver_block
@@ -5076,12 +5077,14 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
         files_before_job = sorted(str(p) for p in pw.vault.rglob("*.md"))
 
         def pipeline_for(world: SimpleNamespace) -> Any:
+            intake = SourceIntake(world.settings)
+            closers.append(intake.workspace.close)
             return MaturationPipeline(
                 world.settings.maturation,
                 world.store._collection,
                 world.graph,
                 llm,
-                world.vault,
+                intake,
                 state_path=world.data / "maturation_state.json",
             )
 
@@ -5149,7 +5152,10 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
             [bool(dmats), {p.lane.name for p in dmats}, len(tg_keyboards(dw.session.calls))],
         )
         llm.reply = "malformed scripted synthesis: not a valid permanent note"
-        pre_files = sorted(str(p) for p in dw.vault.rglob("*.md"))
+        pre_files = sorted(
+            str(p) for p in dw.vault.rglob("*.md") if not p.is_relative_to(dw.vault / "_wiki")
+        )
+        selected_inputs = {p: p.read_bytes() for p in dw.vault.glob("mat*.md")}
         await dw.harness.callback(callback_data("approve", dmats[0].proposal_id), APPROVAL_INSIDER)
         got = dw.queue.get(dmats[0].proposal_id)
         probes.append("maturation-malformed-synthesis-real-pipeline")
@@ -5159,9 +5165,24 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
             [got.status is ProposalStatus.FAILED, "applied" in got.status.value],
         )
         ck(
-            "producer.maturation-malformed-synthesis-wrote-no-note",
+            "producer.maturation-malformed-synthesis-wrote-no-projection-or-current-page",
             pre_files,
-            sorted(str(p) for p in dw.vault.rglob("*.md")),
+            sorted(
+                str(p) for p in dw.vault.rglob("*.md") if not p.is_relative_to(dw.vault / "_wiki")
+            ),
+        )
+        with SourceIntake(dw.settings) as failed_intake:
+            retained_hashes = {
+                digest(failed_intake.read(p.name.removesuffix(".intake.json")).content)
+                for p in (dw.vault / "_wiki" / "sources").glob("*.intake.json")
+            }
+        ck(
+            "producer.maturation-failed-generation-retains-every-exact-selected-input",
+            {str(p.relative_to(dw.vault)): True for p in selected_inputs},
+            {
+                str(p.relative_to(dw.vault)): digest(content) in retained_hashes
+                for p, content in selected_inputs.items()
+            },
         )
 
         feed = pw.data / "feed.xml"
@@ -5174,9 +5195,13 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
         )
         source_feed_sha256 = digest(feed.read_bytes())
         instance = SourceInstance(name="fixture-feed", kind="rss", target=str(feed), enabled=True)
+        source_intake = SourceIntake(pw.settings)
+        closers.append(source_intake.workspace.close)
         pq.register_applier(
             ProposalKind.SOURCE_INGESTION,
-            make_applier(vault_root=pw.vault, llm_client=llm, model="scripted-model"),
+            make_applier(
+                vault_root=pw.vault, llm_client=llm, model="scripted-model", intake=source_intake
+            ),
         )
         source_store = SourceStore(pw.data / "sources.db")
         closers.append(source_store.close)
@@ -5188,6 +5213,7 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
             parser=pw.parser,
             store=pw.store,
             vault_root=pw.vault,
+            intake=source_intake,
             event_bus=VaultEventBus(),
             on_block=notifier_cb,
         )
@@ -5207,6 +5233,19 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
             False,
             (pw.vault / "00-inbox" / "sources").exists(),
         )
+        ck(
+            "producer.source-pending-not-preserved-finalized-or-approved",
+            [[[], "not-attempted", False, False]],
+            [
+                [
+                    outcome.source_ids,
+                    outcome.finalization_status,
+                    outcome.indexed,
+                    outcome.event_published,
+                ]
+                for outcome in run.outcomes
+            ],
+        )
         second_store = SourceStore(pw.data / "sources-second.db")
         closers.append(second_store.close)
         await run_connector_once(
@@ -5216,6 +5255,7 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
             parser=pw.parser,
             store=pw.store,
             vault_root=pw.vault,
+            intake=source_intake,
             event_bus=VaultEventBus(),
             on_block=notifier_cb,
         )
@@ -5298,6 +5338,7 @@ async def approval_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, A
             "items_fetched": run.items_fetched,
             "items_ingested": run.items_ingested,
             "error": run.error,
+            "outcomes": [asdict(outcome) for outcome in run.outcomes],
         },
         "failed_checks": failures,
         "fixture_limits": (

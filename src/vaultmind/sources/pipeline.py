@@ -1,23 +1,29 @@
-"""Connector-agnostic ingestion pipeline (DEVELOPMENT_PLAN.md M8).
+"""Connector operations preserve originals before generating discovery material.
 
-Every fetched `SourceItem` is routed through M4-style distillation (stamped
-with M2's `AUTO_INGESTED_AUTHORITY`), M7's review queue (`propose_ingestion`
-— never bypassed, even for a proposal that ends up AUTO-lane), and — once
-applied — the existing dedup/contradiction event-bus path
-(`finalize_ingested_note`). `run_connector_once` is the full per-instance
-orchestration, shared by the scheduler job wiring (`cli.py::bot`) and the
-`vaultmind source run <name>` CLI command.
+SOURCE_INGESTION authorizes ingestion only. Its old payload and relative-path
+result survive; asynchronous indexing/events and cursor/run history retain
+their existing non-atomic, non-recovery semantics. Wiki publication remains the
+separate selected-page, exact-review, digest-apply workflow.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from vaultmind.pipeline.distill import distill_conversation, mint_gap_for_unresolved
+import frontmatter
+
+from vaultmind.knowledge.intake import CaptureResult, SourceIntake
+from vaultmind.pipeline.distill import (
+    distill_retained_conversation,
+    mint_gap_for_unresolved,
+    render_conversation,
+)
 from vaultmind.services.review_delivery import deliver_block
 from vaultmind.services.review_queue import Impact, ProposalKind, ProposalStatus
 from vaultmind.sources import (
@@ -28,11 +34,13 @@ from vaultmind.sources.registry import get_connector
 from vaultmind.sources.store import advance_cursor
 from vaultmind.vault.events import NoteCreatedEvent
 from vaultmind.vault.security import validate_ordinary_write_path
+from vaultmind.wiki.workspace import WikiError, _metadata, _safe_text
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from vaultmind.indexer.store import VaultStore
+    from vaultmind.knowledge.intake import SourceRecord
     from vaultmind.llm.client import LLMClient
     from vaultmind.services.review_delivery import BlockNotifier
     from vaultmind.services.review_queue import Applier, ReviewProposal, ReviewQueue
@@ -50,55 +58,61 @@ logger = logging.getLogger(__name__)
 AUTO_INGESTED_AUTHORITY = 1
 
 
-def _sanitize_filename(name: str) -> str:
-    """Create the fallback source projection's bounded filename."""
-    name = re.sub(r'[<>:"/\\|?*]', "_", name)
-    name = re.sub(r"\s+", "_", name)
-    return name[:100].strip("_")
+def _item_snapshot(item: SourceItem) -> dict[str, str]:
+    """The actual available connector object, never credentials/configuration."""
+    return {
+        "item_id": item.item_id,
+        "title": item.title,
+        "content": item.content,
+        "url": item.url,
+        "published_at": item.published_at,
+    }
 
 
-def _write_plain_note(item: SourceItem, instance: SourceInstance, vault_root: Path) -> str:
-    """Fallback note-write when distillation fails (no LLM key, LLM error,
-    or an empty extracted question) as a plain frontmatter note.
-    An ingested item is never silently dropped by an LLM outage."""
-    vault_root = vault_root.resolve()
-    folder = validate_ordinary_write_path(instance.output_folder, vault_root)
-    folder.mkdir(parents=True, exist_ok=True)
+def _validate_item(item: SourceItem) -> None:
+    """Reject forbidden originals before queue persistence as well as capture."""
+    for value in _item_snapshot(item).values():
+        _metadata(_safe_text(value.encode("utf-8"), "Connector item"))
+    _safe_text(_json_text(_item_snapshot(item)).encode("utf-8"), "Connector item snapshot")
 
-    base_name = _sanitize_filename(item.title) or "untitled"
-    note_path = validate_ordinary_write_path(str(folder / f"{base_name}.md"), vault_root)
-    counter = 1
-    while note_path.exists():
-        note_path = validate_ordinary_write_path(
-            str(folder / f"{base_name}-{counter}.md"), vault_root
+
+def _json_text(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n"
+
+
+def _item_identity(item: SourceItem, instance: SourceInstance) -> tuple[str, str, str]:
+    serialized = _json_text(_item_snapshot(item))
+    revision = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    event_id = hashlib.sha256(
+        _json_text([instance.kind, instance.name, item.item_id]).encode("utf-8")
+    ).hexdigest()
+    return serialized, revision, event_id
+
+
+def _render_plain_note(
+    item: SourceItem, instance: SourceInstance, original: CaptureResult, error: str, *, created: str
+) -> str:
+    """Render the existing original-source fallback, explicitly not synthesis."""
+    return str(
+        frontmatter.dumps(
+            frontmatter.Post(
+                f"# {item.title}\n\n**Source:** {item.url}\n\n{item.content}",
+                title=item.title,
+                source=item.url,
+                source_type=instance.kind,
+                source_instance=instance.name,
+                tags=["source-ingested"],
+                authority=AUTO_INGESTED_AUTHORITY,
+                created=created,
+                status="active",
+                source_id=original.source_id,
+                source_path=original.path,
+                approved=False,
+                generation_status="failed",
+                generation_error=error,
+            )
         )
-        counter += 1
-
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    content = f"""\
----
-title: "{item.title}"
-source: "{item.url}"
-source_type: {instance.kind}
-source_instance: {instance.name}
-tags: [source-ingested]
-created: {now}
-authority: {AUTO_INGESTED_AUTHORITY}
-status: active
----
-
-# {item.title}
-
-**Source:** {item.url}
-**Connector:** {instance.kind} ({instance.name})
-
----
-
-{item.content}
-"""
-    note_path.write_text(content, encoding="utf-8")
-    logger.info("Wrote fallback plain note to %s (distillation unavailable)", note_path)
-    return str(note_path.relative_to(vault_root))
+    )
 
 
 def ingest_item(
@@ -106,52 +120,122 @@ def ingest_item(
     instance: SourceInstance,
     *,
     vault_root: Path,
+    intake: SourceIntake,
     llm_client: LLMClient,
     model: str,
     gap_store: object = None,
 ) -> str:
-    """Write one connector-fetched item into the vault as a note.
+    """Preserve originals, generate an unapproved derivative, project it.
 
-    Distills via `distill_conversation()` (M4-style: the item is framed as
-    a single synthetic conversation turn), stamped at `AUTO_INGESTED_AUTHORITY`
-    — falls back to `_write_plain_note` on any distillation failure. This is
-    the sole responsibility of the sync `Applier` registered for
-    `ProposalKind.SOURCE_INGESTION` (`make_applier` below): write-only,
-    matching `ReviewQueue`'s strictly-synchronous `Applier` contract.
-    Event-bus publication happens in the async caller (`finalize_ingested_note`).
-
-    Returns the created note's vault-relative path.
+    The SOURCE_INGESTION operation still returns only a relative ordinary-note
+    path. Its async caller owns indexing/events; neither this return nor queue
+    approval approves any wiki page. Failed/unchanged stages are not replayed.
     """
     vault_root = vault_root.resolve()
-    validate_ordinary_write_path(instance.output_folder, vault_root)
-    turns = [{"user": f"{item.title}\n\n{item.content}".strip(), "assistant": ""}]
-    result = distill_conversation(
-        turns=turns,
-        llm_client=llm_client,
-        model=model,
-        vault_root=vault_root,
-        output_folder=instance.output_folder,
+    output_folder = validate_ordinary_write_path(instance.output_folder, vault_root)
+    folder = output_folder.relative_to(vault_root).as_posix()
+    if intake.workspace.root.resolve() != vault_root:
+        raise WikiError("Connector intake belongs to a different vault")
+    _validate_item(item)
+    serialized, revision, event_id = _item_identity(item, instance)
+    adapter = "connector"
+    origin = f"{instance.kind}:{instance.name}"
+    content = intake.preserve_text(
+        item.content,
+        original_name="connector-content.md",
+        origin=origin,
+        adapter=adapter,
+        role="item-content",
+        event_id=event_id,
+        revision=revision,
+        uri=item.url or None,
+    )
+    original = intake.preserve_text(
+        serialized,
+        original_name="connector-item.json",
+        origin=origin,
+        adapter=adapter,
+        role="item",
+        event_id=event_id,
+        revision=revision,
+        uri=item.url or None,
+        parents=[content.source_id],
+    )
+    input_capture = intake.preserve_text(
+        render_conversation([{"user": f"{item.title}\n\n{item.content}".strip(), "assistant": ""}]),
+        original_name="connector-input.md",
+        origin=origin,
+        adapter=adapter,
+        role="distillation-input",
+        event_id=event_id,
+        revision=revision,
+        uri=item.url or None,
+        parents=[original.source_id],
+        original_retained=False,
+    )
+    occurred_at = item.published_at or str(
+        intake.read(original.source_id).snapshot["metadata"]["captured_at"]
+    )
+    result = distill_retained_conversation(
+        intake,
+        input_capture,
+        llm_client,
+        model,
         source_ref=item.url,
-        occurred_at=item.published_at or None,
+        occurred_at=occurred_at,
+        output_folder=folder,
         authority=AUTO_INGESTED_AUTHORITY,
     )
     if result.success:
-        mint_gap_for_unresolved(result, gap_store, item.url)
+        if result.generation is not None:
+            mint_gap_for_unresolved(result.generation, gap_store, item.url)
         return result.output_path
+    if (
+        result.generation is None
+        or result.generation.success
+        or result.generation_disposition is None
+        or result.generation_disposition.status != "failed"
+    ):
+        raise WikiError(
+            f"{result.error}; original retained: {original.source_id}; "
+            f"input retained: {input_capture.source_id}; no automatic replay"
+        )
 
-    logger.warning(
-        "Distillation failed for %s item %r from %r (%s) — writing a plain note",
-        instance.kind,
-        item.title,
-        instance.name,
-        result.error,
+    # Preserve the old provider-outage UX only for an actual failed generation,
+    # not for failed/skipped projection or incomplete prior processing.
+    def preserve_plain() -> CaptureResult:
+        return intake.preserve_text(
+            _render_plain_note(
+                item,
+                instance,
+                original,
+                result.error,
+                created=str(intake.read(original.source_id).snapshot["metadata"]["captured_at"]),
+            ),
+            original_name="connector-original-projection.md",
+            origin=origin,
+            adapter=adapter,
+            role="original-projection",
+            parents=[
+                result.request.source_id if result.request is not None else input_capture.source_id
+            ],
+            original_retained=False,
+        )
+
+    fallback = original.run_stage("derivative", preserve_plain)
+    if fallback.status == "succeeded" and isinstance(fallback.value, CaptureResult):
+        projection = intake.project_text(fallback.value, folder)
+        if projection.status == "succeeded" and isinstance(projection.value, str):
+            return projection.value
+    raise WikiError(
+        f"Original-source projection not completed; original retained: {original.source_id}"
     )
-    return _write_plain_note(item, instance, vault_root)
 
 
 def make_applier(
     *,
     vault_root: Path,
+    intake: SourceIntake,
     llm_client: LLMClient,
     model: str,
     gap_store: object = None,
@@ -162,6 +246,8 @@ def make_applier(
     `cli.py::bot`'s existing `_maturation_applier`/
     `ContradictionDetector._resolution_applier` closure-over-scope convention.
     """
+    if intake.workspace.root.resolve() != vault_root.resolve():
+        raise WikiError("Connector intake belongs to a different vault")
 
     def _applier(payload: dict[str, Any]) -> str:
         item = SourceItem(
@@ -181,6 +267,7 @@ def make_applier(
             item,
             instance,
             vault_root=vault_root,
+            intake=intake,
             llm_client=llm_client,
             model=model,
             gap_store=gap_store,
@@ -205,6 +292,7 @@ def propose_ingestion(
     bypassing the queue, regardless of which lane it lands in.
     """
     validate_ordinary_write_path(instance.output_folder, vault_root)
+    _validate_item(item)
     payload = {
         "item_id": item.item_id,
         "title": item.title,
@@ -265,6 +353,73 @@ async def finalize_ingested_note(
     await event_bus.publish(NoteCreatedEvent(path=note.path, note=note, chunks_indexed=chunks))
 
 
+@dataclass(slots=True)
+class ItemOutcome:
+    """Observed run outcomes, not durable receipts or a cursor-recovery claim."""
+
+    item_id: str
+    proposal_id: str = ""
+    status: str = "failed"
+    path: str = ""
+    source_ids: list[str] = field(default_factory=list)
+    generation_status: str = "unknown"
+    projection_status: str = "not-attempted"
+    finalization_status: str = "not-attempted"
+    indexed: bool | None = False
+    event_published: bool | None = False
+    error: str = ""
+
+
+def _append_source_ids(outcome: ItemOutcome, record: SourceRecord) -> None:
+    seen = set(outcome.source_ids)
+
+    def visit(source: SourceRecord) -> None:
+        if source.source_id in seen:
+            return
+        seen.add(source.source_id)
+        outcome.source_ids.append(source.source_id)
+        for dependency in source.dependencies:
+            visit(dependency)
+
+    visit(record)
+
+
+def _describe_failed_capture(
+    outcome: ItemOutcome, item: SourceItem, instance: SourceInstance, intake: SourceIntake
+) -> None:
+    """Read existing identities only; never repair or retry a failed operation."""
+    _, revision, event_id = _item_identity(item, instance)
+    try:
+        record = intake.find_event("connector", event_id, revision, "item")
+        if record is None:
+            record = intake.find_event("connector", event_id, revision, "item-content")
+        if record is not None:
+            _append_source_ids(outcome, record)
+    except WikiError:
+        outcome.error += "; retained identities could not be verified"
+
+
+def _describe_projection(outcome: ItemOutcome, intake: SourceIntake, path: Path) -> None:
+    """Describe retained provenance after ordinary-destination authorization."""
+    # Old APPLIED rows keep their old meaning. No migration or retroactive
+    # source preservation is inferred from an ordinary legacy note.
+    if re.fullmatch(r"i-[0-9a-f]{60}", path.stem) is None:
+        outcome.projection_status = "legacy-unverified"
+        return
+    record = intake.read(path.stem)
+    _append_source_ids(outcome, record)
+    outcome.projection_status = "unverified"
+    if not path.exists() or intake.workspace._read(path, "Connector projection") != record.content:
+        raise WikiError("Connector projection differs from its preserved source")
+    metadata, _ = _metadata(record.text or "")
+    outcome.generation_status = (
+        "failed" if metadata.get("generation_status") == "failed" else "succeeded"
+    )
+    outcome.projection_status = "verified"
+    if outcome.generation_status == "failed":
+        outcome.error = str(metadata.get("generation_error", "Generation failed"))
+
+
 @dataclass(frozen=True, slots=True)
 class RunResult:
     """Summary of one `run_connector_once()` call."""
@@ -273,6 +428,7 @@ class RunResult:
     items_fetched: int
     items_ingested: int
     error: str = ""
+    outcomes: list[ItemOutcome] = field(default_factory=list)
 
 
 async def run_connector_once(
@@ -283,6 +439,7 @@ async def run_connector_once(
     parser: VaultParser,
     store: VaultStore,
     vault_root: Path,
+    intake: SourceIntake,
     event_bus: VaultEventBus,
     on_block: BlockNotifier | None = None,
 ) -> RunResult:
@@ -293,13 +450,17 @@ async def run_connector_once(
     `ScheduledJob` (`cli.py::bot`) and the `vaultmind source run <name>`
     CLI command — neither duplicates this orchestration.
     """
+    vault_root = vault_root.resolve()
     validate_ordinary_write_path(instance.output_folder, vault_root)
+    if intake.workspace.root.resolve() != vault_root:
+        raise WikiError("Connector intake belongs to a different vault")
     started = datetime.now(UTC)
     connector = get_connector(instance.kind)
     state = source_store.get_state(instance.name)
     items_ingested = 0
     error = ""
     fetch_result = FetchResult()
+    outcomes: list[ItemOutcome] = []
 
     try:
         fetch_result = await connector.fetch(instance, state)
@@ -310,9 +471,28 @@ async def run_connector_once(
     else:
         item_errors: list[str] = []
         for item in fetch_result.items:
+            outcome = ItemOutcome(item_id=item.item_id)
+            outcomes.append(outcome)
             try:
                 proposal = propose_ingestion(review_queue, item, instance, vault_root=vault_root)
+                outcome.proposal_id = proposal.proposal_id
+                outcome.status = proposal.status.value
+                if proposal.status is ProposalStatus.APPLIED:
+                    outcome.path = proposal.result
+                    if outcome.path:
+                        path = validate_ordinary_write_path(outcome.path, vault_root)
+                        try:
+                            _describe_projection(outcome, intake, path)
+                        except WikiError as exc:
+                            outcome.projection_status = "unverified"
+                            outcome.error = f"Projection verification failed: {exc}"
+                            item_errors.append(f"{item.item_id}: {outcome.error}")
+                elif proposal.status is ProposalStatus.FAILED:
+                    outcome.error = proposal.result
+                    _describe_failed_capture(outcome, item, instance, intake)
                 await deliver_block(proposal, on_block)
+                if proposal.status is ProposalStatus.APPLIED:
+                    outcome.finalization_status = "attempted"
                 await finalize_ingested_note(
                     proposal,
                     parser=parser,
@@ -320,14 +500,29 @@ async def run_connector_once(
                     vault_root=vault_root,
                     event_bus=event_bus,
                 )
+                if proposal.status is ProposalStatus.APPLIED:
+                    outcome.finalization_status = "returned-no-durable-receipt"
+                    outcome.indexed = None
+                    outcome.event_published = None
             except Exception as exc:  # noqa: BLE001 - one item's failure must not block the rest of the batch
+                if not outcome.proposal_id and isinstance(exc, WikiError):
+                    # A rejected original can put forbidden text in its own ID.
+                    # Keep that text out of diagnostics and durable run history.
+                    outcome.item_id = f"rejected-item-{len(outcomes)}"
                 logger.exception(
                     "Ingestion failed for %s item %r from instance %r",
                     instance.kind,
-                    item.title,
+                    outcome.item_id,
                     instance.name,
                 )
-                item_errors.append(f"{item.item_id}: {exc}")
+                item_errors.append(f"{outcome.item_id}: {exc}")
+                outcome.error = str(exc)
+                if outcome.finalization_status == "attempted":
+                    outcome.finalization_status = "failed"
+                    # Finalization may already have indexed or published before
+                    # raising. This layer has no durable receipt to prove either.
+                    outcome.indexed = None
+                    outcome.event_published = None
                 continue
             if proposal.status is ProposalStatus.APPLIED:
                 items_ingested += 1
@@ -357,6 +552,7 @@ async def run_connector_once(
         instance_name=instance.name,
         items_fetched=len(fetch_result.items),
         items_ingested=items_ingested,
+        outcomes=outcomes,
         error=error,
     )
 
@@ -364,6 +560,7 @@ async def run_connector_once(
 __all__ = [
     "AUTO_INGESTED_AUTHORITY",
     "RunResult",
+    "ItemOutcome",
     "finalize_ingested_note",
     "ingest_item",
     "make_applier",

@@ -86,6 +86,31 @@ class SessionStore:
             return None
         return dict(session_name=row[0], history=json.loads(row[1]), last_active=row[2])
 
+    def snapshot(self, user_id: int, session_name: str) -> dict[str, Any] | None:
+        """Read a complete stored revision without changing its lifecycle."""
+        row = self._conn.execute(
+            "SELECT history, created_at, last_active FROM thinking_sessions "
+            "WHERE user_id = ? AND session_name = ?",
+            (user_id, session_name),
+        ).fetchone()
+        if row is None:
+            return None
+        cursor = self._conn.execute(
+            "SELECT * FROM thinking_session_summaries "
+            "WHERE user_id = ? AND session_name = ? ORDER BY batch_number",
+            (user_id, session_name),
+        )
+        assert cursor.description is not None
+        columns = [column[0] for column in cursor.description]
+        return dict(
+            user_id=user_id,
+            session_name=session_name,
+            history=json.loads(row[0]),
+            created_at=row[1],
+            last_active=row[2],
+            summaries=[dict(zip(columns, item, strict=True)) for item in cursor.fetchall()],
+        )
+
     def save(
         self,
         user_id: int,
@@ -181,7 +206,7 @@ class SessionStore:
             rows = [
                 row
                 for row in self._conn.execute(
-                    "SELECT id, user_id, history, last_active "
+                    "SELECT id, user_id, history, last_active, session_name, created_at, summaries "
                     "FROM thinking_session_archives WHERE state = 'pending' ORDER BY id"
                 )
                 if row[1] not in excluded_user_ids
@@ -196,8 +221,16 @@ class SessionStore:
             self._conn.rollback()
             raise
         return [
-            dict(id=rid, user_id=uid, history=json.loads(history), last_active=active)
-            for rid, uid, history, active in rows
+            dict(
+                id=rid,
+                user_id=uid,
+                history=json.loads(history),
+                last_active=active,
+                session_name=name,
+                created_at=created,
+                summaries=json.loads(summaries),
+            )
+            for rid, uid, history, active, name, created, summaries in rows
         ]
 
     def finish_finalization(self, record_id: int, state: str, error: str | None = None) -> None:
