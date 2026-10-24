@@ -80,15 +80,8 @@ enrichment_schedule = "0 3 * * *"
 provider = "openai"        # "anthropic", "openai", "gemini", "ollama"
 thinking_model = "gpt-5.2"
 fast_model = "gpt-4.1"
-max_context_notes = 8
 max_tokens = 4096
 ollama_base_url = "http://localhost:11434"
-graph_context_enabled = true
-graph_hop_depth = 2
-graph_min_confidence = 0.6
-graph_max_relationships = 20
-single_pass_extraction_enabled = true
-extraction_confidence_threshold = 0.7
 
 # Provider-specific model examples:
 #   anthropic:  claude-sonnet-4-20250514, claude-opus-4-20250514
@@ -98,17 +91,9 @@ extraction_confidence_threshold = 0.7
 
 [telegram]
 thinking_session_ttl = 3600
-thinking_summarization_enabled = true
-thinking_message_count_threshold = 20
-thinking_recent_turns_to_keep = 6
-thinking_batch_size = 4
-thinking_summary_max_tokens = 400
 
 [routing]
-chat_model = ""                   # Empty = use llm.fast_model
-chat_max_tokens = 1024
-vault_context_enabled = true
-max_context_chunks = 4
+chat_model = ""                   # Empty = llm.fast_model for edit/date resolution
 capture_all = false               # true = old behavior (all text → capture)
 
 [watch]
@@ -290,7 +275,7 @@ retention_days = 90
 
 [mcp.profiles.researcher]
 description = "Read-only access for research and Q&A tasks"
-allowed_tools = ["vault_search", "vault_read", "vault_list", "graph_query", "graph_path", "read_frontmatter", "list_folder_index", "follow_links"]
+allowed_tools = ["knowledge_query", "vault_search", "vault_read", "vault_list", "graph_query", "graph_path", "read_frontmatter", "list_folder_index", "follow_links"]
 folder_scope = ["*"]
 write_enabled = false
 

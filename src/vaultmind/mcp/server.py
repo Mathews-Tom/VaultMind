@@ -30,10 +30,17 @@ if TYPE_CHECKING:
     from vaultmind.config import Settings
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
+    from vaultmind.llm.client import LLMClient
     from vaultmind.vault.models import Note
     from vaultmind.vault.parser import VaultParser
 
 logger = logging.getLogger(__name__)
+_QUERY_PUBLIC_ERRORS = frozenset(
+    {
+        "Generated wiki queries require a configured LLM client factory",
+        "Selected wiki evidence is outside the authorized scope",
+    }
+)
 
 
 def create_mcp_server(
@@ -53,6 +60,7 @@ def create_mcp_server(
     retry_executor: object | None = None,
     *,
     settings: Settings,
+    llm_factory: Callable[[], LLMClient] | None = None,
 ) -> Any:  # Returns mcp.server.Server (optional dep)
     """Create and configure the MCP server with vault tools.
 
@@ -73,6 +81,26 @@ def create_mcp_server(
     @list_tools_factory()
     async def list_tools() -> list[Tool]:
         return [
+            Tool(
+                name="knowledge_query",
+                description="Answer from approved current wiki evidence, with complete provenance.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "minLength": 1, "maxLength": 4096},
+                        "pages": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 8,
+                            "uniqueItems": True,
+                        },
+                        "evidence_only": {"type": "boolean", "default": False},
+                    },
+                    "required": ["question"],
+                    "additionalProperties": False,
+                },
+            ),
             Tool(
                 name="vault_search",
                 description=(
@@ -466,7 +494,7 @@ def create_mcp_server(
             ),
         ]
 
-    @server.call_tool()  # type: ignore[misc,untyped-decorator,unused-ignore]
+    @server.call_tool(validate_input=False)  # type: ignore[misc,untyped-decorator,unused-ignore]
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         import time as _time
 
@@ -512,6 +540,7 @@ def create_mcp_server(
                 "evolution_detector": evolution_detector,
                 "preference_store": preference_store,
                 "settings": settings,
+                "llm_factory": llm_factory,
             }
 
             import asyncio
@@ -520,6 +549,7 @@ def create_mcp_server(
                 "capture",
                 "capture_note",
                 "vault_write",
+                "knowledge_query",
             }:
                 from vaultmind.mcp.retry import ToolRetryExecutor
 
@@ -532,13 +562,21 @@ def create_mcp_server(
                     result = retry_executor.execute(
                         name, arguments, _dispatch_tool, dispatch_kwargs
                     )
-            elif name in {"capture", "capture_note", "vault_write", "vault_search"}:
+            elif name in {
+                "capture",
+                "capture_note",
+                "vault_write",
+                "vault_search",
+                "knowledge_query",
+            }:
                 result = await asyncio.to_thread(_dispatch_tool, name, arguments, **dispatch_kwargs)
             else:
                 # Existing optional producers own thread-affine SQLite state.
                 # Offload the migrated source operations, not unrelated stores.
                 result = _dispatch_tool(name, arguments, **dispatch_kwargs)
             text = json.dumps(result, indent=2, default=str)
+            if name == "knowledge_query":
+                _require_enforcer(name, enforcer).check_size(text)
             _duration_ms = int((_time.perf_counter() - _start) * 1000)
 
             # Build change detail for audit
@@ -561,39 +599,61 @@ def create_mcp_server(
         except ProfileError as e:
             _duration_ms = int((_time.perf_counter() - _start) * 1000)
             # Audit log denial
-            if audit_logger is not None and enforcer is not None:
+            if audit_logger is not None and (enforcer is not None or name == "knowledge_query"):
                 audit_logger.log(
-                    enforcer.policy.name,
+                    enforcer.policy.name if enforcer is not None else "unavailable",
                     name,
                     arguments,
                     "DENIED",
-                    reason=str(e),
+                    reason="Knowledge query denied" if name == "knowledge_query" else str(e),
                     duration_ms=_duration_ms,
                 )
-            err = json.dumps({"error": str(e)})
+            message = "Knowledge query denied" if name == "knowledge_query" else str(e)
+            err = json.dumps({"error": message})
             return [TextContent(type="text", text=err)]
         except Exception as e:
             _duration_ms = int((_time.perf_counter() - _start) * 1000)
-            if name in {"capture", "capture_note", "vault_write"}:
+            if name in {"capture", "capture_note", "vault_write", "knowledge_query"}:
                 logger.error("Body-bearing MCP tool failed (%s)", type(e).__name__)
             else:
                 logger.exception("Tool %s failed", name)
-            if audit_logger is not None and enforcer is not None:
+            if audit_logger is not None and (enforcer is not None or name == "knowledge_query"):
                 audit_logger.log(
-                    enforcer.policy.name,
+                    enforcer.policy.name if enforcer is not None else "unavailable",
                     name,
                     arguments,
                     "ERROR",
-                    reason=str(e),
+                    reason="Knowledge query failed" if name == "knowledge_query" else str(e),
                     duration_ms=_duration_ms,
                 )
+            query_message = "Knowledge query failed"
+            # Only fixed, non-disclosing core dispositions may cross this boundary.
+            if name == "knowledge_query" and str(e) in _QUERY_PUBLIC_ERRORS:
+                query_message = str(e)
             message = (
-                f"MCP input operation failed ({type(e).__name__})"
+                query_message
+                if name == "knowledge_query"
+                else f"MCP input operation failed ({type(e).__name__})"
                 if name in {"capture", "capture_note", "vault_write"}
                 else str(e)
             )
             err = json.dumps({"error": message})
             return [TextContent(type="text", text=err)]
+
+    # SDK schema errors echo rejected values before our callback and audit.
+    # Route only the body-bearing query through our strict private validation;
+    # preserve the SDK's normal validation/result handling for every other tool.
+    from mcp.types import CallToolRequest
+
+    query_handler = server.request_handlers[CallToolRequest]
+    server.call_tool()(call_tool)
+    validated_handler = server.request_handlers[CallToolRequest]
+
+    async def route_call(request: Any) -> Any:
+        handler = query_handler if request.params.name == "knowledge_query" else validated_handler
+        return await handler(request)
+
+    server.request_handlers[CallToolRequest] = route_call
 
     return server
 
@@ -816,10 +876,48 @@ def _dispatch_tool(
     evolution_detector: object | None = None,
     preference_store: object | None = None,
     settings: Settings | None = None,
+    llm_factory: Callable[[], LLMClient] | None = None,
 ) -> dict[str, Any]:
     """Route tool calls to the appropriate handler."""
 
-    if name == "vault_search":
+    if name == "knowledge_query":
+        scope = _require_enforcer(name, enforcer)
+        scope.check_tool(name)
+        selected = _require_settings(settings, vault_path)
+        if scope.vault_root.resolve() != vault_path.resolve():
+            raise ProfileError("Knowledge query enforcement root does not match")
+        # Measure the full UTF-8 request, not just the question or character count.
+        scope.check_size(json.dumps(args, ensure_ascii=False, allow_nan=False))
+        if (
+            set(args) - {"question", "pages", "evidence_only"}
+            or "question" not in args
+            or ("pages" in args and args["pages"] is None)
+            or ("evidence_only" in args and not isinstance(args["evidence_only"], bool))
+        ):
+            raise ValueError("Invalid knowledge query arguments")
+        from vaultmind.knowledge.query import MAX_QUERY_CONTEXT_BYTES, query_knowledge
+        from vaultmind.wiki.workspace import WikiError
+
+        limit = scope.policy.max_note_size_bytes
+        try:
+            result = query_knowledge(
+                selected,
+                args["question"],
+                args.get("pages"),
+                evidence_only=args.get("evidence_only", False),
+                llm_factory=llm_factory,
+                allows_path=scope.allows_path,
+                max_context_bytes=min(MAX_QUERY_CONTEXT_BYTES, limit)
+                if limit is not None
+                else None,
+            )
+        except WikiError as exc:
+            message = str(exc) if str(exc) in _QUERY_PUBLIC_ERRORS else "Knowledge query failed"
+            raise WikiError(message) from None
+        # Match the outer handler's exact wire representation: no partial results.
+        scope.check_size(json.dumps(result, indent=2, default=str))
+        return result
+    elif name == "vault_search":
         scope = _require_enforcer(name, enforcer)
         from vaultmind.knowledge.sources import search_sources
 

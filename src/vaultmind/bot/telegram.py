@@ -37,11 +37,11 @@ def register_handlers(handlers: CommandHandlers) -> None:
     async def cmd_start(message: Message) -> None:
         await message.answer(
             "🧠 *VaultMind* — Your AI-powered second brain\n\n"
-            "Send text → I'll respond using your vault context\n"
+            "Send a question → approved-current wiki evidence only\n"
             "Prefix with `note:` to capture to inbox\n\n"
             "Commands:\n"
             "• `/recall <query>` → semantic search\n"
-            "• `/think <topic>` → thinking partner mode\n"
+            "• `/think <topic>` → same approved evidence, with session intent\n"
             "• `/graph <entity>` → knowledge graph query\n"
             "• `/daily` → today's daily note\n"
             "• `/notes <date>` → notes by date (natural language)\n"

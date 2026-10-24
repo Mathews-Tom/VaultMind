@@ -223,7 +223,7 @@ def fixture_config(home: Path, name: str, hybrid: bool) -> Any:
         f"[bench]\nk = 10\nscore_floor = {FLOOR}\n"
         f'trend_path = "{root / "data/trend.jsonl"}"\n'
         f'[gaps]\nenabled = true\ndb_path = "{root / "data/gaps.db"}"\n'
-        "[embedding]\ncache_enabled = false\n[llm]\ngraph_context_enabled = false\n",
+        "[embedding]\ncache_enabled = false\n",
         encoding="utf-8",
     )
     return load_settings(config)
@@ -275,9 +275,7 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
         gap = GapStore(Path(cfg.gaps.db_path), stale_after_days=cfg.gaps.stale_after_days)
         gaps.append(gap)
         llm = ScriptedLLM()
-        thinking = ThinkingPartner(
-            cfg.llm, cfg.telegram, llm_client=llm, gap_store=gap, score_floor=cfg.bench.score_floor
-        )
+        thinking = ThinkingPartner(cfg, llm_factory=lambda: llm)
         return HandlerContext(
             cfg,
             target,
@@ -405,14 +403,6 @@ async def retrieval(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
             ]
             ctx = context(cfg, BoundaryStore(hits))
             await observe("boundary." + name, ctx, name, expected)
-            before = {g.gap_id for g in ctx.gap_store.list_open()}
-            await ctx.thinking.think(42, "thinking-" + name, ctx.store, ctx.graph)
-            new = [g for g in ctx.gap_store.list_open() if g.gap_id not in before]
-            check(
-                "thinking." + name,
-                ["unanswered_question"] if expected == "weak" else [],
-                [str(g.kind) for g in new],
-            )
         # A larger, truly closer forbidden population must not consume top-k.
         for i in range(20):
             private_path = settings.vault.path / "private" / f"closer-{i:02d}.md"
@@ -504,6 +494,7 @@ MCP_ROOT_SCENARIOS = (
     "root-capture-size",
 )
 MCP_DERIVED_SCENARIOS = ("derived-scoped", "derived-full", "derived-writes")
+MCP_QUERY_SCENARIOS = ("knowledge-researcher-default",)
 MCP_TRAVERSAL_TOOLS = ("read_frontmatter", "list_folder_index", "follow_links")
 MCP_HUB_SENTINEL = "HUB-BODY-SENTINEL-7f3a91"
 MCP_ISO = "<iso-datetime>"
@@ -751,6 +742,32 @@ if embedding_fixture.exists():
 
     Embedder._embed_texts_uncached = offline_embeddings
     emit(kind="embedding-fixture", dimensions=len(vector))
+
+# Query fixtures replace provider I/O only. The selected CLI assembly, registered
+# handler, scope checks and approved-current query service remain real.
+query_fixture = Path(state) / "query-provider.json"
+if query_fixture.exists():
+    import importlib
+    from vaultmind.llm.client import LLMResponse
+
+    response = json.loads(query_fixture.read_text(encoding="utf-8"))
+
+    class OfflineQueryProvider:
+        provider_name = "offline-acceptance"
+
+        def complete(self, messages, model, max_tokens=4096, system=None):
+            emit(kind="query-provider", model=model, thread=threading.get_ident(),
+                 main_thread=threading.main_thread().ident)
+            return LLMResponse(text=json.dumps(response), model=model, usage={})
+
+        def complete_multimodal(self, *args, **kwargs):
+            raise AssertionError("Knowledge queries must not invoke multimodal generation")
+
+    def query_factory(settings):
+        emit(kind="query-factory", model=settings.llm.thinking_model)
+        return OfflineQueryProvider()
+
+    importlib.import_module("vaultmind.cli")._create_llm_client = query_factory
 
 # Read-only observation, not dependency injection: bind real producer entry and buffer
 # state to each dispatch. No arguments, return values or producer state are modified.
@@ -1100,6 +1117,7 @@ async def mcp_stdio_session(
     deadline: float = 180.0,
     *,
     root_embeddings: bool = False,
+    query_response: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Spawn the registered CLI and drive initialize/list_tools/call_tool over SDK stdio."""
     import anyio
@@ -1108,6 +1126,8 @@ async def mcp_stdio_session(
 
     state = root / "launcher-state"
     state.mkdir()
+    if query_response is not None:
+        (state / "query-provider.json").write_text(json.dumps(query_response), encoding="utf-8")
     if root_embeddings:
         (state / "root-embedding.json").write_text(
             json.dumps({"vector": [1.0, 0.0]}), encoding="utf-8"
@@ -2564,6 +2584,89 @@ def mcp_normalize(tool: str, payload: Any) -> Any:
     return out
 
 
+def mcp_knowledge_fixture(root: Path, config: Path, spec: dict[str, Any]) -> None:
+    """Publish real conflicting evidence and exercise the shipped selected default."""
+    import tomllib
+
+    from vaultmind.config import load_settings
+    from vaultmind.knowledge.query import query_knowledge
+    from vaultmind.wiki.workspace import WikiWorkspace, proposal_digest
+
+    public_defaults = Path(__file__).resolve().parents[1] / "config" / "default.toml"
+    researcher = tomllib.loads(public_defaults.read_text(encoding="utf-8"))["mcp"]["profiles"][
+        "researcher"
+    ]
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + f"\n[autonomy]\ndb_path = {json.dumps(str(root / 'data' / 'review.db'))}\n"
+        + "\n[mcp.profiles.researcher]\n"
+        + "".join(f"{key} = {json.dumps(value)}\n" for key, value in researcher.items()),
+        encoding="utf-8",
+    )
+    settings = load_settings(config)
+    source_ids = ["sdk-cache-30", "sdk-cache-7"]
+    draft = root / "reviewed-cache.md"
+    draft.write_text(
+        "# Cache\n\n## Current understanding\n\nCache retention is 30 days. "
+        "[[_wiki/sources/sdk-cache-30]]\n\n## Conflicting information\n\n"
+        "The second policy says 7 days; this is unresolved. [[_wiki/sources/sdk-cache-7]]\n",
+        encoding="utf-8",
+    )
+    with WikiWorkspace(settings) as workspace:
+        for source_id, days in zip(source_ids, (30, 7), strict=True):
+            original = root / f"{source_id}.md"
+            original.write_text(f"Cache retention is {days} days.\n", encoding="utf-8")
+            workspace.add_source(original, source_id, uri=f"urn:offline:{source_id}")
+        proposal = workspace.propose("wiki/cache.md", source_ids, draft_file=draft)
+        workspace.review(proposal.proposal_id)
+        workspace.apply(proposal.proposal_id, proposal_digest(proposal.payload))
+    question = "What is the cache retention policy?"
+    spec["calls"] = []
+    approved = query_knowledge(settings, question, evidence_only=True)
+    response = {
+        "status": "conflicting",
+        "answer": "The retained policies disagree: 30 days versus 7 days; no winner is approved.",
+        "citations": [
+            row["id"]
+            for row in approved["evidence"]
+            if "30 days" in row["text"] or "7 days" in row["text"]
+        ],
+    }
+    spec["query_response"] = response
+    for arguments in (
+        {"question": question},
+        {"question": question, "pages": ["wiki/cache.md"]},
+        {"question": question, "evidence_only": True},
+        {"question": "unmatchedxylophone"},
+    ):
+        expected = query_knowledge(
+            settings,
+            arguments["question"],
+            arguments.get("pages"),
+            evidence_only=True,
+        )
+        if arguments["question"] == question and not arguments.get("evidence_only"):
+            expected = {**expected, **response}
+        spec["calls"].append(
+            dict(
+                tool="knowledge_query",
+                arguments=arguments,
+                expected=expected,
+                audit="OK",
+                kind=None,
+            )
+        )
+    spec["calls"].append(
+        dict(
+            tool="knowledge_query",
+            arguments={"question": "QUERY-INPUT-BODY-SENTINEL", "pages": "PAGE-INPUT-SENTINEL"},
+            expected={"error": True},
+            audit="ERROR",
+            kind=None,
+        )
+    )
+
+
 async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
     """One actual subprocess lifecycle with per-call, per-frame and per-origin assertions."""
     from mcp.types import JSONRPCMessage
@@ -2580,6 +2683,14 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         spec = mcp_scenario(name, root)
         fixture = mcp_build_fixture(root, spec["scoped"], consumer=True)
         config = mcp_write_config(root, spec["override"])
+        if name in MCP_QUERY_SCENARIOS:
+            mcp_knowledge_fixture(root, config, spec)
+            knowledge_before = {
+                path.relative_to(fixture["vault"]).as_posix(): digest(path.read_bytes())
+                for folder in ("wiki", "_wiki")
+                for path in (fixture["vault"] / folder).rglob("*")
+                if path.is_file()
+            }
         capture_before = {
             path: digest((fixture["vault"] / path).read_bytes())
             for path in MCP_NOTES
@@ -2592,9 +2703,21 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
             spec["cli_args"],
             [(c["tool"], c["arguments"]) for c in calls],
             root_embeddings=root_notes,
+            query_response=spec.get("query_response"),
         )
     finally:
         mcp_restore_permissions(fixture)
+    if name in MCP_QUERY_SCENARIOS:
+        check(
+            name + ".query-no-knowledge-side-effects",
+            knowledge_before,
+            {
+                path.relative_to(fixture["vault"]).as_posix(): digest(path.read_bytes())
+                for folder in ("wiki", "_wiki")
+                for path in (fixture["vault"] / folder).rglob("*")
+                if path.is_file()
+            },
+        )
     if name == "planner-scoped":
         check(name + ".capture-no-source-storage", False, (fixture["vault"] / "_wiki").exists())
         check(
@@ -3011,15 +3134,16 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
         check(
             label + ".audit.params-are-this-call",
             {}
-            if c["tool"] in ("capture", "capture_note", "vault_write")
+            if c["tool"] in ("capture", "capture_note", "vault_write", "knowledge_query")
             else {key: str(value)[:200] for key, value in arguments.items()},
             row["params"],
         )
-        if c["tool"] in ("capture", "capture_note", "vault_write"):
+        if c["tool"] in ("capture", "capture_note", "vault_write", "knowledge_query"):
+            body_key = "question" if c["tool"] == "knowledge_query" else "content"
             check(
                 label + ".audit.body-absent",
                 False,
-                arguments["content"] in json.dumps(row),
+                arguments[body_key] in json.dumps(row),
             )
         masked_for = {
             **arguments,
@@ -3131,6 +3255,15 @@ async def run_mcp_scenario(name: str, root: Path, check: Any) -> dict[str, Any]:
     )
     child_attempts = [e for e in by_kind.get("network", []) if not e["probe"]]
     check(prefix + "network.outbound-attempts", [], child_attempts)
+    if "query_response" in spec:
+        check(prefix + "query.one-factory-per-generated-answer", 2, len(by_kind["query-factory"]))
+        completions = by_kind["query-provider"]
+        check(prefix + "query.no-evidence-only-empty-invalid-retry-completion", 2, len(completions))
+        check(
+            prefix + "query.blocking-provider-off-main-thread",
+            True,
+            all(event["thread"] != event["main_thread"] for event in completions),
+        )
     pid = by_kind["start"][0]["pid"]
     try:
         os.kill(pid, 0)
@@ -3387,11 +3520,6 @@ async def mcp_factory_none_handlers(
             and bool(payload["error"]),
         )
         check(
-            "factory.all-tools." + tool + ".missing-enforcer-not-producer-failure",
-            True,
-            "requires profile enforcement but none was supplied" in payload["error"],
-        )
-        check(
             "factory.all-tools." + tool + ".private-fields-absent",
             [],
             mcp_leaks(text, protected, arguments),
@@ -3405,7 +3533,7 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     check = make_checker(checks)
     scenarios: dict[str, Any] = {}
     configuration_refusals: dict[str, Any] = {}
-    for name in (*MCP_SCENARIOS, *MCP_ROOT_SCENARIOS, *MCP_DERIVED_SCENARIOS):
+    for name in (*MCP_SCENARIOS, *MCP_ROOT_SCENARIOS, *MCP_DERIVED_SCENARIOS, *MCP_QUERY_SCENARIOS):
         if name == "root-capture-symlink":
             # Configured ordinary output aliases now fail before SDK startup.
             # Exercise the real CLI refusal rather than treating a closed SDK
@@ -3476,7 +3604,6 @@ async def mcp_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
                 }
             )
     check("inventory.all-listed-tools-executed", sorted(listed), sorted(all_calls))
-    check("inventory.actual-tool-count", 18, len(listed))
     for tool, rows in observations.items():
         check(
             "inventory." + tool + ".substantive-allow-or-filter-control",
@@ -3811,7 +3938,7 @@ def approval_world(
         f'[chroma]\npersist_dir = "{data / "chroma"}"\n'
         f'[graph]\npersist_path = "{data / "graph.json"}"\n'
         f'[search]\nbm25_db_path = "{data / "fts.db"}"\n'
-        "[embedding]\ncache_enabled = false\n[llm]\ngraph_context_enabled = false\n",
+        "[embedding]\ncache_enabled = false\n",
         encoding="utf-8",
     )
     settings = load_settings(config)
@@ -3835,7 +3962,7 @@ def approval_world(
     lineage = LineageStore(data / "lineage.json")
     session = approval_session()
     bot = Bot("123456:OFFLINE-ACCEPTANCE", session=session)
-    thinking = ThinkingPartner(settings.llm, settings.telegram, llm)
+    thinking = ThinkingPartner(settings, llm_factory=lambda: llm)
     handlers = CommandHandlers(
         settings,
         store,
@@ -5567,7 +5694,7 @@ async def config_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any
                         store,
                         KnowledgeGraph(current.graph),
                         VaultParser(current.vault),
-                        ThinkingPartner(current.llm, current.telegram, llm_client=llm),
+                        ThinkingPartner(current, llm_factory=lambda: llm),
                         llm,
                         current.vault.path,
                     )

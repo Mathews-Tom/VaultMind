@@ -59,6 +59,11 @@ class ProfileEnforcer:
     def policy(self) -> ProfilePolicy:
         return self._policy
 
+    @property
+    def vault_root(self) -> Path:
+        """Root against which this enforcer actually authorizes paths."""
+        return self._vault_root
+
     def check_tool(self, tool_name: str) -> None:
         """Raise ProfileError if tool not allowed by active profile."""
         if self._policy.allows_all_tools:
@@ -226,7 +231,7 @@ class AuditLogger:
     ) -> None:
         # Untrusted arguments and exception strings can contain a rejected body.
         # Body-bearing tools retain structural receipts only, in both backends.
-        body_tool = tool in {"capture", "capture_note", "vault_write"}
+        body_tool = tool in {"capture", "capture_note", "vault_write", "knowledge_query"}
         if body_tool:
             params = {}
             reason = result if reason else ""

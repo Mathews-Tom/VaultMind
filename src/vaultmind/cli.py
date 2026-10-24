@@ -728,7 +728,7 @@ def bot(ctx: click.Context) -> None:
         validate_ordinary_output_path(VAULTMIND_HOME / "data" / "sessions.db", settings.vault.path)
     )
 
-    # Knowledge gap ledger (constructed early — wired into both ThinkingPartner and CommandHandlers)
+    # Domain handlers and enabled producers own gap effects, never approved queries.
     from vaultmind.memory.gaps import GapStore
 
     gap_store: GapStore | None = None
@@ -743,28 +743,10 @@ def bot(ctx: click.Context) -> None:
             stale_after_days=settings.gaps.stale_after_days,
         )
 
-    # Graph context builder for thinking partner
-    from vaultmind.graph.context import GraphContextBuilder
-
-    graph_ctx: GraphContextBuilder | None = None
-    if settings.llm.graph_context_enabled:
-        graph_ctx = GraphContextBuilder(
-            knowledge_graph=graph,
-            llm_client=llm_client,
-            fast_model=settings.llm.fast_model,
-        )
-
     thinking = ThinkingPartner(
-        settings.llm,
-        settings.telegram,
-        llm_client,
+        settings,
+        llm_factory=lambda: llm_client,
         session_store=session_store,
-        graph_context_builder=graph_ctx,
-        vault_root=settings.vault.path,
-        parser=parser,
-        distill_config=settings.distill,
-        gap_store=gap_store,
-        score_floor=settings.bench.score_floor,
     )
 
     # Duplicate detection
@@ -998,6 +980,23 @@ def bot(ctx: click.Context) -> None:
     )
     sched_state = validate_ordinary_output_path(sched_state, settings.vault.path)
     jobs: list[ScheduledJob] = []
+    if settings.distill.enabled:
+
+        async def _finalize_thinking_sessions() -> None:
+            await thinking.finalize_idle_sessions(
+                store=store,
+                parser=parser,
+                episode_store=episode_store,
+                gap_store=gap_store,
+            )
+
+        jobs.append(
+            ScheduledJob.legacy(
+                name="session_finalization",
+                interval=timedelta(minutes=1),
+                execute=_finalize_thinking_sessions,
+            )
+        )
 
     if maturation_pipeline is not None:
         maturation_job = _maturation_review_job(maturation_pipeline, review_queue, on_block)
@@ -2019,6 +2018,7 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
             graph,
             parser,
             settings=settings,
+            llm_factory=lambda: _create_llm_client(settings),
             duplicate_detector=detector,
             note_suggester=suggester,
             enforcer=enforcer,

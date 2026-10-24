@@ -122,11 +122,24 @@ unsupported results. Invented citations, invalid responses and provider failures
 fail explicitly without fallback; selected identities are rechecked after
 completion. Citation membership does not prove truth or entailment.
 
-None of these reads creates a proposal, promotes an answer or changes accepted
-state. No raw-note, graph, memory, web or prior-answer fallback is used.
-Normal Telegram conversation/thinking and MCP answering retain their existing
-policies; source-only discovery is not an approved-answer cutover. Configuration does not make source-checkout
-or synthetic offline use an installed-package/live-provider qualification.
+These reads create no proposal, page, gap, episode, graph extraction or
+distillation effect. Root `ask`, selected `wiki query`, normal Telegram
+question/chat, `/think` (including sticky and voice questions), and MCP
+`knowledge_query` share this approved-current query core. `/recall`,
+`search-sources` and MCP `vault_search` remain source-only, unapproved discovery,
+never answer evidence. There is no raw-note, graph, memory, web or prior-answer
+fallback. Configuration does not turn synthetic offline use into installed or
+live-provider qualification.
+
+Telegram may supply the last three complete user questions for intent only;
+assistant replies, summaries, graph and episode facts never become evidence.
+Thinking modes affect presentation, not trust or evidence selection. Queries do
+not schedule distillation or finalize expired sessions. The separate existing
+idle-session job runs every minute only when `[distill].enabled`; it claims
+expired records before generation and retains archived histories, summaries and
+failed/interrupted claims without automatic retry. This is not a broader
+producer-preservation guarantee. Session persistence is separate from query
+business-state effects.
 
 For source inputs that must not be retained, use YAML frontmatter with either `do_not_retain: true` or `retention: do-not-retain`. Such inputs are rejected before body/proposal persistence; malformed retention values fail rather than being coerced. Do not use this as a secret scanner: only add data you are authorized to preserve and, for generated proposals, send to the provider.
 
@@ -252,15 +265,10 @@ LLM provider configuration.
 | Key                       | Type   | Default                  | Description                                       |
 | ------------------------- | ------ | ------------------------ | ------------------------------------------------- |
 | `provider`                | string | `openai`                 | `"anthropic"`, `"openai"`, `"gemini"`, `"ollama"` |
-| `thinking_model`          | string | —                        | Primary model for thinking, analysis, extraction  |
-| `fast_model`              | string | —                        | Lighter model for routing, tagging, chat          |
-| `max_context_notes`       | int    | `8`                      | Max notes injected as context                     |
+| `thinking_model`          | string | —                        | Primary model for approved-current answers, analysis and extraction |
+| `fast_model`              | string | —                        | Lighter model for independent tagging and other domain operations |
 | `max_tokens`              | int    | `4096`                   | Max response tokens                               |
 | `ollama_base_url`         | string | `http://localhost:11434` | Ollama server URL                                 |
-| `graph_context_enabled`   | bool   | `true`                   | Include graph context in thinking sessions        |
-| `graph_hop_depth`         | int    | `2`                      | Ego subgraph traversal depth                      |
-| `graph_min_confidence`    | float  | `0.6`                    | Min confidence for graph context entities         |
-| `graph_max_relationships` | int    | `20`                     | Max relationships in graph context                |
 
 **API keys** (set in `.env`):
 
@@ -271,6 +279,18 @@ LLM provider configuration.
 
 Ollama requires no API key.
 
+The table's provider value reflects the shipped TOML; model-only defaults use
+Anthropic and `claude-sonnet-4-20250514`. Approved-current answering consumes
+`thinking_model` and `max_tokens`, not `routing.chat_model`. Its provider factory
+is lazy per query and makes one completion with no hidden retry. Bot assembly
+still constructs its separate domain client for unrelated commands.
+
+Legacy answer-only controls are removed, not compatibility switches:
+`max_context_notes`, `graph_context_enabled`, `graph_hop_depth`,
+`graph_min_confidence`, `graph_max_relationships`,
+`single_pass_extraction_enabled` and `extraction_confidence_threshold`.
+Remove them from selected configuration rather than expecting old answer paths.
+
 ## `[telegram]`
 
 Telegram bot behavior.
@@ -278,6 +298,11 @@ Telegram bot behavior.
 | Key                    | Type | Default | Description                        |
 | ---------------------- | ---- | ------- | ---------------------------------- |
 | `thinking_session_ttl` | int  | `3600`  | Thinking session timeout (seconds) |
+
+The former `thinking_summarization_enabled`, `thinking_message_count_threshold`,
+`thinking_recent_turns_to_keep`, `thinking_batch_size` and
+`thinking_summary_max_tokens` controls are removed. Stored summaries are retained
+as session records, not injected into answer evidence.
 
 **Secrets** (set in `.env`):
 
@@ -299,11 +324,11 @@ Message classification and routing behavior.
 
 | Key                     | Type   | Default | Description                                              |
 | ----------------------- | ------ | ------- | -------------------------------------------------------- |
-| `chat_model`            | string | `""`    | Model for chat responses (empty = `llm.fast_model`)      |
-| `chat_max_tokens`       | int    | `1024`  | Max tokens for chat responses                            |
-| `vault_context_enabled` | bool   | `true`  | Include vault search results in conversational responses |
-| `max_context_chunks`    | int    | `4`     | Max chunks for context augmentation                      |
+| `chat_model`            | string | `""`    | Edit/date-resolution model only (empty = `llm.fast_model`), not knowledge answering |
 | `capture_all`           | bool   | `false` | Bypass routing — all text becomes a capture              |
+
+The former `chat_max_tokens`, `vault_context_enabled` and `max_context_chunks`
+controls are removed. There is no legacy conversational retrieval toggle.
 
 ## `[watch]`
 
@@ -642,7 +667,7 @@ Profiles are defined under `[mcp.profiles.<name>]`:
 ```toml
 [mcp.profiles.researcher]
 description = "Read-only access for research and Q&A tasks"
-allowed_tools = ["vault_search", "vault_read", "vault_list", "graph_query", "graph_path"]
+allowed_tools = ["knowledge_query", "vault_search", "vault_read", "vault_list", "graph_query", "graph_path", "read_frontmatter", "list_folder_index", "follow_links"]
 folder_scope = ["*"]
 write_enabled = false
 
@@ -662,6 +687,18 @@ requires_confirmation = true
 ```
 
 Activate with: `vaultmind mcp-serve --profile <name>`. Default (no flag) uses `researcher`.
+
+`knowledge_query` is explicitly allowed in both the built-in researcher and the
+shipped TOML researcher definition. The full wildcard is unchanged; planner and
+user replacement profiles are not broadened. A configured replacement needs its
+own deliberate allowlist and provenance scope. First-folder scope must authorize
+both `wiki` and `_wiki`, including every retained parent; permission to read only
+the current page is insufficient.
+
+For this tool, `max_note_size_bytes` bounds the complete UTF-8 input JSON, the
+question/evidence context (also capped at 128 KiB), and the actual pretty-printed
+JSON result, not just answer text. Overflow refuses the request/result without
+cropping or dropping evidence. See [MCP query policy](mcp-integration.md#knowledge_query).
 
 Profile values are validated during settings loading, before the MCP server starts. `allowed_tools` and `folder_scope` must be lists of strings; nested environment/`.env` overrides use JSON arrays, for example `VAULTMIND_MCP__PROFILES__PLANNER__FOLDER_SCOPE='["00-inbox"]'`. `write_enabled` and `requires_confirmation` are booleans: environment/`.env` values such as `false` and `true` are parsed as booleans, not string truthiness. Invalid booleans, lists, and note-size limits fail validation. `max_note_size_bytes` is a nonnegative integer, or `None` through programmatic configuration for no size limit; omitting it also means no limit.
 

@@ -18,6 +18,7 @@ DEFAULT_PROFILES: dict[str, MCPProfileConfig] = {
     "researcher": MCPProfileConfig(
         description="Read-only access for research and Q&A tasks",
         allowed_tools=[
+            "knowledge_query",
             "vault_search",
             "vault_read",
             "vault_list",

@@ -1,18 +1,15 @@
-"""Routing handler — message classification and dispatch."""
+"""Heuristic capture/greeting dispatch and approved-current knowledge answers."""
 
 from __future__ import annotations
 
-import asyncio
-import logging
 import random
 import time
 from typing import TYPE_CHECKING
 
-from vaultmind.bot.handlers.utils import _is_authorized, _split_message
+from vaultmind.bot.handlers.utils import _is_authorized
 from vaultmind.bot.router import Intent, MessageRouter
-from vaultmind.bot.sanitize import MAX_LLM_INPUT_LENGTH, sanitize_text
-from vaultmind.llm.client import LLMError
-from vaultmind.llm.client import Message as LLMMessage
+from vaultmind.knowledge.render import render_knowledge_result, split_knowledge_text
+from vaultmind.wiki.workspace import WikiError
 
 if TYPE_CHECKING:
     from aiogram.types import Message
@@ -20,31 +17,13 @@ if TYPE_CHECKING:
     from vaultmind.bot.handlers.bookmark import LastExchange
     from vaultmind.bot.handlers.context import HandlerContext
 
-logger = logging.getLogger(__name__)
-
 GREETING_RESPONSES = [
     "Hey! What's on your mind?",
-    "Hi there. Ask me anything or prefix with `note:` to capture something.",
-    "What's up? I've got your vault loaded.",
-    "Hey. Need to look something up, think through an idea, or capture a note?",
+    "Hi there. Ask me anything or prefix with note: to capture something.",
+    "Hey. Need an approved-wiki answer or to capture a source?",
     "Hi! Ready when you are.",
 ]
 
-QUESTION_SYSTEM_PROMPT = """\
-You are a vault-aware assistant with access to the user's personal knowledge base (Obsidian vault).
-Answer the question using the vault context provided below. Be concise and direct.
-Reference notes with [[Note Title]] format when citing vault content.
-If the vault context is insufficient, say so and suggest `/think <topic>` for deeper exploration.
-"""
-
-CHAT_SYSTEM_PROMPT = """\
-You are a friendly vault-aware assistant. The user's knowledge base context is provided below.
-Respond naturally and conversationally. Weave in relevant vault context when it adds value.
-Keep responses brief — a few sentences unless the topic demands more.
-Reference notes with [[Note Title]] format when citing vault content.
-"""
-
-# Module-level router instance
 _router = MessageRouter()
 
 
@@ -57,58 +36,35 @@ async def handle_message(
     think_fn: object,
     last_exchanges: dict[int, LastExchange] | None = None,
 ) -> None:
-    """Route a plain text message based on heuristic classification."""
+    """Preserve exact capture boundaries; never truncate a knowledge question."""
     if not _is_authorized(ctx, message):
         await message.answer("\u26d4 Unauthorized")
         return
-
     original = text
-    # Classify the unsliced input so capture never accepts an 8k truncation.
-    # Non-capture traffic still uses the ordinary bounded LLM view below.
     result = _router.classify(original)
-
-    # Escape hatch: old behavior (all text -> capture).
     if ctx.settings.routing.capture_all:
         await capture_fn(ctx, message, original, raw_original=original)  # type: ignore[operator]
         return
-
-    # Sticky thinking sessions -- continue if active
     user_id = message.from_user.id if message.from_user else 0
     if ctx.thinking.has_active_session(user_id):
-        bounded = sanitize_text(
-            original, max_length=MAX_LLM_INPUT_LENGTH, operation="message_routing"
-        )
-        await think_fn(ctx, message, bounded.text, last_exchanges)  # type: ignore[operator]
+        await think_fn(ctx, message, original, last_exchanges)  # type: ignore[operator]
         return
-
-    if result.intent is Intent.capture:
-        await capture_fn(ctx, message, result.content, raw_original=original)  # type: ignore[operator]
-        return
-
-    san = sanitize_text(original, max_length=MAX_LLM_INPUT_LENGTH, operation="message_routing")
-    text = san.text
-    if not text:
-        await message.answer("Empty input after sanitization.")
-        return
-
-    # Bound non-capture inputs only after the capture branch.
-    result = _router.classify(text)
     if result.intent is Intent.capture:
         await capture_fn(ctx, message, result.content, raw_original=original)  # type: ignore[operator]
     elif result.intent is Intent.greeting:
         await handle_greeting(message)
-    elif result.intent is Intent.question:
-        await handle_smart_response(
-            ctx, message, result.content, is_question=True, last_exchanges=last_exchanges
-        )
     else:
         await handle_smart_response(
-            ctx, message, result.content, is_question=False, last_exchanges=last_exchanges
+            ctx,
+            message,
+            original,
+            is_question=result.intent is Intent.question,
+            last_exchanges=last_exchanges,
         )
 
 
 async def handle_greeting(message: Message) -> None:
-    """Respond to casual greetings with a static response."""
+    """Respond to casual greetings without a provider."""
     await message.answer(random.choice(GREETING_RESPONSES))
 
 
@@ -120,47 +76,21 @@ async def handle_smart_response(
     is_question: bool,
     last_exchanges: dict[int, LastExchange] | None = None,
 ) -> None:
-    """Generate a vault-context-aware response using the LLM."""
-    routing_cfg = ctx.settings.routing
-
-    # Build vault context (reuse ThinkingPartner's method, offload to thread)
-    vault_context = ""
-    if routing_cfg.vault_context_enabled:
-        vault_context = await asyncio.to_thread(
-            ctx.thinking._build_vault_context, text, ctx.store, ctx.graph
-        )
-
-    # Select model and system prompt
-    model = routing_cfg.chat_model or ctx.settings.llm.fast_model
-    system = QUESTION_SYSTEM_PROMPT if is_question else CHAT_SYSTEM_PROMPT
-
-    # Build user message with vault context
-    if vault_context and vault_context != "No specific vault context found for this topic.":
-        user_content = f"**Context from vault:**\n{vault_context}\n\n**Message:** {text}"
-    else:
-        user_content = text
-
-    messages = [LLMMessage(role="user", content=user_content)]
-
+    """Question/chat classification changes neither evidence nor answer policy."""
+    if not _is_authorized(ctx, message):
+        return
+    user_id = message.from_user.id if message.from_user else 0
     try:
-        response = await asyncio.to_thread(
-            ctx.llm_client.complete,
-            messages=messages,
-            model=model,
-            max_tokens=routing_cfg.chat_max_tokens,
-            system=system,
-        )
-        if last_exchanges is not None:
-            user_id = message.from_user.id if message.from_user else 0
-            from vaultmind.bot.handlers.bookmark import LastExchange as _LastExchange
+        result = await ctx.thinking.think(user_id, text, use_session=False)
+    except WikiError as exc:
+        await message.answer(f"Knowledge query refused: {exc}", parse_mode=None)
+        return
+    response = render_knowledge_result(result)
+    if last_exchanges is not None:
+        from vaultmind.bot.handlers.bookmark import LastExchange as _LastExchange
 
-            last_exchanges[user_id] = _LastExchange(
-                query=text,
-                response=response.text,
-                timestamp=time.monotonic(),
-            )
-        for chunk in _split_message(response.text, max_len=4000):
-            await message.answer(chunk, parse_mode="Markdown")
-    except LLMError as e:
-        logger.error("LLM error in smart response: %s", e)
-        await message.answer(f"API error ({e.provider}): {e}")
+        last_exchanges[user_id] = _LastExchange(
+            query=text, response=response, timestamp=time.monotonic()
+        )
+    for chunk in split_knowledge_text(response):
+        await message.answer(chunk, parse_mode=None)

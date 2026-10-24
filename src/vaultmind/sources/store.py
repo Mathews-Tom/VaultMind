@@ -40,7 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_run_summaries_instance ON run_summaries(instance_
 -- Bounded run history per instance — a trigger-free application-level
 -- cap (see `record_run`'s own trim query) keeps this table small without
 -- a scheduled cleanup job, matching the repo's lazy-reap idiom
--- (GapStore.list_open(), SessionStore.cleanup_expired()).
+-- (for example, GapStore.list_open()).
 """
 
 _MAX_RUNS_PER_INSTANCE = 20

@@ -18,6 +18,19 @@
 
 The bot starts with watch mode enabled — vault changes are indexed incrementally in the background.
 
+Before answering, curate approved current wiki pages through the
+[source → propose → review → apply workflow](../README.md#manual-source-backed-wiki).
+Set `[vault].excluded_folders` to include both `wiki` and `_wiki`; defaults already
+do, but an older explicit list needs a deliberate setup edit. The application
+does not rewrite that list or fall back to raw notes. Capture/index/graph
+operations remain independent tools, not approval steps.
+
+All generated knowledge answers use the selected provider's
+`[llm].thinking_model` and `[llm].max_tokens`; there is no separate chat answering
+model. The bot still creates its shared domain client at startup, and unrelated
+vision, transcription, editing and scheduled producers retain their own provider
+requirements.
+
 The configured `allowed_user_ids` rule applies to mutation callbacks as well as commands, including approve, reject, approve-all, retry, delete/edit confirmation and cancellation. An empty list continues to allow all users. Edit confirmation/cancellation additionally requires the payload owner to match the callback actor; another user's pending edit is never consumed.
 
 ## Message Routing
@@ -57,17 +70,44 @@ verify the complete parent/attachment chain before discovery or curation.
 
 Capture, photo and transcription refusals log only the exception class, not input bodies or exception messages. Invalid retained replay evidence refuses the event without another transcription/provider attempt; it is not treated as an uncaptured event.
 
+Malformed or orphan provenance may also block a later capture/replay. Stop
+affected captures and preserve all files/state. An authorized operator can use
+the existing read-only workspace/source reader to identify the failing retained
+ID, with actual dependency permissions; see
+[source replay diagnosis](architecture.md#source-intake-and-discovery). Record the
+ID and failure class privately, never bodies, hidden paths or exception messages
+in responses/logs. Diagnosis does not repair: do not delete/quarantine files,
+rewrite hashes, skip records, mark success, reset reservations or restart to force
+replay. Reconciliation needs separate authorization; preservation guarantees
+neither automatic retry nor index completion.
+
 ### Greetings
 
 Short messages matching common greetings ("hi", "thanks", "ok", "hello") get a static response. No LLM call is made.
 
 ### Questions and Chat
 
-Everything else goes through vault-augmented LLM response:
+Question and conversational classifications use the same approved-current query
+core as CLI `ask`, selected `wiki query` and MCP `knowledge_query`:
 
-1. The message is searched against ChromaDB for relevant vault chunks
-2. Relevant chunks are injected as context
-3. The LLM responds with vault-aware answers
+1. Validate eligible approved current pages and all retained provenance.
+2. Automatically select at most eight pages with disclosed deterministic lexical
+   matching; synonyms without shared terms can be missed.
+3. Supply complete selected sections to one configured answering completion,
+   validate status/citations/conflicts, then revalidate identities before return.
+
+No matching approved evidence gives deterministic `unsupported`, without calling
+the answering factory. There is no raw-note, vector, graph, episode, web or
+old-answer fallback. `supported` and `conflicting` outcomes cite supplied section
+IDs; unresolved conflicts cannot silently become a winner. Invalid provider output
+and changed evidence are explicit refusals, not shortened or fallback answers.
+Citation/schema checks are structural, not proof of factual entailment.
+
+Replies retain the accepted answer, citations, complete section-to-page/source
+mapping, selected revisions, source identities, unresolved conflicts and lexical
+selection qualifications. They use plain text (`parse_mode=None`), split into
+ordered chunks of at most 4000 characters with no clipping, citation rewriting or
+loss of boundary whitespace. The core uses complete sections, not index excerpts.
 
 Set `capture_all = true` in `[routing]` config to bypass routing and capture all plain text.
 
@@ -99,24 +139,45 @@ Note lookup tries a relative path, a `.md` suffix, matching filenames and then o
 current-byte digests/provenance; missing or stale indexed distance is unknown,
 not zero. History, pending/control state and current `wiki` pages are excluded.
 Changing a paginated source invalidates its snapshot and requires a fresh search.
-This does not switch normal chat or `/think` to approved-wiki-only answering:
-root `ask` and explicit `wiki query` remain the approved-only routes.
+These results are `source-only`, `approved: false`: use them to inspect and
+curate, not as answer evidence. Normal chat, `/think` and voice questions already
+use the same approved-current policy as root `ask` and explicit `wiki query`.
 
 ### Thinking Partner
 
 | Command              | Usage                                | Description                                                                                |
 | -------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------ |
-| `/think`             | `/think Should I learn Rust?`        | Start a thinking partner session. The session persists across bot restarts (SQLite-backed) |
-| `/think explore:`    | `/think explore: future of PKM`      | Divergent ideation — generates multiple angles and possibilities                           |
-| `/think critique:`   | `/think critique: my startup idea`   | Stress-tests an idea, finds weaknesses and counterarguments                                |
-| `/think synthesize:` | `/think synthesize: AI + education`  | Connects dots across domains, finds non-obvious relationships                              |
-| `/think plan:`       | `/think plan: migrate to Kubernetes` | Creates a structured execution plan with steps and dependencies                            |
+| `/think`             | `/think What is our cache policy?`  | Approved-current answering with persisted conversational intent |
+| `/think explore:`    | `/think explore: cache alternatives` | Presentation prefix; unchanged evidence/model policy |
+| `/think critique:`   | `/think critique: cache policy`    | Presentation prefix; unchanged evidence/model policy |
+| `/think synthesize:` | `/think synthesize: cache policies` | Presentation prefix; unchanged evidence/model policy |
+| `/think plan:`       | `/think plan: cache migration`     | Presentation prefix; unchanged evidence/model policy |
 
-After starting a `/think` session, follow-up messages within the TTL (default: 1 hour) continue the same session automatically. No need to use `/think` again.
+After `/think`, follow-ups within `[telegram].thinking_session_ttl` (default one
+hour) continue the active session, including after restart. Sticky session routing
+takes precedence over ordinary capture/greeting heuristics; `capture_all` instead
+captures all plain text.
 
-A session that reaches `[distill].min_turns` (default 3) and then idles out is automatically distilled by an LLM into a `qa-artifact` note (question, resolution, systems, participants) — indexed immediately and run through episodic-memory extraction. Auto-distillation is opt-in (`[distill].enabled = false` by default). Run `/distill` any time to distill the current session manually, regardless of the config flag.
+Only the last three complete prior user questions supply intent and fresh lexical
+selection terms. Their claims are not evidence. Prior assistant answers, stored
+summaries, graph and episode facts never enter the answering envelope. Current and
+selected prior questions must each fit 4096 characters, and the complete
+question/intent/evidence envelope must fit 128 KiB; invalid or oversized input
+fails without truncating history or silently dropping pages. Old sessions therefore
+do not preserve their former raw-note factual authority after this cutover.
 
-The thinking partner draws context from both ChromaDB (semantic search) and the knowledge graph (entity relationships, ego subgraph).
+Asking does not summarize, extract entities or episodes, mint gaps, distill,
+create proposals, promote answers or mutate accepted pages. Session-history
+persistence is separate from the evidence boundary. An expired session remains
+intact; a new query starts a fresh generation without archiving or scheduling a
+producer.
+
+Idle finalization is independent: only `[distill].enabled = true` registers a one-minute job on the bot's existing scheduler. It archives full expired histories and existing summaries, claims records before generation, and attempts ordinary `qa-artifact` distillation for sessions meeting `[distill].min_turns` (default 3). Every in-flight question keeps its conversation generation active across TTL expiry; overlapping questions must all finish or unwind before idle claiming. Explicit clearing prevents a late completion from restoring deleted history. Indexing, episodic extraction and unresolved-gap production are separate downstream producer effects, not query effects or wiki approval. Completed/skipped/failed archives and interrupted claims retain their originals; failed or claimed work is not automatically retried on polling or restart. Distillation/indexing is not atomic and a failure may have partial effects. This retains the existing idle producer; it does not extend source-intake preservation to every legacy producer.
+
+`/distill` explicitly distills the active session, or the last Q&A exchange when
+there is no active session, even when automatic distillation is disabled.
+`/bookmark` remains an explicit ordinary-note writer.
+Neither command turns output into approved-current evidence without wiki review.
 
 ### Knowledge Graph
 
@@ -140,7 +201,7 @@ The thinking partner draws context from both ChromaDB (semantic search) and the 
 
 | Command | Usage   | Description                          |
 | ------- | ------- | ------------------------------------- |
-| `/gaps` | `/gaps` | List open knowledge gaps by age — unanswered questions, weak-retrieval `/recall` misses, and contradiction escalations. Auto-stale after `[gaps].stale_after_days` (default 30). Run `vaultmind research "<question>"` on a gap to close it |
+| `/gaps` | `/gaps` | List existing open gaps by age, including independent producer/contradiction escalations. Auto-stale after `[gaps].stale_after_days` (default 30); approved-current answering does not mint gaps. Research can close its originating gap |
 
 ### System
 
@@ -208,11 +269,18 @@ Notifications are gated by a significance filter — trivial results (< 20 chars
 
 Send a photo and VaultMind processes it using a vision model (Anthropic or OpenAI):
 
-1. The photo is downloaded and sent to the configured vision model
-2. The model generates a description of the image content
-3. The original image is saved to `00-inbox/images/{timestamp}.jpg` (configurable via `[image].save_originals`)
-4. A fleeting note is created with an `![[images/{filename}]]` embed and the AI description
-5. The note is indexed immediately
+1. Download and validate the photo/caption. With `save_originals = true`, preserve
+   the original attachment and attempt an ordinary
+   `{inbox_folder}/images/{source_id}.jpg` projection; otherwise retain a textual
+   event descriptor explicitly stating that the binary original was not retained.
+2. Attempt one vision-description stage and preserve successful generated text as
+   a separate parent-linked source. Vision text is not evidence of original retention.
+3. Attempt an ordinary fleeting-note projection, adding an image embed only when
+   the original projection succeeded, then attempt indexing.
+
+Replies distinguish preservation, original projection, vision, derivative and
+index outcomes. A failed stage is not automatically retried or reported as an
+indexed note, and none of these stages approves a wiki page.
 
 Configure the vision model in `[image].vision_model` (default: uses `llm.fast_model`).
 
@@ -220,8 +288,8 @@ Configure the vision model in `[image].vision_model` (default: uses `llm.fast_mo
 
 Send a voice message and VaultMind transcribes it using OpenAI Whisper:
 
-- If the transcription ends with `?` → routed as a question (vault-augmented LLM response)
-- Otherwise → captured to inbox as a fleeting note
+- If the transcription ends with `?` → the same approved-current answer route as text questions, without source capture
+- Otherwise → preserve the transcript, then attempt an ordinary inbox projection and indexing
 
 Requires `VAULTMIND_OPENAI_API_KEY` in `.env`.
 
@@ -237,4 +305,11 @@ Destructive operations (`/edit`, `/delete`) and BLOCK-lane autonomy proposals (i
 
 ## Session Persistence
 
-Thinking sessions are stored in SQLite at `~/.vaultmind/data/sessions.db` with a composite key of `(user_id, session_name)`. Sessions survive bot restarts. The TTL is configurable via `[telegram].thinking_session_ttl`.
+Thinking sessions are stored in SQLite at `~/.vaultmind/data/sessions.db`, with
+`(user_id, session_name)` identities and a TTL controlled by
+`[telegram].thinking_session_ttl`. Active sessions survive restarts; expired
+histories are not deleted by a later question. Existing summaries are retained
+for inspection/producer use, never answer evidence. The enabled independent idle
+finalizer retains original histories and summaries in archives with actual
+completion/failure/skip/claimed state. Explicit session clearing is distinct from
+expiry and removes the user's retained conversation generations.

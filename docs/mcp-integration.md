@@ -64,6 +64,75 @@ The CLI uses MCP stdio transport, not a listening HTTP port. Stdout contains onl
 
 ## Tools
 
+The server registers 19 tools; registration does not grant profile permission.
+
+### `knowledge_query`
+
+Answer from approved current wiki pages and their fully retained provenance,
+using the same core as root `ask`, selected `wiki query` and Telegram knowledge
+questions. This is the answer surface; `vault_search` is unapproved source
+discovery and cannot supply its evidence.
+
+**Parameters:**
+
+- `question` (string, required) — nonblank, at most 4096 characters.
+- `pages` (list of strings, optional) — 1–8 unique current `wiki/SLUG.md` paths.
+  Omit for lexical automatic selection; explicit `null` is invalid.
+- `evidence_only` (boolean, default `false`) — return validated evidence without
+  constructing a provider.
+
+No caller trust, context, budget, profile or conversational-intent overrides
+are accepted. Selected settings and the server's enforcement context are
+authoritative. Existing configurations must exclude both `wiki` and `_wiki`
+from ordinary indexing; setup fails rather than rewriting configuration or
+falling back to old answering.
+
+Automatic discovery validates all permitted current pages before selecting at
+most eight lexical matches. Forbidden pages are invisible, including to counts
+and selection; explicit forbidden selection returns a body-free denial/failure,
+not hidden evidence. No match yields `status: unsupported` with a bounded reason,
+not proof that no wiki page could answer. Lexical selection can miss synonyms.
+Explicit pages bypass ranking, not current-byte and provenance validation.
+
+**Returns:** Complete selected page revisions and evidence sections, selection
+limits, unresolved conflicts and source identities. Sections have result-local
+IDs such as `p1-s1`, full heading/text and page hash. Source identities include
+preserved source ID/path, content hash, metadata hash and URI, plus applicable
+provenance, retention flags and recursive retained-dependency identities.
+The complete retained parent closure must validate and be authorized. Raw-source bodies, pending
+proposals, history and arbitrary manually edited pages are not answer evidence.
+
+Nonempty evidence-only results have `status: evidence` with empty answer and
+citations. Generated results use `supported`, `conflicting` or `unsupported`.
+Supported/conflicting answers must cite supplied section IDs; unsupported has
+no citations. Unresolved conflict sections without reviewed resolution require
+`conflicting` citing every unresolved conflict section, or `unsupported`, never
+an automatically chosen winner. Citation/schema checks do not prove entailment
+or semantic answer quality. Selected page/source identities are checked again
+after generation; invalid schema, invented citations, changed evidence and
+provider failures refuse explicitly without alternate evidence or fallback.
+Refusals are structured `error` results, not an additional generated status.
+
+The configured `[llm].thinking_model` and `max_tokens` drive one completion
+through a per-query lazy factory. Empty, evidence-only, invalid, denied and
+oversized preflight paths construct no provider. Dispatch runs in a worker
+thread and never replays through the optional retry executor.
+
+The active profile must allow this tool and authorize both `wiki` and `_wiki`
+under first-folder scope, including all retained parents and approval state.
+Allowing only a current page is insufficient. `max_note_size_bytes`, when set,
+limits the complete UTF-8 input JSON, the context envelope (also at most 128 KiB)
+and the actual pretty-printed JSON result. These are byte bounds, not answer
+character limits; overflow refuses rather than cropping or dropping sections.
+A result-size refusal can occur after the single completion.
+
+Queries do not create pages/proposals, extract graph/episodes, mint gaps,
+distill sessions or mutate business state. Audit persistence is the exception:
+JSONL and SQLite retain structural profile/tool/outcome/timing receipts, not
+question, page-list, evidence, answer or provider-error bodies. Error logging
+records exception type without body-bearing tracebacks; public errors use fixed
+non-disclosing dispositions.
+
 ### `vault_search`
 
 Source-only discovery over current ordinary Markdown and preserved text, sharing CLI `search-sources`, Telegram `/recall` and benchmark policy.
@@ -86,8 +155,7 @@ silently searching a prefix; lexical discovery can miss synonyms.
 
 Filtered backend lookups remain scoped and population-bounded; an empty matching
 index avoids embedding. These lookup/query steps are not a transactional index
-snapshot. Normal MCP answering has not become approved-wiki-only answering;
-root CLI `ask` and explicit `wiki query` remain the approved-only routes.
+snapshot. Use `knowledge_query` for approved-current answers, not source results.
 
 ### `vault_read`
 
@@ -328,15 +396,21 @@ Profiles restrict what an agent can do. They control tool access, folder scope, 
 
 Read-only access for research and Q&A tasks.
 
-- **Tools:** `vault_search`, `vault_read`, `vault_list`, `graph_query`, `graph_path`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`, `list_folder_index`, `follow_links`
+- **Built-in tools:** `knowledge_query`, `vault_search`, `vault_read`, `vault_list`, `graph_query`, `graph_path`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`, `list_folder_index`, `follow_links`
 - **Folders:** All
 - **Write:** No
+
+The shipped TOML researcher explicitly includes `knowledge_query` too; its
+allowlist is narrower than the built-in fallback and omits the optional
+introspection tools above. A same-named configured profile replaces, rather than
+inherits, the built-in definition. Existing user replacement profiles are not
+automatically broadened.
 
 ### `planner`
 
 Read/write access scoped to project planning.
 
-- **Tools:** All researcher tools + `vault_write`, `capture`, `capture_note`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`, `list_folder_index`, `follow_links`
+- **Built-in tools:** `vault_search`, `vault_read`, `vault_write`, `vault_list`, `graph_query`, `graph_path`, `capture`, `capture_note`, `vault_stats`, `episode_query`, `workflow_suggest`, `graph_evolution`, `recent_activity`, `read_frontmatter`, `list_folder_index`, `follow_links` — not `knowledge_query`
 - **Folders:** `02-projects`, `00-inbox`
 - **Write:** Yes (max 50KB per note)
 
@@ -378,10 +452,11 @@ The shared `ProfileEnforcer` boundary covers every registered tool. Direct dispa
 
 ### Complete result policy
 
-The server registers 18 tools. The following policies apply after the profile's tool allowlist check; an allowlisted tool can still be explicitly denied when its producer cannot establish complete note provenance.
+The server registers 19 tools. The following policies apply after the profile's tool allowlist check; an allowlisted tool can still be explicitly denied when its producer cannot establish complete note provenance.
 
 | Tool | Folder-restricted result policy | Wildcard-folder behavior |
 | --- | --- | --- |
+| `knowledge_query` | Require `wiki`, `_wiki` and complete retained-parent authorization; automatic forbidden pages are invisible, explicit denial discloses no hidden evidence. | Approved-current evidence only, with the same identity, input/context/result-size and citation checks. |
 | `vault_search` | Filter verified note candidates before top-k, then validate returned chunks and counts. | Global search filters and valid note-backed results. |
 | `vault_read` | Authorize the requested note before reading content. | Any contained note. |
 | `vault_write` | Authorize destination, write permission, and size before writing/indexing. | Any contained destination, subject to write and size policy. |
@@ -423,9 +498,14 @@ Every MCP tool call is logged with:
 
 - Profile name
 - Tool name
-- Arguments (capture bodies redacted)
+- Arguments (body-bearing capture/write/query tools retain no arguments)
 - Outcome (OK / DENIED / ERROR)
 - Denial reason (if applicable)
+
+For `knowledge_query`, both audit backends store structural receipts only,
+including on schema rejection, denial and provider failure; query bodies,
+selected paths, evidence and answers are omitted. Audit SQL writes are an
+intentional exception to the tool's no-business-state-write guarantee.
 
 ### Profile enforcement
 
@@ -434,6 +514,8 @@ The `ProfileEnforcer` checks:
 1. Is this tool allowed for the active profile?
 2. Is write access enabled (for `vault_write`, `capture`, `capture_note`)?
 3. Is the target path within the allowed folder scope?
-4. Is the complete written content within size limits (for `vault_write`, `capture`, and `capture_note`)?
+4. Is the complete written content within size limits (for `vault_write`, `capture`, and `capture_note`), or the full input/context/actual JSON result within query limits (for `knowledge_query`)?
 
-Violations return a structured error response — the tool call does not execute.
+Violations return a structured error response without a partial result.
+Authorization and input/context-size refusals precede generation; actual
+result-size enforcement can refuse after completion, without replay.

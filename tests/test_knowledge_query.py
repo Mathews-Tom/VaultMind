@@ -491,3 +491,83 @@ def test_structural_words_in_user_content_remain_discoverable(
     result = query_knowledge(corpus.settings, "current", evidence_only=True)
     assert result["selection"]["selected_pages"] == [CACHE]
     assert any(body in row["text"] for row in result["evidence"])
+
+
+def test_followup_intent_reselects_current_evidence_without_adopting_user_claims(
+    corpus: Corpus,
+) -> None:
+    corpus.publish(CACHE, cache_body())
+    (corpus.vault / "unreviewed.md").write_text("The cache retention is 90 days.\n")
+    prior = ("Is the cache retention 90 days?",)
+    first = query_knowledge(
+        corpus.settings,
+        "How long?",
+        intent_questions=prior,
+        evidence_only=True,
+        llm_factory=forbidden_provider,
+    )
+    assert first["selection"]["selected_pages"] == [CACHE]
+    assert any("30 days" in row["text"] for row in first["evidence"])
+    assert "90 days" not in json.dumps(first["evidence"])
+
+    corpus.publish(CACHE, cache_body().replace("30 days", "7 days"))
+    before = snapshot(corpus.vault)
+    updated = query_knowledge(
+        corpus.settings,
+        "How long?",
+        intent_questions=prior,
+        evidence_only=True,
+        llm_factory=forbidden_provider,
+    )
+    assert updated["selection"]["selected_pages"] == [CACHE]
+    assert updated["selected_pages"] != first["selected_pages"]
+    assert any("7 days" in row["text"] for row in updated["evidence"])
+    assert "90 days" not in json.dumps(updated["evidence"])
+    assert snapshot(corpus.vault) == before
+
+
+def test_transport_context_budget_measures_complete_utf8_envelope_before_provider(
+    corpus: Corpus,
+) -> None:
+    corpus.publish(CACHE, cache_body() + "\n政策 applies to this cache.\n")
+    evidence = query_knowledge(corpus.settings, "cache retention", evidence_only=True)
+    provider = ScriptedProvider(
+        dict(status="supported", answer="30 days", citations=[evidence["evidence"][0]["id"]])
+    )
+    expected = query_knowledge(corpus.settings, "cache retention", llm_factory=lambda: provider)
+    prompt = provider.calls[0][0].content
+    exact = len(prompt.encode("utf-8"))
+    assert exact > len(prompt)
+    before = snapshot(corpus.vault)
+    with pytest.raises(WikiError, match="context limit"):
+        query_knowledge(
+            corpus.settings,
+            "cache retention",
+            max_context_bytes=exact - 1,
+            llm_factory=forbidden_provider,
+        )
+    accepted = query_knowledge(
+        corpus.settings,
+        "cache retention",
+        max_context_bytes=exact,
+        llm_factory=lambda: provider,
+    )
+    assert accepted == expected
+    assert len(provider.calls) == 2
+    assert snapshot(corpus.vault) == before
+
+
+@pytest.mark.parametrize(
+    "prior",
+    [("cache",) * 4, (" ",), ("x" * 4097,)],
+)
+def test_invalid_prior_intent_refuses_without_truncation_or_provider(
+    corpus: Corpus, prior: tuple[str, ...]
+) -> None:
+    corpus.publish(CACHE, cache_body())
+    before = snapshot(corpus.vault)
+    with pytest.raises(WikiError):
+        query_knowledge(
+            corpus.settings, "How long?", intent_questions=prior, llm_factory=forbidden_provider
+        )
+    assert snapshot(corpus.vault) == before

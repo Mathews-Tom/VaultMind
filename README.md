@@ -4,18 +4,18 @@
 
 # VaultMind
 
-Turns your Obsidian vault into an intelligent second brain — hybrid search
-(vector + BM25), knowledge graph, Telegram bot with photo capture, AI thinking
-partner, Zettelkasten maturation pipeline, belief evolution tracking, episodic
-and procedural memory, MCP integration for connecting Claude and other
-agents directly to your notes, compound loop engine for proactive insights,
-conversation distillation into structured Q&A notes, a knowledge gap ledger,
-contradiction detection with deterministic resolution, graduated autonomy
-review lanes, background source connectors, and non-destructive edit lineage.
+Turn captured material into reviewed, source-backed wiki pages, then ask questions
+against their approved current revisions from the CLI, Telegram or MCP. Raw-note
+and preserved-source search stays available for exploration, but is never silently
+promoted into answer evidence. VaultMind also keeps its independent Obsidian tools:
+hybrid search, knowledge graph, photo capture, Zettelkasten maturation, belief
+evolution, episodic/procedural memory, compound loops, conversation distillation,
+contradiction detection, graduated autonomy review and non-destructive edit lineage.
 
 ## Why VaultMind?
 
 - **Obsidian is the source of truth** — plain markdown files, always
+- **One answering policy** — CLI `ask`, `wiki query`, Telegram questions/chat/thinking and MCP `knowledge_query` use complete approved-current sections and retained provenance, with explicit supported/conflicting/unsupported outcomes
 - **AI augments, never replaces** — hybrid search (vector + BM25) and knowledge graphs surface what you'd miss
 - **Mobile-first capture** — Telegram bot gives full PKM access from your phone, including photo capture via vision models
 - **Agent-native** — Claude Desktop/Code and other AI agents read/write your vault via MCP
@@ -29,8 +29,8 @@ review lanes, background source connectors, and non-destructive edit lineage.
 - **Compound loops** — scheduler accumulates state across runs, detects usage shifts, belief drift trends, and new workflow patterns; pushes insights to Telegram proactively
 - **Provenance-aware ranking** — notes carry a stamped `authority` (1-5) at creation; `/recall` reweights results by source trust, backfilling a neutral default for older notes
 - **Retrieval self-benchmark** — `vaultmind bench` scores recall@k/MRR (and optionally cite-or-decline accuracy) against a golden question set, gating ranking/detector changes before they ship
-- **Conversation distillation** — finished thinking-partner sessions and `/distill` requests become `qa-artifact` notes (question, resolution, systems, participants), indexed immediately and mined for episodic memory
-- **Knowledge gap ledger** — unanswered questions, weak-retrieval misses, and contradiction escalations are deduplicated into trackable gaps (`/gaps`), auto-staled, and closed by running `research` on them
+- **Conversation distillation** — explicit `/distill` and an independently enabled idle-session job can produce ordinary `qa-artifact` notes and episodic records; asking does not run those producers or approve their output
+- **Knowledge gap ledger** — independent enabled producers and contradiction escalations maintain trackable gaps (`/gaps`); approved-current questions do not mint gaps or trigger research
 - **Contradiction detection** — new notes landing in the duplicate-detector's merge band are checked by an eval-gated LLM surface; conflicts resolve by temporal-then-authority-then-escalate policy and never edit or delete the losing note
 - **Graduated autonomy** — every automated mutation proposal (tags, merges, contradiction resolutions, maturation synthesis) routes through one AUTO/SKIM/BLOCK review queue with an approval-fatigue metric in `vaultmind learn`
 - **Source connectors** — scheduled `rss`, `youtube-channel`, and `github-activity` connectors ingest with durable cursors, run every item through distillation and the review queue, never bypassing governance
@@ -140,6 +140,14 @@ provider/projection/index stages are not automatically retried. Partial completi
 can leave a valid preserved source without an inbox note or usable index; capture
 is not an atomic multi-store transaction or an interrupted-index recovery system.
 
+This source-intake guarantee does not cover every generated domain note:
+research, connectors, maturation, bookmarking and distillation retain their
+existing producer paths and limits. None automatically approves its output.
+For malformed/orphan provenance blocking a later capture or replay, stop affected
+captures, preserve state and follow the
+[read-only diagnostic boundary](docs/architecture.md#source-intake-and-discovery);
+do not force replay or treat preservation as index completion.
+
 ```bash
 uv run vaultmind --config /tmp/wiki-demo.toml search-sources "report cache"
 ```
@@ -153,8 +161,10 @@ before ranking/top-k/counts. Preserved history, pending/control files and curren
 unknown relevance, not a fabricated distance of zero. Source discovery is bounded
 and lexical matching can miss synonyms.
 
-Root `ask` and explicit `wiki query` remain approved-page-only. Normal Telegram
-conversation/thinking and MCP answering have **not** switched to that policy.
+Root `ask`, explicit `wiki query`, normal Telegram question/chat, `/think` and its
+sticky follow-ups, voice questions, and MCP `knowledge_query` now share one
+approved-current answering policy. Raw discovery is a separate exploration action,
+not an alternate evidence mode or fallback when an answer is unsupported.
 The built-in planner profile still covers inbox/projects only and therefore
 denies capture requiring `_wiki` storage before writing a source or projection.
 Do not grant blanket `_wiki` access as a workaround; capturing through a restricted
@@ -201,8 +211,9 @@ current pages. Explicit selection bypasses ranking, not approval validation.
 Automatic discovery validates every permitted current page before ranking; even
 an unrelated invalid page fails closed rather than disappearing from the answer.
 
-Questions are limited to 4096 characters; the complete UTF-8 question/evidence
-envelope is limited to 128 KiB. Oversized input fails without truncation, dropping
+Questions and each of up to three prior session questions are limited to 4096
+characters; the complete UTF-8 question/intent/evidence envelope is limited to
+128 KiB. Oversized input fails without truncation, dropping
 selected pages or constructing a provider. No linked pages, pending drafts,
 history, raw-source bodies or indexes are silently added. Current bytes must
 match the latest completed applied proposal, including source/metadata and
@@ -211,14 +222,32 @@ sources and incomplete operations fail closed.
 
 Generated results use `supported`, `conflicting` or `unsupported`. Supported/conflicting answers require unique citations to supplied section IDs; unsupported answers have no citations. An unresolved `Conflicting information` section without a reviewed `Resolution` cannot silently become a winner: the result must be conflicting (citing every unresolved conflict section) or unsupported. Invalid output, invented IDs and provider failures are errors, not fallback answers. Selected identities are checked again after completion to reject evidence that changed during generation.
 
-These read-only commands create no proposal, approval, page/history update or
-automatic promotion. Provider construction is lazy: evidence-only, empty,
-no-match and invalid or oversized requests need no provider key. A generated
-answer uses at most one configured completion, with no raw-note, graph, memory,
-web or prior-answer fallback. Citation/schema validation does **not** prove that
-a claim follows from the text or is true: inspect the complete sections and
-preserved sources yourself. Normal Telegram conversation/thinking and MCP
-answering are not cut over; `/recall` and `vault_search` now expose source-only discovery.
+The query operation creates no proposal, approval, page/history update, graph or
+episode record, gap, extraction, distillation or automatic promotion. Session
+history and MCP audit records are separate permitted persistence, not answer
+evidence. The per-query provider factory is lazy: evidence-only, empty, no-match,
+invalid and oversized requests make no answering completion. Generated answering
+uses `[llm].thinking_model` and `[llm].max_tokens`, at most once per request, with
+no hidden retry or raw-note, graph, memory, web or prior-answer fallback. The bot
+still assembles its shared domain client at startup for unrelated commands.
+
+`/think` retains sessions across restarts, but only the last three complete user
+questions can resolve conversational intent and influence fresh page selection.
+Prior assistant answers, stored summaries, graph and episode facts never become
+evidence. Mode prefixes are presentation conventions, not different engines or
+evidence policies. Telegram sends the accepted answer, citations, complete
+section-to-page/source mapping and selection qualifications as plain text, split
+without clipping or dropping boundary characters. CLI/MCP retain structured results.
+
+When `[distill].enabled` is true, a separate one-minute job on the existing bot
+scheduler claims expired sessions before attempting distillation. It retains
+original histories/summaries and completed, skipped, failed or interrupted claims;
+failed/claimed work is not automatically retried. Asking neither dispatches that
+producer nor deletes expired history. These ordinary producer effects and explicit
+`/distill`/`/bookmark` actions require wiki review before becoming answer evidence.
+
+Citation/schema validation does **not** prove that a claim follows from the text
+or is true: inspect the complete sections and preserved sources yourself.
 SOURCE/offline use does not qualify an installed package or a live provider.
 
 ### Restore earlier wording through review
@@ -331,7 +360,10 @@ Creates the `~/.vaultmind/` directory structure:
 uv run vaultmind index
 ```
 
-Parses all markdown, chunks by headings, generates embeddings, stores in ChromaDB.
+Parses eligible ordinary Markdown, chunks by headings, generates embeddings and
+stores in ChromaDB. Keep `wiki` and `_wiki` excluded, including when upgrading an
+older explicit exclusion list. Indexing and graph building are for raw discovery
+and independent domain tools; neither makes a note approved answer evidence.
 
 ### 6. Build the knowledge graph
 
@@ -348,7 +380,10 @@ Add `--full` to rebuild from scratch.
 uv run vaultmind bot
 ```
 
-The bot starts with watch mode enabled — vault changes are indexed incrementally.
+The bot starts with watch mode enabled — ordinary vault changes are indexed
+incrementally. Capture and curate sources through the [manual wiki workflow](#manual-source-backed-wiki)
+to establish answer evidence; an empty wiki gives an explicit unsupported answer,
+not an automatic search of raw notes.
 
 ## CLI Commands
 
@@ -409,8 +444,8 @@ Plain text messages are classified automatically — no command prefix needed:
 | Multiline paste (3+ lines)  | Captured to inbox (pasted content = intentional)           |
 | Long text (500+ chars)      | Captured to inbox                                          |
 | "Hi", "thanks", "ok"        | Static greeting response (no LLM call)                     |
-| "What did I write about X?" | Vault-context-aware answer via LLM                         |
-| "Tell me about my projects" | Conversational response with vault context                 |
+| "What did I write about X?" | Answer from matching approved current wiki pages, or unsupported |
+| "Tell me about my projects" | Same approved-current answering policy                    |
 | Follow-up after `/think`    | Continues thinking session (sticky)                        |
 | URL in message              | Auto-ingests YouTube transcript or article content         |
 | Photo/image                 | Described via vision model, saved as note with image embed |
@@ -419,16 +454,21 @@ Capture prefixes: `note:`, `save:`, `capture:`, `remember:`, `jot:`, `log:`
 
 Set `capture_all = true` in `[routing]` config to restore old behavior (all text → capture).
 
+The table describes routing outside an active thinking session; sticky follow-ups
+use approved-current answering rather than recapture, unless `capture_all` is set.
+This is a breaking evidence change: old conversational answers and unapproved notes
+are not factual authority. See [session and idle-producer boundaries](docs/telegram-bot.md#thinking-partner).
+
 ### Commands
 
 | Command                         | Description                                                     |
 | ------------------------------- | --------------------------------------------------------------- |
-| `/recall <query>`               | Semantic search over vault (paginated)                          |
-| `/think <topic>`                | Start thinking partner session (persists across restarts)       |
-| `/think explore: <topic>`       | Divergent ideation mode                                         |
-| `/think critique: <topic>`      | Stress-test an idea                                             |
-| `/think synthesize: <topic>`    | Connect dots across domains                                     |
-| `/think plan: <topic>`          | Create execution plan                                           |
+| `/recall <query>`               | Unapproved source-only discovery (paginated)                     |
+| `/think <topic>`                | Approved-current answering with persisted conversational intent |
+| `/think explore: <topic>`       | Presentation prefix; same approved evidence policy               |
+| `/think critique: <topic>`      | Presentation prefix; same approved evidence policy               |
+| `/think synthesize: <topic>`    | Presentation prefix; same approved evidence policy               |
+| `/think plan: <topic>`          | Presentation prefix; same approved evidence policy               |
 | `/graph <entity>`               | Query knowledge graph connections                               |
 | `/daily`                        | Get/create today's daily note                                   |
 | `/notes <date>`                 | Find notes by date (natural language: `yesterday`, `last week`) |
@@ -487,7 +527,8 @@ uv sync --extra mcp
 
 | Tool               | Description                                                      |
 | ------------------ | ---------------------------------------------------------------- |
-| `vault_search`     | Semantic search with optional note type filter                   |
+| `knowledge_query`  | Approved-current answer or evidence-only result, with citations and selection limits |
+| `vault_search`     | Unapproved source-only discovery with optional note type filter   |
 | `vault_read`       | Read full note by relative path                                  |
 | `vault_write`      | Create/overwrite note + auto-reindex                             |
 | `vault_list`       | List folder contents with optional tag/type filter               |
@@ -512,7 +553,7 @@ Profiles control per-agent access. Activate with `--profile <name>`:
 
 | Profile                | Access                                                          | Folders                   |
 | ---------------------- | --------------------------------------------------------------- | ------------------------- |
-| `researcher` (default) | Read-only: search, read, list, graph, introspection tools       | All                       |
+| `researcher` (default) | Read-only: approved answering, source search, read, list, graph, introspection | All |
 | `planner`              | Scoped note reads/writes and capture; derived tools restricted | `02-projects`, `00-inbox` |
 | `full`                 | Unrestricted (requires explicit opt-in)                         | All                       |
 
@@ -583,13 +624,17 @@ uv run --extra dev --extra mcp pytest -v
 
 ### Retrieval confidence and the acceptance smoke
 
-`/recall`, `vaultmind bench`, and the thinking partner's gap minting share one relevance judgement, `retrieval_confidence(hits, score_floor)` in `indexer/ranking.py`. It reads **only the raw vector distance** (`hit["distance"]`, lower is closer) against `[bench].score_floor` (default `0.5`) and returns one of three states:
+`/recall` and `vaultmind bench` share source-relevance classification,
+`retrieval_confidence(hits, score_floor)` in `indexer/ranking.py`. It reads **only
+the raw vector distance** (`hit["distance"]`, lower is closer) against
+`[bench].score_floor` (default `0.5`). This is raw exploration, not the
+approved-current answering policy, and answering no longer uses it to mint gaps:
 
 | State     | When                                                                                           | Effect                                                                                       |
 | --------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `strong`  | any hit has a raw distance strictly below the floor                                            | no gap is minted; no decline credit (a strong result is not an honest decline)               |
-| `weak`    | no hits at all, or every hit has a raw distance at or above the floor                          | mints a weak-retrieval gap (`/recall`) or unanswered-question gap (thinking); earns decline credit in `vaultmind bench` |
-| `unknown` | non-empty results where no hit is below the floor and at least one hit has no raw distance     | **no gap is minted and no decline credit is given**; a hit without a raw distance renders as `relevance unknown` instead of a percentage |
+| `strong`  | any hit has a raw distance strictly below the floor                                            | no decline credit (a strong result is not an honest decline) |
+| `weak`    | no hits at all, or every hit has a raw distance at or above the floor                          | earns deterministic decline credit in `vaultmind bench` |
+| `unknown` | non-empty results where no hit is below the floor and at least one hit has no raw distance     | no decline credit; missing raw distance renders as `relevance unknown`, not a percentage |
 
 Raw distance is never replaced by a fusion pseudo-distance. In hybrid search a lexical-only (BM25) hit has `distance: None` — it has keyword evidence but no vector evidence — so it can never prove relevance and never proves irrelevance. `rrf_score` (fusion) and `authority_score` (source-trust reweighting) only change *ordering*; they never change a hit's `distance` or the result set's confidence.
 
@@ -601,11 +646,34 @@ Raw distance is never replaced by a fusion pseudo-distance. In hybrid search a l
 uv run python scripts/verify_acceptance.py --case retrieval --offline
 ```
 
-It builds temporary synthetic state from explicit TOML, indexes real Markdown through the parser, then drives `/recall`, the benchmark runner and thinking-partner gap logic. A real lexical-only current file also has a deliberately inserted BM25 row but no vector. It checks exact self-match, empty/unknown evidence, threshold boundaries, shared recall/bench results, authority ordering with unchanged raw distances, scope filtering before top-k despite a larger closer forbidden population, and current-byte hydration instead of stale indexed excerpts. Boundary-distance substitutions carry actual pre-created corpus chunks; no query fabricates current files. The machine-readable JSON records package/import/corpus identities and every expected/observed check; failures remain nonzero under `python -O`.
+It builds temporary synthetic state from explicit TOML, indexes real Markdown
+through the parser, then drives `/recall` and the benchmark runner. A real
+lexical-only current file has a deliberately inserted BM25 row but no vector.
+It checks exact self-match, empty/unknown evidence, threshold boundaries, shared
+recall/bench results, authority ordering with unchanged raw distances, scope
+filtering before top-k and current-byte hydration instead of stale indexed
+excerpts. Boundary-distance substitutions use pre-created corpus chunks. The
+JSON receipt records expected/observed checks and runtime/corpus identities.
 
-Smoke limits — what it does **not** prove: embeddings are a deterministic hash-bucket stand-in, the LLM is a scripted client, and Telegram delivery is an in-process recorder, so it demonstrates plumbing and raw-distance semantics, not retrieval quality or live-provider behaviour. The direct BM25 fixture insert tests missing vector evidence, not native-provider quality or parser creation of a lexical-only note. Exact floor-boundary values come from a clearly labeled scripted store kept separate from the real storage path. Thinking retrieves with vector-only search, so its `unknown` state is exercised only through that scripted store. No network or paid calls are made (the run fails if a connect is attempted).
+Smoke limits — embeddings are deterministic stand-ins and Telegram delivery is an
+in-process recorder: these checks demonstrate source-discovery plumbing and
+raw-distance semantics, not retrieval quality, approved-answer quality or live
+provider behaviour. Exact threshold substitutions are labeled separately from
+the real storage path. The separate `wiki-query` and `mcp` offline cases exercise
+approved-current answering with scripted providers; none qualifies live-model
+entailment or factual quality. Network attempts fail the offline run.
 
 ## Architecture
+
+```text
+Capture → preserved source → explicit propose/review/apply → current wiki page
+CLI ask / Telegram questions and thinking / MCP knowledge_query
+    → fresh approved-current validation and selection → one bounded completion
+Raw /recall / vault_search / search-sources → unapproved exploration only
+```
+
+The independent domain components below remain available; they are not additional
+answer-evidence inputs.
 
 ```text
 ┌───────────────────────────────────────────────────────────────┐
