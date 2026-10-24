@@ -264,7 +264,10 @@ def test_denied_provenance_is_invisible_even_for_invalid_current_page(corpus: Co
 
 
 @pytest.mark.parametrize("pages", [None, [CACHE]])
-@pytest.mark.parametrize("invalid_question", ["", " ", "x" * 4097])
+@pytest.mark.parametrize(
+    "invalid_question",
+    ["", " ", "\t\r\n", "x" * 4097, "cache\x00", "cache\x1b", "cache\u200b", "cache\u202e"],
+)
 def test_question_bounds_precede_provider(
     corpus: Corpus, pages: list[str] | None, invalid_question: str
 ) -> None:
@@ -559,7 +562,7 @@ def test_transport_context_budget_measures_complete_utf8_envelope_before_provide
 
 @pytest.mark.parametrize(
     "prior",
-    [("cache",) * 4, (" ",), ("x" * 4097,)],
+    [("cache",) * 4, (" ",), ("\t\n",), ("x" * 4097,), ("cache\x00",), ("cache\u200b",)],
 )
 def test_invalid_prior_intent_refuses_without_truncation_or_provider(
     corpus: Corpus, prior: tuple[str, ...]

@@ -88,8 +88,9 @@ def register_handlers(handlers: CommandHandlers) -> None:
 
     @router.message(Command("think"))
     async def cmd_think(message: Message) -> None:
-        topic = message.text.replace("/think", "", 1).strip() if message.text else ""
-        if not topic:
+        topic = message.text.replace("/think", "", 1) if message.text else ""
+        topic = topic[1:] if topic[:1].isspace() else topic
+        if not topic.strip():
             await message.answer("Usage: `/think <topic or question>`", parse_mode="Markdown")
             return
         await handlers.handle_think(message, topic)

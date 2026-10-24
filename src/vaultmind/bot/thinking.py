@@ -69,7 +69,8 @@ class ThinkingPartner:
         if isinstance(topic, str):
             for mode in THINKING_MODES:
                 if topic.lower().startswith(f"{mode}:"):
-                    topic = topic[len(mode) + 1 :].strip()
+                    topic = topic[len(mode) + 1 :]
+                    topic = topic[1:] if topic[:1].isspace() else topic
                     break
         session = self._get_session(user_id) if use_session else None
         if session is not None:

@@ -158,13 +158,7 @@ hour) continue the active session, including after restart. Sticky session routi
 takes precedence over ordinary capture/greeting heuristics; `capture_all` instead
 captures all plain text.
 
-Only the last three complete prior user questions supply intent and fresh lexical
-selection terms. Their claims are not evidence. Prior assistant answers, stored
-summaries, graph and episode facts never enter the answering envelope. Current and
-selected prior questions must each fit 4096 characters, and the complete
-question/intent/evidence envelope must fit 128 KiB; invalid or oversized input
-fails without truncating history or silently dropping pages. Old sessions therefore
-do not preserve their former raw-note factual authority after this cutover.
+Only the last three complete prior user questions supply intent and fresh lexical selection terms. Their claims are not evidence. Prior assistant answers, stored summaries, graph and episode facts never enter the answering envelope. Current and selected prior questions must each fit 4096 characters, and the complete question/intent/evidence envelope must fit 128 KiB. Newlines, carriage returns and tabs remain intact; whitespace-only input and other Unicode control/format characters are rejected. Invalid or oversized input fails without truncating history or silently dropping pages. Old sessions therefore do not preserve their former raw-note factual authority after this cutover.
 
 Asking does not summarize, extract entities or episodes, mint gaps, distill,
 create proposals, promote answers or mutate accepted pages. Session-history
