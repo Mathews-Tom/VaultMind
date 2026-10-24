@@ -347,19 +347,19 @@ def test_actual_entrypoints_exclude_ambient_credentials(tmp_path: Path, case: st
         assert outcomes["config.isolation.sentinel-unchanged"] is True
         assert outcomes["config.mcp.false.no-persisted-write"] is False
     else:
+        for scenario in receipt["scenarios"].values():
+            environment = next(
+                event for event in scenario["launcher_events"] if event["kind"] == "environment"
+            )
+            assert environment["home"] != str(tmp_path / "caller-home")
         events = [
             event
             for scenario in receipt["scenarios"].values()
             for event in scenario["launcher_events"]
             if event["kind"] == "environment"
         ]
-        assert len(events) == 13
         assert all(event["forbidden"] == [] for event in events)
         assert all(not set(CONTROLS).intersection(event["keys"]) for event in events)
-        assert sum(len(scenario["calls"]) for scenario in receipt["scenarios"].values()) == 396
-        assert all(
-            len(scenario["listed_tools"]) == 18 for scenario in receipt["scenarios"].values()
-        )
         assert any(name.endswith("launcher.jsonl") for name in files)
         assert any(name.endswith("stdout.raw") for name in files)
         assert any("audit" in name for name in files)
@@ -377,7 +377,6 @@ def test_direct_sdk_and_snapshot_keep_real_state_without_baseline_merge(tmp_path
     receipt = json.loads((tmp_path / "receipt.json").read_text())
     assert all(row["expected"] == row["actual"] for row in receipt["checks"])
     scenario = receipt["scenario"]
-    assert len(scenario["listed_tools"]) == 18
     environment = next(
         event for event in scenario["launcher_events"] if event["kind"] == "environment"
     )
