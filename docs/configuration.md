@@ -67,6 +67,22 @@ This keeps preserved sources, pending proposals and prior versions outside legac
 
 Inputs must be local UTF-8 Markdown/text. Preserve IDs and page paths as safe ASCII identifiers; only one-level `wiki/SLUG.md` current pages are accepted. Sources, drafts and current pages are limited to 256 KiB each, generation context to 1 MiB and retained/selected sources to 32; oversized inputs fail instead of silently truncating. These are implementation bounds, not new TOML settings. Any draft frontmatter is rejected because identity/provenance is wiki-controlled.
 
+Read commands use the same explicit TOML and precedence:
+
+```bash
+uv run vaultmind --config /tmp/wiki-demo.toml wiki list
+uv run vaultmind --config /tmp/wiki-demo.toml wiki query "What does the current page support?" --page wiki/report-cache.md --evidence-only
+uv run vaultmind --config /tmp/wiki-demo.toml wiki lint
+```
+
+List, lint and evidence-only query construct no provider or writer and need no provider key. They print pretty JSON. They inspect only approved current one-level pages and verify latest completed apply, exact page bytes, source/metadata hashes and operation/history identities; arbitrary manual edits, older accepted bytes restored over current, incomplete operations and missing sources are not accepted evidence. Lint supplies per-page body-redacted diagnostics (`valid`, `unresolved`, `invalid`) and exits 1 only when an invalid row exists. Valid unresolved conflicts are not errors.
+
+For generated query, omit `--evidence-only`; normal `[llm].provider`, `thinking_model`, `max_tokens` and key validation apply. One completion sends the explicit question and complete selected current sections with provenance, not raw-source bodies, pending/history content, indexes or implicitly related pages. Repeat `--page` to select 1–8 unique current pages. The question limit is 4096 characters; the complete question/evidence JSON envelope limit is 128 KiB of UTF-8. These fixed bounds are separate from proposal limits above and are not configurable TOML fields. Oversize fails without truncation or a provider call.
+
+Evidence-only results have `status: evidence` and empty answer/citations. Evidence includes result-local section IDs such as `p1-s1`, full section text/heading, current page path/hash and preserved source identities, hashes, metadata hashes and URI. Generated `supported`/`conflicting` answers must cite supplied IDs; `unsupported` has no citations. Unresolved conflict sections without reviewed resolution require conflicting (citing all unresolved conflict sections) or unsupported results. Invented citations, invalid responses and provider failures fail explicitly without fallback; selected identities are rechecked after completion. Citation membership does not prove truth or entailment.
+
+None of these reads creates a proposal, automatically promotes an answer, changes accepted state or replaces legacy RAG defaults. Configuration does not make source-checkout or synthetic offline use an installed-package/live-provider qualification.
+
 For source inputs that must not be retained, use YAML frontmatter with either `do_not_retain: true` or `retention: do-not-retain`. Such inputs are rejected before body/proposal persistence; malformed retention values fail rather than being coerced. Do not use this as a secret scanner: only add data you are authorized to preserve and, for generated proposals, send to the provider.
 
 The [manual procedure](../README.md#manual-source-backed-wiki) covers editor drafts, exact reviewed digests and same-page conflicts. Wrong/stale identities, failed or incomplete operations require explicit intervention, not a retry daemon. Configuration does not eliminate noncooperating editor races or turn scripted SOURCE/offline checks into installed or live-provider qualification.

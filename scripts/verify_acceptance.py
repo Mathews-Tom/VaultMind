@@ -5879,10 +5879,169 @@ async def wiki_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+async def wiki_query_case(home: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Observe public read-only consumers against real accepted synthetic pages."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    import vaultmind.cli as app
+    from vaultmind.config import load_settings
+    from vaultmind.llm.client import LLMResponse
+    from vaultmind.wiki.workspace import WikiWorkspace, proposal_digest
+
+    check = make_checker(checks)
+    vault = home / "vault"
+    vault.mkdir()
+    config = home / "query.toml"
+    config.write_text(
+        f"[vault]\npath = {json.dumps(str(vault))}\n"
+        'excluded_folders = ["_wiki"]\n'
+        '[llm]\nprovider = "ollama"\nthinking_model = "query-offline"\nmax_tokens = 1733\n',
+        encoding="utf-8",
+    )
+    settings = load_settings(config)
+    source = home / "source.md"
+    source.write_text("# Policy\n\n19 days versus 7 days; unresolved.\n", encoding="utf-8")
+    page = "wiki/policy.md"
+    late = "Late verified retention is 19 days."
+    draft = home / "draft.md"
+    calls: list[dict[str, Any]] = []
+    response: dict[str, Any] = {}
+
+    class QueryLLM:
+        provider_name = "scripted-offline-query"
+
+        def complete(
+            self,
+            messages: list[Message],
+            model: str,
+            max_tokens: int = 4096,
+            system: str | None = None,
+        ) -> LLMResponse:
+            calls.append(
+                {
+                    "prompt": json.loads(messages[0].content),
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "system": system,
+                }
+            )
+            return LLMResponse(text=json.dumps(response), model=model, usage={})
+
+        def complete_multimodal(self, *args: Any, **kwargs: Any) -> LLMResponse:
+            raise AssertionError("Unexpected multimodal completion")
+
+    def accept(body: str) -> None:
+        draft.write_text(body, encoding="utf-8")
+        with WikiWorkspace(settings) as workspace:
+            proposal = workspace.propose(page, ["policy"], draft_file=draft)
+            workspace.apply(proposal.proposal_id, proposal_digest(proposal.payload))
+
+    def files() -> dict[str, bytes]:
+        return {
+            str(path.relative_to(vault)): path.read_bytes()
+            for path in vault.rglob("*")
+            if path.is_file()
+        }
+
+    runner = CliRunner()
+
+    def command(*args: str, ok: bool = True) -> Any:
+        result = runner.invoke(app.cli, ["--config", str(config), "wiki", *args])
+        check("wiki-query.cli." + args[0] + ".exit", ok, result.exit_code == 0)
+        if not ok:
+            check("wiki-query.explicit-error", True, bool(result.output.strip()))
+        return result
+
+    def query(*, evidence: bool = False, ok: bool = True) -> Any:
+        return command(
+            "query",
+            "What is the retention?",
+            "--page",
+            page,
+            *(["--evidence-only"] if evidence else []),
+            ok=ok,
+        )
+
+    with WikiWorkspace(settings) as workspace:
+        workspace.add_source(source, "policy", uri="urn:offline:policy")
+    accept(
+        "# Policy\n\n## Current understanding\n\n"
+        + "Background. " * 60
+        + late
+        + " [[_wiki/sources/policy]]\n"
+    )
+    before = files()
+    with patch.object(app, "_create_llm_client", side_effect=AssertionError("Unexpected model")):
+        listed = json.loads(command("list").output)
+        check("wiki-query.list.current-only", [page], [row["path"] for row in listed])
+        check(
+            "wiki-query.lint.valid",
+            ["valid"],
+            [row["status"] for row in json.loads(command("lint").output)],
+        )
+        evidence = json.loads(query(evidence=True).output)
+    late_row = next(row for row in evidence["evidence"] if late in row["text"])
+    check("wiki-query.full-late-evidence", True, late_row["text"].index(late) > 500)
+    check("wiki-query.source-provenance", "policy", late_row["sources"][0]["id"])
+    citation = late_row["id"]
+    with patch.object(app, "_create_llm_client", return_value=QueryLLM()):
+        for status in ("supported", "unsupported"):
+            response = {
+                "status": status,
+                "answer": "19 days." if status == "supported" else "Unknown.",
+                "citations": [citation] if status == "supported" else [],
+            }
+            result = json.loads(query().output)
+            check("wiki-query.generated." + status, status, result["status"])
+        check("wiki-query.configured-model", "query-offline", calls[-1]["model"])
+        check("wiki-query.configured-tokens", 1733, calls[-1]["max_tokens"])
+        check(
+            "wiki-query.prompt-full-evidence",
+            True,
+            any(late in row["text"] for row in calls[-1]["prompt"]["evidence"]),
+        )
+        response = {"status": "supported", "answer": "Invented.", "citations": ["invented"]}
+        query(ok=False)
+    check("wiki-query.readonly", True, before == files())
+    preserved = vault / "_wiki/sources/policy.md"
+    original = preserved.read_bytes()
+    preserved.unlink()
+    command("lint", ok=False)
+    query(evidence=True, ok=False)
+    preserved.write_bytes(original)
+    check("wiki-query.restored", "evidence", json.loads(query(evidence=True).output)["status"])
+    accept(
+        "# Policy\n\n## Current understanding\n\nUnresolved.\n\n"
+        "## Conflicting information\n\n19 versus 7 days. [[_wiki/sources/policy]]\n"
+    )
+    conflict = json.loads(query(evidence=True).output)
+    check("wiki-query.conflict-page", [page], conflict["unresolved_conflicts"])
+    check(
+        "wiki-query.lint.unresolved",
+        ["unresolved"],
+        [row["status"] for row in json.loads(command("lint").output)],
+    )
+    ids = [row["id"] for row in conflict["evidence"] if "## Conflicting information" in row["text"]]
+    with patch.object(app, "_create_llm_client", return_value=QueryLLM()):
+        response = {"status": "conflicting", "answer": "19 and 7 days conflict.", "citations": ids}
+        check("wiki-query.conflict-attribution", ids, json.loads(query().output)["citations"])
+        response = {"status": "supported", "answer": "19 days wins.", "citations": ids}
+        query(ok=False)
+    return {
+        "consumer": "real Click list/query/lint, configured client, current-page/source validation",
+        "model_calls": len(calls),
+        "observed_statuses": ["evidence", "supported", "unsupported", "conflicting"],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--case", required=True, choices=["retrieval", "mcp", "approval", "config", "wiki"]
+        "--case",
+        required=True,
+        choices=["retrieval", "mcp", "approval", "config", "wiki", "wiki-query"],
     )
     parser.add_argument("--offline", required=True, action="store_true")
     parser.add_argument("--receipt-out", type=Path)
@@ -5980,6 +6139,20 @@ def main() -> int:
             ),
         )
     attempts: list[str] = []
+    if args.case == "wiki-query":
+        receipt.update(
+            transport=(
+                "in-process real Click wiki list/query/lint and approved current-page validation"
+            ),
+            boundary_substitutions=[
+                "scripted LLM at configured cli._create_llm_client only",
+                "synthetic accepted pages/sources, isolated HOME/cwd and explicit TOML",
+            ],
+            limitations=(
+                "No live provider/model quality, embeddings, private vault "
+                "or installed artifact proof."
+            ),
+        )
 
     def forbid_network(event: str, arguments: tuple[Any, ...]) -> None:
         if event == "socket.getaddrinfo" or (
@@ -5997,6 +6170,7 @@ def main() -> int:
             "approval": "vm-m13-approval-",
             "config": "vm-m21-config-",
             "wiki": "vm-m31-wiki-",
+            "wiki-query": "vm-m32-wiki-query-",
         }[args.case]
         with (
             tempfile.TemporaryDirectory(prefix=prefix) as directory,
@@ -6015,6 +6189,8 @@ def main() -> int:
                 case = config_case(home, receipt["checks"])
             elif args.case == "wiki":
                 case = wiki_case(home, receipt["checks"])
+            elif args.case == "wiki-query":
+                case = wiki_query_case(home, receipt["checks"])
             else:
                 case = mcp_case(home, receipt["checks"])
             receipt.update(asyncio.run(case))
