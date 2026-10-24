@@ -8,16 +8,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from vaultmind.bench.fixture_store import FixtureStore
 from vaultmind.bot.handlers.gaps import handle_gaps
 from vaultmind.bot.handlers.recall import handle_recall
 from vaultmind.bot.thinking import ThinkingPartner
+from vaultmind.config import RankingConfig, Settings, VaultConfig
 from vaultmind.memory.gaps import GapKind, GapStatus, GapStore, normalize_question
 from vaultmind.pipeline.distill import DistillResult, mint_gap_for_unresolved
+from vaultmind.vault.parser import VaultParser
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -470,16 +473,40 @@ class TestThinkingWeakContextMinting:
 # ---------------------------------------------------------------------------
 
 
-def _make_recall_ctx(*, score_floor: float = 0.5, gap_store: GapStore | None = None) -> MagicMock:
+def _make_recall_ctx(
+    tmp_path: Path, *, score_floor: float = 0.5, gap_store: GapStore | None = None
+) -> MagicMock:
     ctx = MagicMock()
+    root = tmp_path / "vault"
+    root.mkdir()
+    ctx.settings = Settings.model_construct(vault=VaultConfig(path=root))
     ctx.settings.telegram.allowed_user_ids = []
     ctx.settings.search.hybrid_enabled = True
     ctx.settings.search.max_results = 10
     ctx.settings.search.page_size = 5
     ctx.settings.bench.score_floor = score_floor
     ctx.settings.ranking.enabled = False
+    ctx.store = FixtureStore({})
     ctx.gap_store = gap_store
     return ctx
+
+
+def _recall_hit(
+    ctx: MagicMock, title: str, distance: float | None, *, authority: int = 0
+) -> dict[str, Any]:
+    """Snapshot an actual current indexed chunk, not a fabricated search body."""
+    path = ctx.settings.vault.path / f"{title.lower()}.md"
+    path.write_text(
+        f"---\ntitle: {title}\nauthority: {authority}\n---\nCurrent evidence\n", encoding="utf-8"
+    )
+    parser = VaultParser(ctx.settings.vault)
+    chunk = parser.chunk_note(parser.parse_file(path))[0]
+    return {
+        "chunk_id": chunk.chunk_id,
+        "content": chunk.content,
+        "metadata": chunk.to_chroma_metadata(),
+        "distance": distance,
+    }
 
 
 def _make_recall_message(user_id: int = 42) -> MagicMock:
@@ -493,8 +520,7 @@ class TestRecallWeakRetrievalMinting:
     @pytest.mark.asyncio
     async def test_minting_mints_gap_when_no_results(self, tmp_path: Path) -> None:
         gap_store = _make_store(tmp_path)
-        ctx = _make_recall_ctx(gap_store=gap_store)
-        ctx.store.hybrid_search.return_value = []
+        ctx = _make_recall_ctx(tmp_path, gap_store=gap_store)
         message = _make_recall_message()
 
         await handle_recall(ctx, message, "What is Kosha?", {})
@@ -521,15 +547,14 @@ class TestRecallWeakRetrievalMinting:
         self, tmp_path: Path, distances: list[float | None], expect_gap: bool
     ) -> None:
         gap_store = _make_store(tmp_path)
-        ctx = _make_recall_ctx(gap_store=gap_store, score_floor=0.5)
-        ctx.store.hybrid_search.return_value = [
+        ctx = _make_recall_ctx(tmp_path, gap_store=gap_store, score_floor=0.5)
+        ctx.store = FixtureStore(
             {
-                "metadata": {"note_title": f"n{i}", "note_path": f"n{i}.md"},
-                "content": "c",
-                "distance": d,
+                "What is Kosha?": [
+                    _recall_hit(ctx, f"n{i}", distance) for i, distance in enumerate(distances)
+                ]
             }
-            for i, d in enumerate(distances)
-        ]
+        )
         message = _make_recall_message()
 
         await handle_recall(ctx, message, "What is Kosha?", {})
@@ -538,20 +563,16 @@ class TestRecallWeakRetrievalMinting:
         assert len(gaps) == (1 if expect_gap else 0)
         if expect_gap:
             assert gaps[0].kind == GapKind.WEAK_RETRIEVAL
+            assert gaps[0].evidence_ref == "telegram-recall:42"
         gap_store.close()
 
     @pytest.mark.asyncio
     async def test_unknown_results_render_unknown_and_mint_no_gap(self, tmp_path: Path) -> None:
         gap_store = _make_store(tmp_path)
-        ctx = _make_recall_ctx(gap_store=gap_store, score_floor=0.5)
-        ctx.store.hybrid_search.return_value = [
-            {"metadata": {"note_title": "Lex", "note_path": "lex.md"}, "content": "c"},
-            {
-                "metadata": {"note_title": "Lex2", "note_path": "lex2.md"},
-                "content": "c",
-                "distance": None,
-            },
-        ]
+        ctx = _make_recall_ctx(tmp_path, gap_store=gap_store, score_floor=0.5)
+        missing = _recall_hit(ctx, "Lex", None)
+        del missing["distance"]
+        ctx.store = FixtureStore({"What is Kosha?": [missing, _recall_hit(ctx, "Lex2", None)]})
         message = _make_recall_message()
 
         await handle_recall(ctx, message, "What is Kosha?", {})
@@ -566,45 +587,35 @@ class TestRecallWeakRetrievalMinting:
     async def test_authority_reorder_keeps_confidence_and_per_hit_relevance(
         self, tmp_path: Path
     ) -> None:
-        from vaultmind.config import RankingConfig
-
         gap_store = _make_store(tmp_path)
-        ctx = _make_recall_ctx(gap_store=gap_store, score_floor=0.5)
+        ctx = _make_recall_ctx(tmp_path, gap_store=gap_store, score_floor=0.5)
         ctx.settings.ranking = RankingConfig(enabled=True)
-        # Vector hit has the higher rrf_score but low authority; the lexical-only hit
-        # overtakes it after the authority multiplier (1.15 vs 0.85).
-        ctx.store.hybrid_search.return_value = [
+        # Current-file authority, applied in shared source discovery, overtakes
+        # the first backend candidate without creating any vector evidence.
+        ctx.store = FixtureStore(
             {
-                "metadata": {"note_title": "Vec", "note_path": "vec.md", "authority": 1},
-                "content": "c",
-                "distance": 0.3,
-                "rrf_score": 0.0100,
-            },
-            {
-                "metadata": {"note_title": "Lex", "note_path": "lex.md", "authority": 5},
-                "content": "c",
-                "distance": None,
-                "rrf_score": 0.0095,
-            },
-        ]
+                "What is Kosha?": [
+                    _recall_hit(ctx, "Vec", 0.3, authority=1),
+                    _recall_hit(ctx, "Lex", None, authority=5),
+                ]
+            }
+        )
         message = _make_recall_message()
 
         await handle_recall(ctx, message, "What is Kosha?", {})
 
         text = message.answer.call_args.args[0]
         assert text.index("Lex") < text.index("Vec")  # authority reordered the hits
-        assert "**1. Lex** (relevance unknown)" in text
-        assert "**2. Vec** (70% match)" in text  # raw distance untouched by authority
+        assert "<b>1. Lex</b> (relevance unknown)" in text
+        assert "<b>2. Vec</b> (70% match)" in text  # raw distance untouched by authority
         assert gap_store.list_open() == []  # strong evidence survives the reorder
         gap_store.close()
 
     @pytest.mark.asyncio
     async def test_minting_no_gap_when_results_are_confident(self, tmp_path: Path) -> None:
         gap_store = _make_store(tmp_path)
-        ctx = _make_recall_ctx(gap_store=gap_store, score_floor=0.5)
-        ctx.store.hybrid_search.return_value = [
-            {"metadata": {"note_title": "x", "note_path": "x.md"}, "content": "c", "distance": 0.1}
-        ]
+        ctx = _make_recall_ctx(tmp_path, gap_store=gap_store, score_floor=0.5)
+        ctx.store = FixtureStore({"What is Kosha?": [_recall_hit(ctx, "x", 0.1)]})
         message = _make_recall_message()
 
         await handle_recall(ctx, message, "What is Kosha?", {})
@@ -615,8 +626,7 @@ class TestRecallWeakRetrievalMinting:
     @pytest.mark.asyncio
     async def test_minting_reask_dedups_to_one_gap(self, tmp_path: Path) -> None:
         gap_store = _make_store(tmp_path)
-        ctx = _make_recall_ctx(gap_store=gap_store)
-        ctx.store.hybrid_search.return_value = []
+        ctx = _make_recall_ctx(tmp_path, gap_store=gap_store)
 
         await handle_recall(ctx, _make_recall_message(), "What is Kosha?", {})
         await handle_recall(ctx, _make_recall_message(), "what is kosha?", {})
@@ -625,13 +635,12 @@ class TestRecallWeakRetrievalMinting:
         gap_store.close()
 
     @pytest.mark.asyncio
-    async def test_minting_no_gap_store_configured_is_a_noop(self) -> None:
-        ctx = _make_recall_ctx(gap_store=None)
-        ctx.store.hybrid_search.return_value = []
+    async def test_minting_no_gap_store_configured_is_a_noop(self, tmp_path: Path) -> None:
+        ctx = _make_recall_ctx(tmp_path, gap_store=None)
         message = _make_recall_message()
 
         await handle_recall(ctx, message, "What is Kosha?", {})  # must not raise
-        message.answer.assert_any_call("No matching notes found.")
+        message.answer.assert_any_call("No matching sources found.")
 
 
 # ---------------------------------------------------------------------------

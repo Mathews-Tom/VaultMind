@@ -49,23 +49,39 @@ Vault filesystem paths and behavior.
 | `templates_folder`      | string | `06-templates`                    | Folder for note templates            |
 | `meta_folder`           | string | `_meta`                           | Folder for auto-generated reports    |
 | `sync_interval_seconds` | int    | `300`                             | Full re-sync interval (seconds)      |
-| `excluded_folders`      | list   | `[".obsidian", ".git", ".trash"]` | Folders to skip during indexing      |
+| `excluded_folders`      | list   | `[".obsidian", ".git", ".trash", "wiki", "_wiki"]` | Folders to skip during ordinary indexing |
 
 ## Manual wiki configuration
 
-Wiki commands use the existing settings loader and root `--config` option; there is no separate wiki policy runtime or automatic config rewrite. Explicitly add `_wiki` to `[vault].excluded_folders` before any wiki persistence:
+Wiki and source-intake commands use the existing settings loader and root `--config` option; there is no separate policy runtime or automatic config rewrite. Typed and shipped TOML defaults exclude both reserved trees. If an older explicit list omits either `wiki` or `_wiki`, setup fails with an actionable diagnostic before source persistence, provider construction or legacy-answer fallback. Deliberately update the selected configuration:
 
 ```toml
 [vault]
 path = "/absolute/path/to/vault"
-excluded_folders = [".obsidian", ".git", ".trash", "_wiki"]
+excluded_folders = [".obsidian", ".git", ".trash", "wiki", "_wiki"]
 ```
 
-This keeps preserved sources, pending proposals and prior versions outside legacy indexing. Wiki commands themselves do not initialize or mutate Chroma, FTS, graph, scheduler or Telegram. An existing vault path is required. Use a synthetic HOME/cwd and explicit TOML for offline examples so personal `.env` and higher-priority environment overrides cannot select unintended state.
+This keeps accepted wiki pages, preserved sources, pending proposals and prior versions outside ordinary indexing. Wiki commands themselves do not initialize or mutate Chroma, FTS, graph, scheduler or Telegram. An existing vault path is required. Use a synthetic HOME/cwd and explicit TOML for offline examples so personal `.env` and higher-priority environment overrides cannot select unintended state.
 
 `wiki add FILE --id ID [--uri URI]`, `wiki review ID`, `wiki apply ID --expect SHA256`, and `wiki propose --page wiki/SLUG.md --source ID --draft-file FILE` require no provider key. Draft input is explicit, not a model-error fallback. Omitting `--draft-file` uses `[llm].provider`, `thinking_model` and `max_tokens` through the existing client factory and normal provider-key validation. That request sends selected and retained source content plus the current page to the configured provider; no implicit network request occurs in the other commands.
 
 Inputs must be local UTF-8 Markdown/text. Preserve IDs and page paths as safe ASCII identifiers; only one-level `wiki/SLUG.md` current pages are accepted. Sources, drafts and current pages are limited to 256 KiB each, generation context to 1 MiB and retained/selected sources to 32; oversized inputs fail instead of silently truncating. These are implementation bounds, not new TOML settings. Any draft frontmatter is rejected because identity/provenance is wiki-controlled.
+
+Ordinary configured destinations, such as inbox/daily/meta paths, cannot target
+reserved `wiki` or `_wiki` trees lexically or through resolved aliases. Safe user
+strings and meaningful empty sentinels retain their spelling; setup does not
+silently normalize an unsafe destination into a different writable location.
+These application checks are not a filesystem sandbox and do not repair stale
+indexes. The dedicated wiki and intake writers retain only their narrow authority.
+
+`search-sources` uses the same selected settings and current-file source policy
+as `/recall`, MCP `vault_search` and benchmark queries. It does not initialize
+providers merely to read preserved or ordinary text. A benchmark bundle selects
+its own actual `vault/` corpus; it must not fall through to the operator's vault.
+Its `retrieval.yaml` supplies only note paths, optional chunk indices, raw
+distances (including `null`) and optional fusion scores. Content and authority
+come from actual Markdown/frontmatter, not YAML substitutes. These are source
+retrieval scores, not approved-answer or live-provider quality measurements.
 
 Read commands use the same explicit TOML and precedence:
 
@@ -108,8 +124,8 @@ completion. Citation membership does not prove truth or entailment.
 
 None of these reads creates a proposal, promotes an answer or changes accepted
 state. No raw-note, graph, memory, web or prior-answer fallback is used.
-Existing Telegram and MCP routes remain unchanged; root CLI `ask` does not
-replace their answering policies. Configuration does not make source-checkout
+Normal Telegram conversation/thinking and MCP answering retain their existing
+policies; source-only discovery is not an approved-answer cutover. Configuration does not make source-checkout
 or synthetic offline use an installed-package/live-provider qualification.
 
 For source inputs that must not be retained, use YAML frontmatter with either `do_not_retain: true` or `retention: do-not-retain`. Such inputs are rejected before body/proposal persistence; malformed retention values fail rather than being coerced. Do not use this as a secret scanner: only add data you are authorized to preserve and, for generated proposals, send to the provider.

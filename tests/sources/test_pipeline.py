@@ -180,7 +180,7 @@ class TestProposeIngestion:
                 )
             },
         )
-        proposal = propose_ingestion(queue, _item(), _instance())
+        proposal = propose_ingestion(queue, _item(), _instance(), vault_root=tmp_path)
         assert proposal.kind is ProposalKind.SOURCE_INGESTION
         assert proposal.lane is Lane.AUTO
         assert proposal.confidence == 1.0
@@ -192,12 +192,12 @@ class TestProposeIngestion:
         queue = ReviewQueue(
             tmp_path / "queue.db", AutonomyThresholds(block_below=0.4, skim_below=1.0)
         )
-        proposal = propose_ingestion(queue, _item(), _instance())
+        proposal = propose_ingestion(queue, _item(), _instance(), vault_root=tmp_path)
         assert proposal.lane is Lane.SKIM
 
     def test_never_bypasses_queue_even_without_applier(self, tmp_path: Path) -> None:
         queue = ReviewQueue(tmp_path / "queue.db")  # no appliers registered
-        proposal = propose_ingestion(queue, _item(), _instance())
+        proposal = propose_ingestion(queue, _item(), _instance(), vault_root=tmp_path)
         # capped at SKIM (never AUTO) since no applier is registered for the kind
         assert proposal.lane is Lane.SKIM
         assert proposal.status is ProposalStatus.PENDING

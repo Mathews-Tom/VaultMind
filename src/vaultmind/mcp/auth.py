@@ -105,6 +105,14 @@ class ProfileEnforcer:
                 f"'{self._policy.name}'. Allowed: {', '.join(self._policy.folder_scope)}"
             )
 
+    def allows_path(self, relative: str) -> bool:
+        """Authorize a path without exposing policy exceptions to source readers."""
+        try:
+            self.check_path(Path(relative))
+        except (ProfileError, OSError, ValueError):
+            return False
+        return True
+
     def note_path(self, provenance: object) -> Path | None:
         """Verify existing Markdown provenance and return its canonical relative path.
 
@@ -216,6 +224,20 @@ class AuditLogger:
         change_detail: dict[str, Any] | None = None,
         output_summary: dict[str, Any] | None = None,
     ) -> None:
+        # Untrusted arguments and exception strings can contain a rejected body.
+        # Body-bearing tools retain structural receipts only, in both backends.
+        body_tool = tool in {"capture", "capture_note", "vault_write"}
+        if body_tool:
+            params = {}
+            reason = result if reason else ""
+            change_detail = {"type": tool, "status": result} if change_detail else None
+            output_summary = {"status": result} if output_summary else None
+        else:
+            params = {
+                key: value
+                for key, value in params.items()
+                if key not in {"content", "body", "text", "title", "tags", "data", "token"}
+            }
         entry: dict[str, Any] = {
             "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "profile": profile,

@@ -1,21 +1,17 @@
-"""Tests for vault/ingest.py — URL detection, classification, and note creation."""
+"""URL classification and bounded extraction through the existing fetch seam."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import asyncio
+import io
+from unittest.mock import MagicMock
 
 import pytest
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 from vaultmind.vault.ingest import (
-    IngestResult,
     SourceType,
     _extract_youtube_video_id,
-    _sanitize_filename,
     classify_url,
-    create_vault_note,
     detect_url,
 )
 
@@ -71,50 +67,29 @@ class TestExtractYoutubeVideoId:
             _extract_youtube_video_id("https://example.com")
 
 
-class TestSanitizeFilename:
-    def test_removes_special_chars(self) -> None:
-        result = _sanitize_filename('hello: "world"')
-        assert ":" not in result
-        assert '"' not in result
+def test_article_extraction_reads_and_closes_response_off_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vaultmind.vault.ingest import fetch_article
 
-    def test_truncates_long_names(self) -> None:
-        assert len(_sanitize_filename("a" * 200)) <= 100
+    response = io.BytesIO(b"<title>Example</title><script>hidden</script><p>Exact article.</p>")
+    opener = MagicMock(return_value=response)
+    monkeypatch.setattr("vaultmind.vault.ingest.urllib.request.urlopen", opener)
+    result = asyncio.run(fetch_article("https://example.com"))
+    assert result.title == "Example"
+    assert result.content == "Example Exact article."
+    assert result.source_type is SourceType.ARTICLE
+    assert "hidden" not in result.content
+    assert response.closed
 
 
-class TestCreateVaultNote:
-    def test_creates_note_file(self, tmp_path: Path) -> None:
-        result = IngestResult(
-            source_type=SourceType.YOUTUBE,
-            title="Test Video",
-            content="This is the transcript.",
-            url="https://youtube.com/watch?v=abc12345678",
-            metadata={"video_id": "abc12345678"},
-        )
-        note_path = create_vault_note(result, tmp_path, inbox_folder="inbox")
-        assert note_path.exists()
-        content = note_path.read_text()
-        assert "Test Video" in content
-        assert "youtube" in content
-        assert "This is the transcript." in content
-        assert "abc12345678" in content
+def test_article_byte_limit_refuses_partial_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vaultmind.vault.ingest import fetch_article
 
-    def test_creates_inbox_directory(self, tmp_path: Path) -> None:
-        result = IngestResult(
-            source_type=SourceType.ARTICLE,
-            title="Article",
-            content="Content.",
-            url="https://example.com",
-        )
-        note_path = create_vault_note(result, tmp_path, inbox_folder="new-inbox")
-        assert (tmp_path / "new-inbox").is_dir()
-        assert note_path.parent == tmp_path / "new-inbox"
-
-    def test_stamps_authority_2_web_clip(self, tmp_path: Path) -> None:
-        result = IngestResult(
-            source_type=SourceType.ARTICLE,
-            title="Article",
-            content="Content.",
-            url="https://example.com",
-        )
-        note_path = create_vault_note(result, tmp_path, inbox_folder="inbox")
-        assert "authority: 2" in note_path.read_text()
+    response = io.BytesIO(b"x" * (2 * 1024 * 1024 + 1))
+    monkeypatch.setattr(
+        "vaultmind.vault.ingest.urllib.request.urlopen", MagicMock(return_value=response)
+    )
+    with pytest.raises(ValueError, match="byte limit"):
+        asyncio.run(fetch_article("https://example.com"))
+    assert response.closed

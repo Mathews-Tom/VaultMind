@@ -87,5 +87,5 @@ def reciprocal_rank_fusion(
             )
         )
 
-    results.sort(key=lambda r: r.rrf_score, reverse=True)
+    results.sort(key=lambda r: (-r.rrf_score, str(r.metadata.get("note_path", "")), r.chunk_id))
     return results

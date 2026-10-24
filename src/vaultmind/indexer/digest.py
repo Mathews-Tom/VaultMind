@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from vaultmind.vault.security import validate_ordinary_write_path
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -278,9 +280,8 @@ class DigestGenerator:
     def save_to_vault(self, report: DigestReport, vault_root: Path) -> Path:
         """Write the digest as a markdown file to {vault_root}/_meta/digests/YYYY-MM-DD.md."""
         date_str = report.generated_at.strftime("%Y-%m-%d")
-        digest_dir = vault_root / "_meta" / "digests"
-        digest_dir.mkdir(parents=True, exist_ok=True)
-        dest = digest_dir / f"{date_str}.md"
+        dest = validate_ordinary_write_path(f"_meta/digests/{date_str}.md", vault_root)
+        dest.parent.mkdir(parents=True, exist_ok=True)
 
         content = self._format_markdown(report)
         dest.write_text(content, encoding="utf-8")

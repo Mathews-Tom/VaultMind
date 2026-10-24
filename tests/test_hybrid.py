@@ -246,9 +246,11 @@ def test_real_hybrid_preserves_confidence_evidence(
             retrieval_confidence(hybrid, settings.bench.score_floor) == RetrievalConfidence.STRONG
         )
 
-        # Deliberately insert only at the real BM25 boundary, not via parser indexing.
+        # A lexical-only candidate still needs an authorized path relation; a
+        # type filter cannot authorize a row with no corresponding metadata.
         bm25.upsert("lexical::0", "lexical.md", "Lexical", "kestrelquartz field memo")
-        lexical = store.hybrid_search("kestrelquartz", where={"note_type": "concept"})
+        assert store.hybrid_search("kestrelquartz", where={"note_type": "concept"}) == []
+        lexical = store.hybrid_search("kestrelquartz", where={"note_path": {"$in": ["lexical.md"]}})
         assert [h["chunk_id"] for h in lexical] == ["lexical::0"]
         assert lexical[0]["distance"] is None
         assert (

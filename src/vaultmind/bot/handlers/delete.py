@@ -20,7 +20,8 @@ from vaultmind.graph.evolution import LineageStore
 from vaultmind.vault.security import (
     PathResolutionError,
     PathTraversalError,
-    validate_vault_path,
+    ReservedNamespaceError,
+    validate_ordinary_write_path,
 )
 
 if TYPE_CHECKING:
@@ -48,7 +49,15 @@ async def handle_delete(ctx: HandlerContext, message: Message, query: str) -> No
         await message.answer("Empty path after sanitization.")
         return
 
-    filepath = _resolve_note_path(ctx, query)
+    try:
+        requested_path = validate_ordinary_write_path(query, ctx.vault_root)
+        resolved_query = requested_path.relative_to(ctx.vault_root.resolve()).as_posix()
+        filepath = _resolve_note_path(ctx, resolved_query)
+        if filepath is not None:
+            filepath = validate_ordinary_write_path(str(filepath), ctx.vault_root)
+    except (PathTraversalError, PathResolutionError, ReservedNamespaceError):
+        await message.answer("Path not allowed.")
+        return
     if filepath is None:
         await message.answer(
             f"Note not found: `{query}`",
@@ -56,7 +65,7 @@ async def handle_delete(ctx: HandlerContext, message: Message, query: str) -> No
         )
         return
 
-    rel_path = filepath.relative_to(ctx.vault_root)
+    rel_path = filepath.relative_to(ctx.vault_root.resolve())
 
     # Preview first 300 chars
     content = filepath.read_text(encoding="utf-8")
@@ -105,13 +114,15 @@ async def handle_delete_callback(ctx: HandlerContext, callback: CallbackQuery) -
     if data.startswith("delete_confirm:"):
         rel_path = data[len("delete_confirm:") :]
         try:
-            filepath = validate_vault_path(rel_path, ctx.vault_root)
-        except (PathTraversalError, PathResolutionError):
+            filepath = validate_ordinary_write_path(rel_path, ctx.vault_root)
+        except (PathTraversalError, PathResolutionError, ReservedNamespaceError):
             await callback.message.edit_text(  # type: ignore[union-attr]
                 "Path not allowed.",
             )
             await callback.answer()
             return
+
+        rel_path = filepath.relative_to(ctx.vault_root.resolve()).as_posix()
 
         if not filepath.exists():
             await callback.message.edit_text(  # type: ignore[union-attr]
@@ -123,6 +134,7 @@ async def handle_delete_callback(ctx: HandlerContext, callback: CallbackQuery) -
 
         written = write_superseded_block(
             filepath,
+            vault_root=ctx.vault_root,
             callout_type="superseded",
             title="Deleted via bot",
             rationale=DELETE_RATIONALE,

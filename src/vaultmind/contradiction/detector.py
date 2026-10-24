@@ -20,7 +20,7 @@ from vaultmind.contradiction.marking import mark_contradicted
 from vaultmind.contradiction.policy import resolve_conflict
 from vaultmind.indexer.duplicate_detector import MatchType
 from vaultmind.services.review_delivery import deliver_block
-from vaultmind.vault.security import validate_vault_path
+from vaultmind.vault.security import validate_ordinary_write_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -81,11 +81,14 @@ class ContradictionDetector:
         """Sync applier registered onto `review_queue` for
         `CONTRADICTION_RESOLUTION` proposals — invoked by the queue's own
         `_apply()`, on a worker thread via `asyncio.to_thread`."""
+        loser_path = validate_ordinary_write_path(str(payload["loser_path"]), self._vault_root)
+        validate_ordinary_write_path(str(payload["winner_path"]), self._vault_root)
         mark_contradicted(
-            validate_vault_path(str(payload["loser_path"]), self._vault_root),
+            loser_path,
             str(payload["winner_path"]),
             str(payload["winner_title"]),
             str(payload["rationale"]),
+            vault_root=self._vault_root,
         )
         return f"marked {payload['loser_path']} contradicted by {payload['winner_path']}"
 
@@ -97,6 +100,7 @@ class ContradictionDetector:
         note = event.note
         if note is None:
             return
+        validate_ordinary_write_path(str(note.path), self._vault_root)
         if note.frontmatter.get("contradicted_by"):
             # Already a marked loser — skip re-check to avoid reprocessing the
             # loop the marking write itself triggers on a live-watched vault.
@@ -108,7 +112,8 @@ class ContradictionDetector:
             await self._check_pair(note, match)
 
     async def _check_pair(self, note: Note, match: DuplicateMatch) -> None:
-        candidate_path = self._vault_root / match.match_path
+        validate_ordinary_write_path(str(note.path), self._vault_root)
+        candidate_path = validate_ordinary_write_path(match.match_path, self._vault_root)
         if not candidate_path.exists():
             return
 
@@ -145,17 +150,24 @@ class ContradictionDetector:
     async def _apply_resolution(
         self, note: Note, match: DuplicateMatch, outcome: ResolutionOutcome
     ) -> None:
+        note_path = validate_ordinary_write_path(str(note.path), self._vault_root)
+        candidate_path = validate_ordinary_write_path(match.match_path, self._vault_root)
         if outcome.winner == "new":
             winner_title, winner_rel = note.title, str(note.path)
-            loser_path, loser_rel = self._vault_root / match.match_path, match.match_path
+            loser_path, loser_rel = candidate_path, match.match_path
         else:
             winner_title, winner_rel = match.match_title, match.match_path
-            loser_path, loser_rel = self._vault_root / note.path, str(note.path)
+            loser_path, loser_rel = note_path, str(note.path)
 
         if self._review_queue is None:
             try:
                 await asyncio.to_thread(
-                    mark_contradicted, loser_path, winner_rel, winner_title, outcome.rationale
+                    mark_contradicted,
+                    loser_path,
+                    winner_rel,
+                    winner_title,
+                    outcome.rationale,
+                    vault_root=self._vault_root,
                 )
             except Exception:
                 logger.exception("Failed to mark %s as contradicted by %s", loser_rel, winner_rel)
@@ -183,6 +195,8 @@ class ContradictionDetector:
             logger.exception("Failed to mark %s as contradicted by %s", loser_rel, winner_rel)
 
     async def _escalate(self, note: Note, candidate: Note, rationale: str) -> None:
+        validate_ordinary_write_path(str(note.path), self._vault_root)
+        validate_ordinary_write_path(str(candidate.path), self._vault_root)
         proposal = None
         if self._review_queue is not None:
             from vaultmind.services.review_queue import Impact, Lane, ProposalKind

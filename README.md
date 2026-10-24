@@ -45,14 +45,14 @@ review lanes, background source connectors, and non-destructive edit lineage.
 
 ## Manual source-backed wiki
 
-`wiki add`, `propose`, `review`, and `apply` maintain a selected Markdown page without starting the bot, watcher, graph or retrieval indexes. Preserved sources, pending proposals and prior versions live under `_wiki`; configure that folder as excluded before using any wiki command. This explicit draft workflow needs no model or embedding key. Run from a normal SOURCE checkout environment (`uv sync --extra dev --extra mcp`), not as proof of an independently installed wheel.
+`wiki add`, `propose`, `review`, and `apply` maintain a selected Markdown page without starting the bot, watcher, graph or retrieval indexes. Preserved sources, pending proposals and prior versions live under `_wiki`; both `wiki` and `_wiki` must be excluded from ordinary indexing. Defaults include both; an explicitly configured older list requires a deliberate setup edit and is never rewritten automatically. This explicit draft workflow needs no model or embedding key. Run from a normal SOURCE checkout environment (`uv sync --extra dev --extra mcp`), not as proof of an independently installed wheel.
 
 Use a disposable vault for this example. Create `/tmp/wiki-demo.toml` with an absolute, existing vault path:
 
 ```toml
 [vault]
 path = "/absolute/path/to/synthetic-vault"
-excluded_folders = [".obsidian", ".git", ".trash", "_wiki"]
+excluded_folders = [".obsidian", ".git", ".trash", "wiki", "_wiki"]
 ```
 
 Save `source-a.md` outside the vault with a project note recommending 30-day report-cache retention. Preserve it:
@@ -114,6 +114,52 @@ A wrong digest, changed source/metadata, tampered payload or stale page fails ex
 
 Omit `--draft-file` only when deliberately requesting one bounded completion from the configured LLM provider. This requires the normal provider key and sends selected/retained sources and the current page to that provider; errors are not converted into a draft fallback. The scripted offline consumer exercises this adapter, not live-model factual quality or native/private-vault operation. See [architecture](docs/architecture.md#manual-wiki-boundary) and [configuration](docs/configuration.md#manual-wiki-configuration) for limits.
 
+### Capture sources before curating
+
+Telegram text, photos, voice captures, URL ingestion and MCP `capture`/`capture_note`
+use shared source preservation before downstream projection, indexing or analysis.
+Capture reports an immutable source ID/path/hash separately from derivative,
+provider, projection and index outcomes. `preserved` is not `indexed`, and neither
+means `approved`: the linked inbox note is a convenient ordinary projection, not
+an accepted wiki page. Supply a returned source ID explicitly to
+`wiki propose --source SOURCE_ID`, inspect the complete review and apply its exact
+digest to curate it.
+
+Submitted URL text and successfully extracted text are distinct parent-linked
+sources; extraction is not an archive of the HTTP response. Fetch failure leaves
+the submitted text preserved and reports the failed derivative instead of inventing
+an extracted source. Photos retain their original only when `save_originals` is
+enabled; vision text records that disposition. Voice audio is transient, not an
+archived original; a voice question is answered rather than captured as a source.
+These distinctions describe preservation, not provider accuracy.
+
+Where an adapter supplies an event/revision identity, replay does not repeat
+completed or failed downstream effects. Changed bytes create a new immutable
+source; separate events with equal bytes remain distinct. Failed or interrupted
+provider/projection/index stages are not automatically retried. Partial completion
+can leave a valid preserved source without an inbox note or usable index; capture
+is not an atomic multi-store transaction or an interrupted-index recovery system.
+
+```bash
+uv run vaultmind --config /tmp/wiki-demo.toml search-sources "report cache"
+```
+
+`search-sources`, Telegram `/recall`, MCP `vault_search` and `vaultmind bench`
+share current ordinary-note and preserved-source discovery. Results are
+`source-only`, `approved: false`, with current-byte digests/provenance; index text
+never substitutes for current content. Permission and namespace filtering happen
+before ranking/top-k/counts. Preserved history, pending/control files and current
+`wiki` pages are not raw-search candidates. Missing or stale vector evidence has
+unknown relevance, not a fabricated distance of zero. Source discovery is bounded
+and lexical matching can miss synonyms.
+
+Root `ask` and explicit `wiki query` remain approved-page-only. Normal Telegram
+conversation/thinking and MCP answering have **not** switched to that policy.
+The built-in planner profile still covers inbox/projects only and therefore
+denies capture requiring `_wiki` storage before writing a source or projection.
+Do not grant blanket `_wiki` access as a workaround; capturing through a restricted
+profile requires a deliberate permission decision for its preservation dependencies.
+
 Inspect the accepted page without constructing a provider or writer:
 
 ```bash
@@ -171,8 +217,8 @@ no-match and invalid or oversized requests need no provider key. A generated
 answer uses at most one configured completion, with no raw-note, graph, memory,
 web or prior-answer fallback. Citation/schema validation does **not** prove that
 a claim follows from the text or is true: inspect the complete sections and
-preserved sources yourself. Existing Telegram `/recall`, thinking-partner and
-MCP routes remain unchanged; the root CLI `ask` does not cut those routes over.
+preserved sources yourself. Normal Telegram conversation/thinking and MCP
+answering are not cut over; `/recall` and `vault_search` now expose source-only discovery.
 SOURCE/offline use does not qualify an installed package or a live provider.
 
 ### Restore earlier wording through review
@@ -547,7 +593,7 @@ uv run --extra dev --extra mcp pytest -v
 
 Raw distance is never replaced by a fusion pseudo-distance. In hybrid search a lexical-only (BM25) hit has `distance: None` — it has keyword evidence but no vector evidence — so it can never prove relevance and never proves irrelevance. `rrf_score` (fusion) and `authority_score` (source-trust reweighting) only change *ordering*; they never change a hit's `distance` or the result set's confidence.
 
-`vaultmind bench --bundle <dir>` reads `<dir>/retrieval.yaml`, a mapping of exact golden-question text to an ordered hit list. Each hit needs `note_path` and may carry `distance`, `authority`, `rrf_score`, `content`. A hit whose `distance` is **missing or `null` is explicit unknown evidence** (it is not defaulted to a "good" or "bad" distance), so a bundle can model lexical-only hits and the unknown path deterministically.
+`vaultmind bench --bundle <dir>` reads `<dir>/golden.yaml`, `<dir>/retrieval.yaml` and actual Markdown under `<dir>/vault/`. Retrieval YAML maps exact questions to indexed candidates with `note_path`, optional `chunk_index` (default 0), optional `distance` and optional `rrf_score`; it cannot supply content or authority. The loader parses/chunks actual files once, while the shared query independently reads their current bytes. A missing or `null` distance is unknown evidence, never a default good/bad distance. The bundle vault replaces the operator vault for this run; fixture scores measure source discovery, not approved-answer quality.
 
 `scripts/verify_acceptance.py` is a small real-surface smoke for this behaviour:
 
@@ -555,7 +601,7 @@ Raw distance is never replaced by a fusion pseudo-distance. In hybrid search a l
 uv run python scripts/verify_acceptance.py --case retrieval --offline
 ```
 
-It builds a fresh temporary `HOME`, vault, ChromaDB, BM25 index, gap ledger and graph from explicit TOML files, indexes a small corpus through the real parser, then drives the real `/recall` handler, the real bench runner, and the real thinking partner. The lexical-only row is deliberately inserted directly at the BM25 fixture boundary, separately from the parser-indexed notes; it is never added to the vector index. It asserts exact self-match is `strong` in vector and hybrid modes, empty retrieval is `weak`, that lexical-only BM25 chunk is `unknown` (and mints no gap), recall and bench retrieve identical result sets, the floor boundary (`floor - ε` strong, `floor` weak, `None`/missing unknown), and that authority re-ordering changes order but never distance or confidence. It prints a machine-readable JSON receipt (git revision, working-tree dirty flag, package/API-origin/corpus digests, boundary labels, every check's expected and observed value) and exits non-zero on any failed check or error, including under `python -O`.
+It builds temporary synthetic state from explicit TOML, indexes real Markdown through the parser, then drives `/recall`, the benchmark runner and thinking-partner gap logic. A real lexical-only current file also has a deliberately inserted BM25 row but no vector. It checks exact self-match, empty/unknown evidence, threshold boundaries, shared recall/bench results, authority ordering with unchanged raw distances, scope filtering before top-k despite a larger closer forbidden population, and current-byte hydration instead of stale indexed excerpts. Boundary-distance substitutions carry actual pre-created corpus chunks; no query fabricates current files. The machine-readable JSON records package/import/corpus identities and every expected/observed check; failures remain nonzero under `python -O`.
 
 Smoke limits — what it does **not** prove: embeddings are a deterministic hash-bucket stand-in, the LLM is a scripted client, and Telegram delivery is an in-process recorder, so it demonstrates plumbing and raw-distance semantics, not retrieval quality or live-provider behaviour. The direct BM25 fixture insert tests missing vector evidence, not native-provider quality or parser creation of a lexical-only note. Exact floor-boundary values come from a clearly labeled scripted store kept separate from the real storage path. Thinking retrieves with vector-only search, so its `unknown` state is exercised only through that scripted store. No network or paid calls are made (the run fails if a connect is attempted).
 

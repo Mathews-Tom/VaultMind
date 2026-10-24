@@ -10,6 +10,12 @@ from typing import TYPE_CHECKING
 
 from vaultmind.bot.handlers.utils import _is_authorized
 from vaultmind.bot.sanitize import MAX_QUERY_LENGTH, sanitize_text
+from vaultmind.vault.security import (
+    PathResolutionError,
+    PathTraversalError,
+    ReservedNamespaceError,
+    validate_ordinary_write_path,
+)
 
 if TYPE_CHECKING:
     from aiogram.types import Message
@@ -106,6 +112,12 @@ async def handle_bookmark(
     slug = _slugify(title)
     filename = f"{date_str}-bookmark-{slug}.md"
 
+    try:
+        filepath = validate_ordinary_write_path(f"{INBOX_FOLDER}/{filename}", ctx.vault_root)
+    except (PathTraversalError, PathResolutionError, ReservedNamespaceError):
+        await message.answer("Path not allowed.")
+        return
+
     if ctx.thinking.has_active_session(user_id):
         # Pull history from the in-memory session
         session = ctx.thinking._get_session(user_id)
@@ -132,16 +144,14 @@ async def handle_bookmark(
         await message.answer("Nothing to bookmark. Start a /think session or ask a question first.")
         return
 
-    inbox_path = ctx.vault_root / INBOX_FOLDER
-    inbox_path.mkdir(parents=True, exist_ok=True)
-    filepath = inbox_path / filename
+    filepath.parent.mkdir(parents=True, exist_ok=True)
     filepath.write_text(note_content, encoding="utf-8")
     logger.info("Bookmarked note: %s", filepath)
 
     note = ctx.parser.parse_file(filepath)
     ctx.store.index_single_note(note, ctx.parser)
 
-    relative_path = f"{INBOX_FOLDER}/{filename}"
+    relative_path = filepath.relative_to(ctx.vault_root.resolve()).as_posix()
     await message.answer(
         f"📌 Bookmarked: `{relative_path}`",
         parse_mode="Markdown",

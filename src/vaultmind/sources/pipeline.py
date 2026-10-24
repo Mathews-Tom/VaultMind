@@ -12,6 +12,7 @@ orchestration, shared by the scheduler job wiring (`cli.py::bot`) and the
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -26,8 +27,7 @@ from vaultmind.sources.models import FetchResult, RunSummary, SourceInstance, So
 from vaultmind.sources.registry import get_connector
 from vaultmind.sources.store import advance_cursor
 from vaultmind.vault.events import NoteCreatedEvent
-from vaultmind.vault.ingest import _sanitize_filename
-from vaultmind.vault.security import validate_vault_path
+from vaultmind.vault.security import validate_ordinary_write_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -50,21 +50,29 @@ logger = logging.getLogger(__name__)
 AUTO_INGESTED_AUTHORITY = 1
 
 
+def _sanitize_filename(name: str) -> str:
+    """Create the fallback source projection's bounded filename."""
+    name = re.sub(r'[<>:"/\\|?*]', "_", name)
+    name = re.sub(r"\s+", "_", name)
+    return name[:100].strip("_")
+
+
 def _write_plain_note(item: SourceItem, instance: SourceInstance, vault_root: Path) -> str:
     """Fallback note-write when distillation fails (no LLM key, LLM error,
-    or an empty extracted question) — a plain frontmatter'd note mirroring
-    `vault/ingest.py::create_vault_note`'s non-LLM shape. An ingested item
-    is never silently dropped by an LLM outage."""
-    folder = vault_root / instance.output_folder
+    or an empty extracted question) as a plain frontmatter note.
+    An ingested item is never silently dropped by an LLM outage."""
+    vault_root = vault_root.resolve()
+    folder = validate_ordinary_write_path(instance.output_folder, vault_root)
     folder.mkdir(parents=True, exist_ok=True)
 
     base_name = _sanitize_filename(item.title) or "untitled"
-    note_path = folder / f"{base_name}.md"
+    note_path = validate_ordinary_write_path(str(folder / f"{base_name}.md"), vault_root)
     counter = 1
     while note_path.exists():
-        note_path = folder / f"{base_name}-{counter}.md"
+        note_path = validate_ordinary_write_path(
+            str(folder / f"{base_name}-{counter}.md"), vault_root
+        )
         counter += 1
-    validate_vault_path(str(note_path), vault_root)
 
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     content = f"""\
@@ -114,6 +122,8 @@ def ingest_item(
 
     Returns the created note's vault-relative path.
     """
+    vault_root = vault_root.resolve()
+    validate_ordinary_write_path(instance.output_folder, vault_root)
     turns = [{"user": f"{item.title}\n\n{item.content}".strip(), "assistant": ""}]
     result = distill_conversation(
         turns=turns,
@@ -180,7 +190,7 @@ def make_applier(
 
 
 def propose_ingestion(
-    queue: ReviewQueue, item: SourceItem, instance: SourceInstance
+    queue: ReviewQueue, item: SourceItem, instance: SourceInstance, *, vault_root: Path
 ) -> ReviewProposal:
     """Route one fetched item into the review queue as a `SOURCE_INGESTION`
     proposal.
@@ -194,6 +204,7 @@ def propose_ingestion(
     it to SKIM/BLOCK correctly. Every item goes through `propose()`, never
     bypassing the queue, regardless of which lane it lands in.
     """
+    validate_ordinary_write_path(instance.output_folder, vault_root)
     payload = {
         "item_id": item.item_id,
         "title": item.title,
@@ -282,6 +293,7 @@ async def run_connector_once(
     `ScheduledJob` (`cli.py::bot`) and the `vaultmind source run <name>`
     CLI command — neither duplicates this orchestration.
     """
+    validate_ordinary_write_path(instance.output_folder, vault_root)
     started = datetime.now(UTC)
     connector = get_connector(instance.kind)
     state = source_store.get_state(instance.name)
@@ -299,7 +311,7 @@ async def run_connector_once(
         item_errors: list[str] = []
         for item in fetch_result.items:
             try:
-                proposal = propose_ingestion(review_queue, item, instance)
+                proposal = propose_ingestion(review_queue, item, instance, vault_root=vault_root)
                 await deliver_block(proposal, on_block)
                 await finalize_ingested_note(
                     proposal,

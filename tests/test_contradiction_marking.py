@@ -22,7 +22,9 @@ class TestMarkContradictedFirstWrite:
     def test_adds_contradicted_by_frontmatter(self, tmp_path: Path) -> None:
         path = _write_note(tmp_path)
 
-        result = mark_contradicted(path, "winner.md", "Winner Note", "newer note supersedes")
+        result = mark_contradicted(
+            path, "winner.md", "Winner Note", "newer note supersedes", vault_root=tmp_path
+        )
 
         assert result is True
         post = frontmatter.load(str(path))
@@ -31,7 +33,9 @@ class TestMarkContradictedFirstWrite:
     def test_prepends_callout_without_removing_body(self, tmp_path: Path) -> None:
         path = _write_note(tmp_path, body="Original content that must survive.\n")
 
-        mark_contradicted(path, "winner.md", "Winner Note", "newer note supersedes")
+        mark_contradicted(
+            path, "winner.md", "Winner Note", "newer note supersedes", vault_root=tmp_path
+        )
 
         post = frontmatter.load(str(path))
         assert "Original content that must survive." in post.content
@@ -42,7 +46,9 @@ class TestMarkContradictedFirstWrite:
     def test_callout_includes_rationale(self, tmp_path: Path) -> None:
         path = _write_note(tmp_path)
 
-        mark_contradicted(path, "winner.md", "Winner Note", "specific rationale text")
+        mark_contradicted(
+            path, "winner.md", "Winner Note", "specific rationale text", vault_root=tmp_path
+        )
 
         post = frontmatter.load(str(path))
         assert "specific rationale text" in post.content
@@ -54,7 +60,7 @@ class TestMarkContradictedFirstWrite:
             encoding="utf-8",
         )
 
-        mark_contradicted(path, "winner.md", "Winner Note", "rationale")
+        mark_contradicted(path, "winner.md", "Winner Note", "rationale", vault_root=tmp_path)
 
         post = frontmatter.load(str(path))
         assert post.metadata["title"] == "Loser"
@@ -66,9 +72,13 @@ class TestMarkContradictedIdempotency:
     def test_same_winner_twice_is_a_noop(self, tmp_path: Path) -> None:
         path = _write_note(tmp_path)
 
-        first = mark_contradicted(path, "winner.md", "Winner Note", "rationale")
+        first = mark_contradicted(
+            path, "winner.md", "Winner Note", "rationale", vault_root=tmp_path
+        )
         content_after_first = path.read_text(encoding="utf-8")
-        second = mark_contradicted(path, "winner.md", "Winner Note", "rationale")
+        second = mark_contradicted(
+            path, "winner.md", "Winner Note", "rationale", vault_root=tmp_path
+        )
         content_after_second = path.read_text(encoding="utf-8")
 
         assert first is True
@@ -78,8 +88,8 @@ class TestMarkContradictedIdempotency:
     def test_different_winners_both_accumulate(self, tmp_path: Path) -> None:
         path = _write_note(tmp_path)
 
-        mark_contradicted(path, "winner-a.md", "Winner A", "rationale a")
-        mark_contradicted(path, "winner-b.md", "Winner B", "rationale b")
+        mark_contradicted(path, "winner-a.md", "Winner A", "rationale a", vault_root=tmp_path)
+        mark_contradicted(path, "winner-b.md", "Winner B", "rationale b", vault_root=tmp_path)
 
         post = frontmatter.load(str(path))
         assert post.metadata["contradicted_by"] == ["winner-a.md", "winner-b.md"]
@@ -95,7 +105,7 @@ class TestMarkContradictedStringFrontmatterCoercion:
             encoding="utf-8",
         )
 
-        mark_contradicted(path, "new-winner.md", "New Winner", "rationale")
+        mark_contradicted(path, "new-winner.md", "New Winner", "rationale", vault_root=tmp_path)
 
         post = frontmatter.load(str(path))
         assert post.metadata["contradicted_by"] == ["old-winner.md", "new-winner.md"]
@@ -110,6 +120,7 @@ class TestWriteSupersededBlockDated:
 
         write_superseded_block(
             path,
+            vault_root=tmp_path,
             callout_type="superseded",
             title="Deleted via bot",
             rationale="Requested via /delete",
@@ -127,6 +138,7 @@ class TestWriteSupersededBlockDated:
 
         write_superseded_block(
             path,
+            vault_root=tmp_path,
             callout_type="warning",
             title="Some title",
             rationale="rationale text",
@@ -144,6 +156,7 @@ class TestWriteSupersededBlockNewContent:
 
         write_superseded_block(
             path,
+            vault_root=tmp_path,
             callout_type="superseded",
             title="Edited via bot",
             rationale="Instruction: add a summary",
@@ -168,6 +181,7 @@ class TestWriteSupersededBlockNewContent:
 
         write_superseded_block(
             path,
+            vault_root=tmp_path,
             callout_type="superseded",
             title="Deleted via bot",
             rationale="Requested via /delete",
@@ -192,9 +206,9 @@ class TestWriteSupersededBlockIdempotency:
             "dated": True,
         }
 
-        first = write_superseded_block(path, **kwargs)
+        first = write_superseded_block(path, vault_root=tmp_path, **kwargs)
         content_after_first = path.read_text()
-        second = write_superseded_block(path, **kwargs)
+        second = write_superseded_block(path, vault_root=tmp_path, **kwargs)
         content_after_second = path.read_text()
 
         assert first is True
@@ -209,7 +223,9 @@ class TestMarkContradictedUsesSharedWriter:
         idempotency contract."""
         path = _write_note(tmp_path, body="Body.\n")
 
-        result = mark_contradicted(path, "winner.md", "Winner Note", "specific rationale text")
+        result = mark_contradicted(
+            path, "winner.md", "Winner Note", "specific rationale text", vault_root=tmp_path
+        )
 
         post = frontmatter.load(str(path))
         assert result is True

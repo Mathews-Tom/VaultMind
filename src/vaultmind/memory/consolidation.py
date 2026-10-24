@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from vaultmind.vault.security import validate_ordinary_write_path
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -134,6 +136,12 @@ class MemoryConsolidator:
         """Generate and write a lesson note from a cluster of episodes."""
         from vaultmind.llm.client import Message
 
+        slug = entity.replace(" ", "-").lower()[:40]
+        now = datetime.now()
+        filename = f"lesson-{slug}-{now.strftime('%Y%m%d')}.md"
+        rel_path = f"_meta/lessons/{filename}"
+        filepath = validate_ordinary_write_path(rel_path, self._vault_root)
+
         episode_text = "\n".join(
             f"- Decision: {ep.decision}\n  Outcome: {ep.outcome} ({ep.outcome_status.value})\n"
             f"  Lessons: {'; '.join(ep.lessons[:3])}"
@@ -155,11 +163,7 @@ class MemoryConsolidator:
         )
 
         # Write to vault
-        slug = entity.replace(" ", "-").lower()[:40]
-        now = datetime.now()
-        filename = f"lesson-{slug}-{now.strftime('%Y%m%d')}.md"
-        rel_path = f"_meta/lessons/{filename}"
-        filepath = self._vault_root / rel_path
+        filepath = validate_ordinary_write_path(rel_path, self._vault_root)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         content = (
@@ -215,7 +219,7 @@ class MemoryConsolidator:
         now = datetime.now()
         filename = f"episode-{slug}-{now.strftime('%Y%m%d')}.md"
         rel_path = f"_meta/episodes/{filename}"
-        filepath = self._vault_root / rel_path
+        filepath = validate_ordinary_write_path(rel_path, self._vault_root)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         lessons_md = "\n".join(f"- {lesson}" for lesson in ep.lessons) if ep.lessons else "- (none)"

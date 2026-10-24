@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -11,6 +12,7 @@ import socket
 from pathlib import Path
 from typing import Any
 
+import frontmatter
 import pytest
 from click.testing import CliRunner
 
@@ -50,6 +52,12 @@ def test_concurrent_index_shrink_keeps_diagnostics_scoped_and_restores_sinks(
     acceptance = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(acceptance)
     _, fixture, config = acceptance.mcp_root_fixture(tmp_path / "scenario", "root-scoped-small")
+    # Both of these must remain discoverable without indexed candidates. The
+    # shared small-index fixture deliberately leaves the private note unindexed.
+    private = "03-private/closer-00.md"
+    for relative in ("02-projects/suggestion.md", private):
+        path = fixture["vault"] / relative
+        path.write_text(path.read_text() + "\n" + acceptance.TEXT + "\n", encoding="utf-8")
     before = acceptance.mcp_root_snapshot(fixture)
     deleted = {
         "allowed-source",
@@ -102,20 +110,25 @@ def test_concurrent_index_shrink_keeps_diagnostics_scoped_and_restores_sinks(
         assert result.exit_code != 0
     else:
         assert result.exit_code == 0, (result.exception, result.output)
-    expected_ids = (
-        {"allowed-peer"}
-        if profile == "root-scope"
-        else {"allowed-peer", "dot-path", "absolute-path", "private-alias"}
-    )
-    assert payload["count"] == len(expected_ids)
-    assert {hit["chunk_id"] for hit in payload["results"]} == expected_ids
+    assert payload["status"] == "source-only"
+    assert payload["approved"] is False
+    paths = {hit["path"] for hit in payload["results"]}
+    assert payload["count"] == len(paths)
+    allowed = {"02-projects/peer.md", "02-projects/source.md", "02-projects/suggestion.md"}
+    if profile == "root-scope":
+        assert paths == allowed
+    else:
+        assert paths == allowed | {private}
+    for hit in payload["results"]:
+        raw = (fixture["vault"] / hit["path"]).read_bytes()
+        assert hit["content"] == frontmatter.loads(raw.decode("utf-8")).content
+        assert hit["current_digest"] == hashlib.sha256(raw).hexdigest()
+        assert hit["distance"] is None
+        assert hit["approved"] is False and hit["status"] == "source-only"
     diagnostics = output.getvalue()
     if profile == "root-scope":
         assert "elements in index" not in diagnostics
         assert "n_results =" not in diagnostics
-        assert "WARNING chromadb.segment.impl.vector." in diagnostics
-    else:
-        assert "elements in index 5, updating n_results = 5" in diagnostics
     assert "WARNING vaultmind.diagnostics ordinary-warning-control" in diagnostics
     assert "ERROR vaultmind.diagnostics ordinary-error-control" in diagnostics
     after = acceptance.mcp_root_snapshot(fixture)

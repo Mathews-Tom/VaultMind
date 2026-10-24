@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from vaultmind.vault.models import NoteType
+from vaultmind.vault.security import validate_ordinary_output_path, validate_vault_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -57,6 +58,7 @@ def export_okf_bundle(
     notes: Iterable[Note],
     output_dir: Path,
     *,
+    vault_root: Path,
     okf_version: str = "0.1",
 ) -> OkfExportResult:
     """Export ``permanent``/``concept`` notes from ``notes`` as an OKF bundle.
@@ -71,22 +73,44 @@ def export_okf_bundle(
         (note for note in notes if note.note_type in EXPORTED_NOTE_TYPES),
         key=lambda note: note.path.as_posix(),
     )
-    output_dir = output_dir.expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = validate_ordinary_output_path(output_dir, vault_root)
 
     title_to_path = {note.title: note.path for note in exported}
 
     directories: set[Path] = {Path()}
+    concept_files: dict[Path, Path] = {}
     for note in exported:
         directories.update(note.path.parents)
-        concept_file = output_dir / note.path
+        destination = validate_ordinary_output_path(output_dir / note.path, vault_root)
+        concept_files[note.path] = validate_vault_path(destination.as_posix(), output_dir)
+    index_files = {
+        directory: validate_vault_path(
+            validate_ordinary_output_path(
+                output_dir / directory / "index.md", vault_root
+            ).as_posix(),
+            output_dir,
+        )
+        for directory in directories
+    }
+    log_path = validate_ordinary_output_path(output_dir / "log.md", vault_root)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for note in exported:
+        concept_file = concept_files[note.path]
         concept_file.parent.mkdir(parents=True, exist_ok=True)
         concept_file.write_text(_render_concept(note, title_to_path), encoding="utf-8")
 
     for directory in directories:
-        _write_index(output_dir, directory, exported, directories, okf_version=okf_version)
+        _write_index(
+            output_dir,
+            directory,
+            exported,
+            directories,
+            index_path=index_files[directory],
+            okf_version=okf_version,
+        )
 
-    _write_log(output_dir, len(exported))
+    _write_log(log_path, len(exported))
 
     return OkfExportResult(
         output_dir=output_dir,
@@ -138,6 +162,7 @@ def _write_index(
     exported: list[Note],
     all_directories: set[Path],
     *,
+    index_path: Path,
     okf_version: str,
 ) -> None:
     """Write one directory's ``index.md`` — a bare bullet-link map of its direct contents."""
@@ -164,12 +189,10 @@ def _write_index(
         description = note.frontmatter.get("description")
         suffix = f" - {description}" if isinstance(description, str) and description.strip() else ""
         lines.append(f"* [{note.title}]({_bundle_link(note.path)}){suffix}")
-
-    index_path = output_dir / directory / "index.md"
     index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_log(output_dir: Path, concept_count: int) -> None:
+def _write_log(log_path: Path, concept_count: int) -> None:
     """Write the bundle root ``log.md`` — one dated entry for this export run."""
     today = datetime.now(UTC).date().isoformat()
     noun = "concept" if concept_count == 1 else "concepts"
@@ -178,7 +201,7 @@ def _write_log(output_dir: Path, concept_count: int) -> None:
         f"## {today}\n"
         f"* **Export**: {concept_count} {noun} exported from VaultMind.\n"
     )
-    (output_dir / "log.md").write_text(content, encoding="utf-8")
+    log_path.write_text(content, encoding="utf-8")
 
 
 def _bundle_link(rel_path: Path) -> str:

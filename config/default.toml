@@ -10,7 +10,9 @@ daily_folder = "01-daily"
 templates_folder = "06-templates"
 meta_folder = "_meta"
 sync_interval_seconds = 300
-excluded_folders = [".obsidian", ".git", ".trash"]
+# Required: ordinary note discovery must not consume either wiki-owned tree.
+# Existing configurations must add both exact names; setup never rewrites them.
+excluded_folders = [".obsidian", ".git", ".trash", "wiki", "_wiki"]
 
 [memory_profile]
 enabled = true

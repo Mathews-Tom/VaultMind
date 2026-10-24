@@ -20,12 +20,14 @@ from vaultmind.mcp.auth import AuditLogger, ProfileEnforcer, ProfileError
 from vaultmind.vault.security import (
     PathResolutionError,
     PathTraversalError,
+    validate_ordinary_write_path,
     validate_vault_path,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from vaultmind.config import Settings
     from vaultmind.graph.knowledge_graph import KnowledgeGraph
     from vaultmind.indexer.store import VaultStore
     from vaultmind.vault.models import Note
@@ -49,6 +51,8 @@ def create_mcp_server(
     evolution_detector: object | None = None,
     preference_store: object | None = None,
     retry_executor: object | None = None,
+    *,
+    settings: Settings,
 ) -> Any:  # Returns mcp.server.Server (optional dep)
     """Create and configure the MCP server with vault tools.
 
@@ -72,8 +76,8 @@ def create_mcp_server(
             Tool(
                 name="vault_search",
                 description=(
-                    "Semantic search over the Obsidian vault."
-                    " Returns relevant note chunks ranked by similarity."
+                    "Discover current unapproved sources in the Obsidian vault."
+                    " Source-only results are not approved wiki answers."
                 ),
                 inputSchema={
                     "type": "object",
@@ -293,7 +297,9 @@ def create_mcp_server(
             ),
             Tool(
                 name="capture",
-                description="Quick-capture a note to the vault inbox.",
+                description=(
+                    "Preserve exact input as an unapproved source and project it to the inbox."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -310,6 +316,21 @@ def create_mcp_server(
                             "items": {"type": "string"},
                             "description": "Optional tags",
                         },
+                        "idempotency_token": {
+                            "type": "string",
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9._:-]+$",
+                            "description": (
+                                "Optional caller event identity; omitted means a fresh source."
+                            ),
+                        },
+                        "do_not_retain": {
+                            "type": "boolean",
+                            "const": False,
+                            "description": (
+                                "Capture requires retaining original input; true is rejected."
+                            ),
+                        },
                     },
                     "required": ["content"],
                 },
@@ -317,8 +338,8 @@ def create_mcp_server(
             Tool(
                 name="capture_note",
                 description=(
-                    "Capture a structured note to the vault with full metadata control."
-                    " Supports note type, tags, and custom target folder."
+                    "Preserve exact input as an unapproved source and create a linked note."
+                    " Returns separate preservation, projection, and indexing dispositions."
                 ),
                 inputSchema={
                     "type": "object",
@@ -346,6 +367,21 @@ def create_mcp_server(
                             "type": "string",
                             "default": "00-inbox",
                             "description": "Target folder relative to vault root",
+                        },
+                        "idempotency_token": {
+                            "type": "string",
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9._:-]+$",
+                            "description": (
+                                "Optional caller event identity; omitted means a fresh source."
+                            ),
+                        },
+                        "do_not_retain": {
+                            "type": "boolean",
+                            "const": False,
+                            "description": (
+                                "Capture requires retaining original input; true is rejected."
+                            ),
                         },
                     },
                     "required": ["content"],
@@ -475,14 +511,32 @@ def create_mcp_server(
                 "procedural_memory": procedural_memory,
                 "evolution_detector": evolution_detector,
                 "preference_store": preference_store,
+                "settings": settings,
             }
 
-            if retry_executor is not None:
+            import asyncio
+
+            if retry_executor is not None and name not in {
+                "capture",
+                "capture_note",
+                "vault_write",
+            }:
                 from vaultmind.mcp.retry import ToolRetryExecutor
 
                 assert isinstance(retry_executor, ToolRetryExecutor)
-                result = retry_executor.execute(name, arguments, _dispatch_tool, dispatch_kwargs)
+                if name == "vault_search":
+                    result = await asyncio.to_thread(
+                        retry_executor.execute, name, arguments, _dispatch_tool, dispatch_kwargs
+                    )
+                else:
+                    result = retry_executor.execute(
+                        name, arguments, _dispatch_tool, dispatch_kwargs
+                    )
+            elif name in {"capture", "capture_note", "vault_write", "vault_search"}:
+                result = await asyncio.to_thread(_dispatch_tool, name, arguments, **dispatch_kwargs)
             else:
+                # Existing optional producers own thread-affine SQLite state.
+                # Offload the migrated source operations, not unrelated stores.
                 result = _dispatch_tool(name, arguments, **dispatch_kwargs)
             text = json.dumps(result, indent=2, default=str)
             _duration_ms = int((_time.perf_counter() - _start) * 1000)
@@ -497,7 +551,7 @@ def create_mcp_server(
                     enforcer.policy.name,
                     name,
                     arguments,
-                    "OK",
+                    "PARTIAL" if result.get("status") == "partial" else "OK",
                     duration_ms=_duration_ms,
                     change_detail=change_detail,
                     output_summary=output_summary,
@@ -520,7 +574,10 @@ def create_mcp_server(
             return [TextContent(type="text", text=err)]
         except Exception as e:
             _duration_ms = int((_time.perf_counter() - _start) * 1000)
-            logger.exception("Tool %s failed", name)
+            if name in {"capture", "capture_note", "vault_write"}:
+                logger.error("Body-bearing MCP tool failed (%s)", type(e).__name__)
+            else:
+                logger.exception("Tool %s failed", name)
             if audit_logger is not None and enforcer is not None:
                 audit_logger.log(
                     enforcer.policy.name,
@@ -530,7 +587,12 @@ def create_mcp_server(
                     reason=str(e),
                     duration_ms=_duration_ms,
                 )
-            err = json.dumps({"error": str(e)})
+            message = (
+                f"MCP input operation failed ({type(e).__name__})"
+                if name in {"capture", "capture_note", "vault_write"}
+                else str(e)
+            )
+            err = json.dumps({"error": message})
             return [TextContent(type="text", text=err)]
 
     return server
@@ -580,13 +642,140 @@ def _result_note_paths(scope: ProfileEnforcer) -> list[Path]:
     return sorted(paths)
 
 
-def _capture_destination(scope: ProfileEnforcer, destination: Path, vault_path: Path) -> Path:
-    """Authorize a computed destination without disclosing generated or resolved paths."""
-    try:
-        scope.check_path(destination)
-        return validate_vault_path(str(destination), vault_path)
-    except (ProfileError, PathTraversalError, PathResolutionError):
-        raise ProfileError("Capture destination is not allowed by the active profile") from None
+def _require_settings(settings: Settings | None, vault_path: Path) -> Settings:
+    """Never infer capture/search configuration from a root or parser."""
+    from vaultmind.config import Settings
+
+    if not isinstance(settings, Settings):
+        raise ProfileError("Source operations require the selected Settings instance")
+    if settings.vault.path.resolve() != vault_path.resolve():
+        raise ProfileError("Source settings do not match the MCP vault root")
+    return settings
+
+
+def _capture_source(
+    name: str,
+    args: dict[str, Any],
+    vault_path: Path,
+    store: VaultStore,
+    parser: VaultParser,
+    scope: ProfileEnforcer,
+    settings: Settings | None,
+) -> dict[str, Any]:
+    """Preserve first, then independently receipt projection and index effects."""
+    import hashlib
+    import re
+
+    import yaml
+
+    from vaultmind.knowledge.intake import SourceIntake
+
+    scope.check_tool(name)
+    scope.check_write()
+    # Deny narrow profiles before inspecting a body or creating intake state.
+    for relative in ("_wiki", "_wiki/wiki.lock", "_wiki/sources"):
+        if not scope.allows_path(relative):
+            raise ProfileError("Capture preservation is outside the active profile scope")
+    selected = _require_settings(settings, vault_path)
+    if args.get("do_not_retain", False) is not False:
+        raise ProfileError("Capture requires explicit original retention")
+    raw = args.get("content")
+    if not isinstance(raw, str):
+        raise ProfileError("Capture content must be a string")
+    scope.check_size(raw)
+    title = args.get("title")
+    if title is None:
+        title = next(
+            (line.strip().lstrip("#").strip() for line in raw.splitlines() if line.strip()),
+            "Capture",
+        )[:50]
+    if not isinstance(title, str):
+        raise ProfileError("Capture title must be a string")
+    tags = args.get("tags", ["capture"] if name == "capture" else [])
+    if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+        raise ProfileError("Capture tags must be a string list")
+    note_type = args.get("note_type", "fleeting")
+    if note_type not in {"fleeting", "literature", "permanent", "project", "concept"}:
+        raise ProfileError("Unsupported capture note type")
+    folder = args.get("folder", "00-inbox") if name == "capture_note" else "00-inbox"
+    if not isinstance(folder, str) or not folder:
+        raise ProfileError("Capture folder must be a nonempty string")
+    token = args.get("idempotency_token")
+    if token is not None and (
+        not isinstance(token, str) or re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", token) is None
+    ):
+        raise ProfileError("Idempotency token must be 1-128 safe ASCII characters")
+    projection_path: Path | None = None
+    projection_text = ""
+    relative = ""
+
+    def preflight(source_id: str) -> None:
+        nonlocal projection_path, projection_text, relative
+        relative = (Path(folder) / f"{source_id}.md").as_posix()
+        if not scope.allows_path(relative):
+            raise ProfileError("Capture projection is outside the active profile scope")
+        try:
+            projection_path = validate_ordinary_write_path(relative, vault_path)
+        except (PathTraversalError, PathResolutionError):
+            raise ProfileError("Capture projection destination is not allowed") from None
+        metadata = dict(
+            title=title,
+            type=note_type,
+            tags=tags,
+            source="mcp",
+            status="active",
+            source_id=source_id,
+            source_path=f"_wiki/sources/{source_id}.md",
+            approved=False,
+        )
+        projection_text = "---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---\n\n" + raw
+        scope.check_size(projection_text)
+
+    with SourceIntake(selected, allows_path=scope.allows_path) as intake:
+        capture = intake.preserve_text(
+            raw,
+            original_name="capture.md",
+            origin="mcp",
+            adapter=f"mcp:{scope.policy.name}:{name}",
+            event_id=token,
+            revision=hashlib.sha256(
+                json.dumps(
+                    dict(title=title, tags=tags, note_type=note_type, folder=folder), sort_keys=True
+                ).encode("utf-8")
+            ).hexdigest(),
+            preflight=preflight,
+        )
+        assert projection_path is not None
+        index_path = projection_path
+
+        def project() -> str:
+            path = validate_ordinary_write_path(relative, vault_path)
+            if not scope.allows_path(relative):
+                raise ProfileError("Capture projection is outside the active profile scope")
+            if path.exists():
+                raise ProfileError("Capture projection already exists")
+            # Use the existing atomic writer; never introduce another source writer.
+            intake.workspace._atomic_bytes(path, projection_text.encode("utf-8"))
+            return relative
+
+        projection = capture.run_stage("projection", project)
+        index = None
+        if projection.status == "succeeded":
+            index = capture.run_stage(
+                "index", lambda: store.index_single_note(parser.parse_file(index_path), parser)
+            )
+        original = capture.as_dict()
+        return dict(
+            status="ok" if index is not None and index.status == "succeeded" else "partial",
+            source_id=capture.source_id,
+            path=relative,
+            title=title,
+            approved=False,
+            preserved=True,
+            original=original,
+            projection=projection.as_dict(),
+            index=index.as_dict() if index is not None else {"stage": "index", "status": "skipped"},
+        )
 
 
 def _scoped_markdown_files(
@@ -626,19 +815,29 @@ def _dispatch_tool(
     procedural_memory: object | None = None,
     evolution_detector: object | None = None,
     preference_store: object | None = None,
+    settings: Settings | None = None,
 ) -> dict[str, Any]:
     """Route tool calls to the appropriate handler."""
 
     if name == "vault_search":
         scope = _require_enforcer(name, enforcer)
-        where = {}
-        if args.get("note_type"):
-            where["note_type"] = args["note_type"]
-        results = scope.search(
-            store, args["query"], n_results=args.get("n_results", 5), where=where or None
-        )
-        return {"results": results, "count": len(results)}
+        from vaultmind.knowledge.sources import search_sources
 
+        selected = _require_settings(settings, vault_path)
+        results = search_sources(
+            selected,
+            args["query"],
+            store=store,
+            n_results=args.get("n_results", 5),
+            note_type=args.get("note_type"),
+            allows_path=scope.allows_path,
+        )
+        return {
+            "status": "source-only",
+            "approved": False,
+            "results": results,
+            "count": len(results),
+        }
     elif name == "vault_read":
         scope = _require_enforcer(name, enforcer)
         scope.check_path(Path(args["path"]))
@@ -657,9 +856,9 @@ def _dispatch_tool(
         scope.check_path(Path(args["path"]))
         scope.check_size(args["content"])
         try:
-            filepath = validate_vault_path(args["path"], vault_path)
-        except PathTraversalError as e:
-            return {"error": f"Path not allowed: {e.user_path}"}
+            filepath = validate_ordinary_write_path(args["path"], vault_path)
+        except (PathTraversalError, PathResolutionError):
+            raise ProfileError("Ordinary write destination is not allowed") from None
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(args["content"], encoding="utf-8")
         # Re-index the note
@@ -667,7 +866,7 @@ def _dispatch_tool(
             note = parser.parse_file(filepath)
             store.index_single_note(note, parser)
         except Exception as e:
-            logger.warning("Failed to re-index after write: %s", e)
+            logger.warning("Failed to re-index after write (%s)", type(e).__name__)
         return {"status": "ok", "path": args["path"]}
 
     elif name == "vault_list":
@@ -891,90 +1090,10 @@ def _dispatch_tool(
             "count": len(suggestions),
         }
 
-    elif name == "capture":
-        import re
-        from datetime import datetime
-
-        now = datetime.now()
-        title = args.get("title", now.strftime("Capture %Y%m%d-%H%M%S"))
-        tags = args.get("tags", ["capture"])
-        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
-        filename = f"{now.strftime('%Y%m%d-%H%M%S')}-{slug}.md"
-        content = (
-            f"---\ntype: fleeting\ntags: [{', '.join(tags)}]\n"
-            f"created: {now.strftime('%Y-%m-%d %H:%M')}\nsource: mcp\nstatus: active\n---\n\n"
-            f"# {title}\n\n{args['content']}\n"
+    elif name in {"capture", "capture_note"}:
+        return _capture_source(
+            name, args, vault_path, store, parser, _require_enforcer(name, enforcer), settings
         )
-        scope = _require_enforcer(name, enforcer)
-        scope.check_write()
-        destination = Path("00-inbox") / filename
-        scope.check_size(content)
-        filepath = _capture_destination(scope, destination, vault_path)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        filepath.write_text(content, encoding="utf-8")
-        return {"status": "ok", "path": str(filepath.relative_to(vault_path.resolve()))}
-
-    elif name == "capture_note":
-        import re
-        from datetime import datetime
-
-        now = datetime.now()
-        raw_content: str = args["content"]
-
-        # Auto-generate title from first non-empty line if not provided
-        if args.get("title"):
-            title = args["title"]
-        else:
-            first_line = next(
-                (
-                    line.strip().lstrip("#").strip()
-                    for line in raw_content.splitlines()
-                    if line.strip()
-                ),
-                now.strftime("Capture %Y%m%d-%H%M%S"),
-            )
-            title = first_line[:50]
-
-        note_type = args.get("note_type", "fleeting")
-        note_tags: list[str] = args.get("tags") or []
-        target_folder: str = args.get("folder") or "00-inbox"
-
-        # Build slug from title
-        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50]
-        timestamp = now.strftime("%Y%m%d-%H%M%S")
-        filename = f"{slug}-{timestamp}.md"
-
-        tags_yaml = "[" + ", ".join(note_tags) + "]" if note_tags else "[]"
-        file_content = (
-            f"---\n"
-            f"title: {title}\n"
-            f"type: {note_type}\n"
-            f"tags: {tags_yaml}\n"
-            f"created: {now.strftime('%Y-%m-%d %H:%M')}\n"
-            f"source: mcp\n"
-            f"status: active\n"
-            f"---\n\n"
-            f"# {title}\n\n"
-            f"{raw_content}\n"
-        )
-
-        scope = _require_enforcer(name, enforcer)
-        scope.check_write()
-        destination = Path(target_folder) / filename
-        scope.check_size(file_content)
-        filepath = _capture_destination(scope, destination, vault_path)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        filepath.write_text(file_content, encoding="utf-8")
-
-        # Parse and index the new note
-        try:
-            note = parser.parse_file(filepath)
-            store.index_single_note(note, parser)
-        except Exception as exc:
-            logger.warning("Failed to index capture_note after write: %s", exc)
-
-        rel_path = str(filepath.relative_to(vault_path.resolve()))
-        return {"status": "ok", "path": rel_path, "title": title}
 
     elif name == "vault_stats":
         _require_global_provenance(name, enforcer)
@@ -1130,19 +1249,8 @@ def _build_change_detail(
     name: str, args: dict[str, Any], result: dict[str, Any]
 ) -> dict[str, Any] | None:
     """Build tool-specific change detail for audit logging."""
-    if name == "vault_write":
-        return {
-            "type": "vault_write",
-            "note_path": args.get("path", ""),
-            "size_bytes": len(args.get("content", "").encode()),
-            "was_new": result.get("status") == "ok",
-        }
-    if name in ("capture", "capture_note"):
-        return {
-            "type": name,
-            "note_path": result.get("path", ""),
-            "title": result.get("title", ""),
-        }
+    if name in ("vault_write", "capture", "capture_note"):
+        return {"type": name, "status": result.get("status", "")}
     if name == "vault_search":
         return {
             "type": "vault_search",
@@ -1178,7 +1286,7 @@ def _build_output_summary(name: str, result: dict[str, Any]) -> dict[str, Any] |
     if name == "vault_search":
         return {"count": result.get("count", 0)}
     if name in ("vault_write", "capture", "capture_note"):
-        return {"status": result.get("status", ""), "path": result.get("path", "")}
+        return {"status": result.get("status", "")}
     if name == "vault_stats":
         return {"total_notes": result.get("total_notes", 0)}
     if name in ("find_duplicates", "suggest_links"):

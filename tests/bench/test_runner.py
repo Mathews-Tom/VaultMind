@@ -3,10 +3,12 @@ honest-decline scoring, with zero LLM calls and zero live embeddings."""
 
 from __future__ import annotations
 
-from typing import Any
+import hashlib
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from vaultmind.bench.fixture_store import FixtureStore
 from vaultmind.bench.golden import GoldenQuestion
 from vaultmind.bench.runner import (
     DEFAULT_SCORE_FLOOR,
@@ -17,30 +19,59 @@ from vaultmind.bench.runner import (
     run_query,
     score_question,
 )
-from vaultmind.config import RankingConfig
+from vaultmind.config import RankingConfig, Settings, VaultConfig
 from vaultmind.indexer.ranking import RetrievalConfidence, apply_authority
+from vaultmind.knowledge.intake import SourceIntake
+from vaultmind.vault.parser import VaultParser
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
-class FakeStore:
-    """Deterministic RetrievalStore double, mirroring the repo's `FakeStore`
-    test convention (see `tests/test_duplicate_detector.py`)."""
+class FakeStore(FixtureStore):
+    """A deterministic, scope-respecting backend recording requested candidates."""
 
     def __init__(self, results_by_query: dict[str, list[dict[str, Any]]]) -> None:
-        self._results = results_by_query
-        self.search_calls: list[tuple[str, int]] = []
-        self.hybrid_calls: list[tuple[str, int]] = []
+        super().__init__(results_by_query)
+        self.search_calls: list[tuple[str, dict[str, Any] | None]] = []
+        self.hybrid_calls: list[tuple[str, dict[str, Any] | None]] = []
 
     def search(
         self, query: str, n_results: int = 5, where: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
-        self.search_calls.append((query, n_results))
-        return self._results.get(query, [])[:n_results]
+        self.search_calls.append((query, where))
+        return super().search(query, n_results=n_results, where=where)
 
     def hybrid_search(
         self, query: str, n_results: int = 5, where: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
-        self.hybrid_calls.append((query, n_results))
-        return self._results.get(query, [])[:n_results]
+        self.hybrid_calls.append((query, where))
+        return super().search(query, n_results=n_results, where=where)
+
+
+def _settings(tmp_path: Path) -> Settings:
+    root = tmp_path / "vault"
+    root.mkdir()
+    return Settings.model_construct(vault=VaultConfig(path=root))
+
+
+def _note(settings: Settings, path: str, text: str) -> None:
+    destination = settings.vault.path / path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(text, encoding="utf-8")
+
+
+def _indexed(settings: Settings, path: str, distance: float | None = 0.1) -> dict[str, Any]:
+    parser = VaultParser(settings.vault)
+    note = parser.parse_file(settings.vault.path / path)
+    note.tags.sort()
+    chunk = parser.chunk_note(note)[0]
+    return {
+        "chunk_id": chunk.chunk_id,
+        "content": chunk.content,
+        "metadata": chunk.to_chroma_metadata(),
+        "distance": distance,
+    }
 
 
 def _hit(note_path: str, distance: float = 0.1, authority: int | None = None) -> dict[str, Any]:
@@ -67,34 +98,93 @@ def _q(
 
 
 class TestRunQuery:
-    def test_hybrid_enabled_calls_hybrid_search(self) -> None:
-        store = FakeStore({"q": [_hit("a.md")]})
-        run_query(store, "q", k=5, hybrid_enabled=True)
-        assert store.hybrid_calls == [("q", 5)]
-        assert store.search_calls == []
+    @pytest.mark.parametrize("hybrid", [True, False])
+    def test_uses_current_source_path_and_scoped_backend(
+        self, tmp_path: Path, hybrid: bool
+    ) -> None:
+        settings = _settings(tmp_path)
+        settings.search.hybrid_enabled = hybrid
+        _note(settings, "allowed/current.md", "Current evidence")
+        _note(settings, "denied/secret.md", "Current secret")
+        store = FakeStore(
+            {"q": [_hit("denied/secret.md"), _indexed(settings, "allowed/current.md")]}
+        )
+        hits = run_query(
+            settings,
+            "q",
+            k=1,
+            store=store,
+            allows_path=lambda path: path == "allowed" or path.startswith("allowed/"),
+        )
+        assert [hit["path"] for hit in hits] == ["allowed/current.md"]
+        assert hits[0]["content"] == "Current evidence"
+        assert hits[0]["status"] == "source-only" and hits[0]["approved"] is False
+        assert hits[0]["distance"] == 0.1
+        expected = [("q", {"note_path": {"$in": ["allowed/current.md"]}})]
+        assert (store.hybrid_calls if hybrid else store.search_calls) == expected
+        assert (store.search_calls if hybrid else store.hybrid_calls) == []
 
-    def test_hybrid_disabled_calls_plain_search(self) -> None:
-        store = FakeStore({"q": [_hit("a.md")]})
-        run_query(store, "q", k=5, hybrid_enabled=False)
-        assert store.search_calls == [("q", 5)]
-        assert store.hybrid_calls == []
+    def test_stale_index_excerpt_is_not_current_evidence(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        _note(settings, "a.md", "historical body")
+        store = FakeStore({"q": [_indexed(settings, "a.md")]})
+        current = "---\ntitle: Current\n---\nCurrent body\n"
+        _note(settings, "a.md", current)
+        hits = run_query(settings, "q", 5, store=store)
+        assert hits[0]["content"] == "Current body"
+        assert hits[0]["current_digest"] == hashlib.sha256(current.encode()).hexdigest()
+        assert hits[0]["distance"] is None
+        assert "historical" not in str(hits)
 
-    def test_authority_reranks_hits_when_ranking_config_given(self) -> None:
+    def test_missing_history_and_approved_pages_never_score_source_hits(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        _note(settings, "a.md", "Current")
+        _note(settings, "wiki/answer.md", "answer secret")
+        _note(settings, "_wiki/history/retired.md", "history secret")
         store = FakeStore(
             {
                 "q": [
-                    _hit("low.md", distance=0.20, authority=1),
-                    _hit("high.md", distance=0.30, authority=5),
+                    _hit("_wiki/history/retired.md"),
+                    _hit("wiki/answer.md"),
+                    _hit("gone.md"),
+                    _indexed(settings, "a.md"),
                 ]
             }
         )
-        hits = run_query(store, "q", k=5, hybrid_enabled=True, ranking_config=RankingConfig())
-        assert hits[0]["metadata"]["note_path"] == "high.md"
+        hits = run_query(settings, "q", 1, store=store)
+        assert [hit["path"] for hit in hits] == ["a.md"]
+        assert "secret" not in str(hits)
 
-    def test_no_ranking_config_still_authority_neutral_no_reorder(self) -> None:
-        store = FakeStore({"q": [_hit("a.md", distance=0.1), _hit("b.md", distance=0.2)]})
-        hits = run_query(store, "q", k=5, hybrid_enabled=True)
-        assert [h["metadata"]["note_path"] for h in hits] == ["a.md", "b.md"]
+    def test_preserved_sources_keep_provenance_without_query_side_effects(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with SourceIntake(settings) as intake:
+            capture = intake.preserve_text(
+                "Retained source evidence",
+                original_name="message.txt",
+                origin="telegram:actor:42",
+                adapter="telegram",
+                event_id="42:9",
+            )
+        before = {
+            path.relative_to(settings.vault.path).as_posix(): path.read_bytes()
+            for path in settings.vault.path.rglob("*")
+            if path.is_file()
+        }
+        hits = run_query(settings, "Retained", 5)
+        assert len(hits) == 1
+        assert hits[0]["source_id"] == capture.source_id
+        assert hits[0]["provenance"]["origin"] == "telegram:actor:42"
+        assert hits[0]["distance"] is None and hits[0]["approved"] is False
+        after = {
+            path.relative_to(settings.vault.path).as_posix(): path.read_bytes()
+            for path in settings.vault.path.rglob("*")
+            if path.is_file()
+        }
+        assert after == before
 
 
 class TestScoreQuestionAnswerable:
@@ -249,51 +339,85 @@ class TestAggregate:
 
 
 class TestRunBench:
-    def test_zero_llm_calls_by_default(self) -> None:
-        """No decline_scorer passed -> llm_cite_or_decline_accuracy stays None."""
+    def test_zero_llm_calls_by_default(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        _note(settings, "a.md", "Evidence")
         golden = [_q("q1", "q1", True, ("a.md",))]
-        store = FakeStore({"q1": [_hit("a.md")]})
-        report = run_bench(golden, store, k=5, hybrid_enabled=True)
+        store = FakeStore({"q1": [_indexed(settings, "a.md")]})
+        report = run_bench(golden, settings, k=5, store=store)
         assert report.llm_cite_or_decline_accuracy is None
-        assert isinstance(report, BenchReport)
+        assert report.recall_at_k == 1.0 and report.mrr == 1.0
 
-    def test_mirrors_recall_path_hybrid_branch(self) -> None:
+    def test_decline_scorer_receives_only_current_source_evidence(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        _note(settings, "a.md", "old evidence")
+        store = FakeStore({"q1": [_indexed(settings, "a.md")]})
+        _note(settings, "a.md", "current evidence")
         golden = [_q("q1", "q1", True, ("a.md",))]
-        store = FakeStore({"q1": [_hit("a.md")]})
-        run_bench(golden, store, k=5, hybrid_enabled=True)
-        assert store.hybrid_calls == [("q1", 5)]
-
-    def test_decline_scorer_is_invoked_and_recorded(self) -> None:
-        golden = [_q("q1", "q1", True, ("a.md",))]
-        store = FakeStore({"q1": [_hit("a.md")]})
-        calls: list[str] = []
+        seen: list[list[dict[str, Any]]] = []
 
         def scorer(question: GoldenQuestion, hits: list[dict[str, Any]]) -> bool:
-            calls.append(question.id)
+            assert question.id == "q1"
+            seen.append(hits)
             return True
 
-        report = run_bench(golden, store, k=5, hybrid_enabled=True, decline_scorer=scorer)
-        assert calls == ["q1"]
+        report = run_bench(golden, settings, k=5, store=store, decline_scorer=scorer)
+        assert seen[0][0]["content"] == "current evidence"
+        assert seen[0][0]["approved"] is False
+        assert seen[0][0]["distance"] is None
         assert report.llm_cite_or_decline_accuracy == pytest.approx(1.0)
 
-    def test_authority_moves_mrr_for_authority_differentiated_golden_case(self) -> None:
-        """The authority signal is observable through `run_bench`'s aggregate
-        MRR, not only through `run_query`'s raw hit order — this is the exact
-        acceptance the milestone names ("`vaultmind bench` run before/after
-        ... shows the authority signal moving ranked order")."""
-        golden = [_q("q1", "q1", True, ("authored.md",))]
-        hits = [
-            _hit("draft.md", distance=0.20, authority=1),
-            _hit("authored.md", distance=0.30, authority=5),
+    def test_settings_scope_and_weak_unknown_declines_reach_report(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        settings.bench.score_floor = 0.8
+        _note(settings, "allowed/a.md", "evidence")
+        _note(settings, "denied/secret.md", "secret")
+        golden = [
+            _q("weak", "weak", False),
+            _q("unknown", "unknown", False),
+            _q("hit", "hit", True, ("allowed/a.md",)),
         ]
-        store = FakeStore({"q1": hits})
+        store = FakeStore(
+            {
+                "weak": [_indexed(settings, "allowed/a.md", 0.9)],
+                "unknown": [_indexed(settings, "allowed/a.md", None)],
+                "hit": [_hit("denied/secret.md"), _indexed(settings, "allowed/a.md")],
+            }
+        )
+        report = run_bench(
+            golden,
+            settings,
+            1,
+            store=store,
+            allows_path=lambda path: path == "allowed" or path.startswith("allowed/"),
+        )
+        assert report.recall_at_k == 1.0
+        assert report.results[0].confidence is RetrievalConfidence.WEAK
+        assert report.results[1].confidence is RetrievalConfidence.UNKNOWN
+        assert report.retrieval_decline_accuracy == 0.5
+        assert all("denied/secret.md" not in result.retrieved_paths for result in report.results)
 
-        no_op_config = RankingConfig(authority_weight={1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0})
-        before = run_bench(golden, store, k=5, hybrid_enabled=True, ranking_config=no_op_config)
-        assert before.mrr == pytest.approx(0.5)  # authored.md sits at rank 2
-
-        after = run_bench(golden, store, k=5, hybrid_enabled=True, ranking_config=RankingConfig())
-        assert after.mrr == pytest.approx(1.0)  # authority promotes it to rank 1
+    def test_current_file_authority_changes_source_retrieval_mrr(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        _note(settings, "draft.md", "---\nauthority: 1\n---\nEvidence")
+        _note(settings, "authored.md", "---\nauthority: 5\n---\nEvidence")
+        golden = [_q("q1", "q1", True, ("authored.md",))]
+        store = FakeStore(
+            {
+                "q1": [
+                    _indexed(settings, "draft.md", 0.2),
+                    _indexed(settings, "authored.md", 0.3),
+                ]
+            }
+        )
+        settings.ranking.enabled = False
+        before = run_bench(golden, settings, 5, store=store)
+        settings.ranking.enabled = True
+        after = run_bench(golden, settings, 5, store=store)
+        assert before.mrr == 0.5 and after.mrr == 1.0
+        hits = run_query(settings, "q1", 5, store=store)
+        assert [hit["distance"] for hit in hits] == [0.3, 0.2]
+        assert all(hit["approved"] is False for hit in hits)
 
 
 class TestPassesThresholds:

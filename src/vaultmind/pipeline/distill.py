@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import frontmatter
 
 from vaultmind.llm.client import Message
+from vaultmind.vault.security import validate_ordinary_write_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -123,6 +124,8 @@ def distill_conversation(
 
     Returns a `DistillResult`; `success=False` means no file was written.
     """
+    vault_root = vault_root.resolve()
+    output_dir = validate_ordinary_write_path(output_folder, vault_root)
     if not turns:
         return DistillResult(success=False, error="No conversation turns to distill")
 
@@ -189,17 +192,17 @@ def distill_conversation(
         "created": occurred,
     }
 
-    output_dir = vault_root / output_folder
+    output_dir = validate_ordinary_write_path(str(output_dir), vault_root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     date_str = occurred[:10]
     slug = _slugify(question)
     filename = f"{date_str}-{slug}.md"
-    output_path = output_dir / filename
+    output_path = validate_ordinary_write_path(str(output_dir / filename), vault_root)
     counter = 1
     while output_path.exists():
         filename = f"{date_str}-{slug}-{counter}.md"
-        output_path = output_dir / filename
+        output_path = validate_ordinary_write_path(str(output_dir / filename), vault_root)
         counter += 1
 
     content = _render_note(fm, question, summary, resolution, systems, participants)

@@ -38,6 +38,12 @@ CREATE TEMP TABLE IF NOT EXISTS bm25_replacement_ids (
 ) WITHOUT ROWID;
 """
 
+_CREATE_PERMITTED_PATHS = """
+CREATE TEMP TABLE IF NOT EXISTS bm25_permitted_paths (
+    note_path TEXT PRIMARY KEY
+) WITHOUT ROWID;
+"""
+
 
 class BM25Index:
     """FTS5-backed keyword index.
@@ -60,7 +66,9 @@ class BM25Index:
 
     def _init_schema(self) -> None:
         with self._con:
-            self._con.executescript(_CREATE_FTS + _CREATE_META + _CREATE_REPLACEMENT_IDS)
+            self._con.executescript(
+                _CREATE_FTS + _CREATE_META + _CREATE_REPLACEMENT_IDS + _CREATE_PERMITTED_PATHS
+            )
 
     # ------------------------------------------------------------------
     # Write
@@ -106,7 +114,9 @@ class BM25Index:
     # Read
     # ------------------------------------------------------------------
 
-    def search(self, query: str, n_results: int = 20) -> list[dict[str, float | str]]:
+    def search(
+        self, query: str, n_results: int = 20, *, note_paths: list[str] | None = None
+    ) -> list[dict[str, float | str]]:
         """Full-text search using FTS5 BM25 ranking.
 
         Returns list of dicts with keys: chunk_id, note_path, note_title, bm25_score.
@@ -120,19 +130,35 @@ class BM25Index:
         # Escape FTS5 special characters to avoid syntax errors on bare queries
         safe_query = _fts5_escape(query)
 
-        try:
-            rows = self._con.execute(
-                "SELECT chunk_id, note_path, note_title, -rank AS bm25_score"
-                " FROM fts_chunks"
-                " WHERE fts_chunks MATCH ?"
-                " ORDER BY rank"  # rank is negative; ORDER BY rank = best first
-                " LIMIT ?",
-                (safe_query, n_results),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            # If the query is malformed after escaping, return empty rather than crash
-            logger.warning("BM25 search failed for query %r", query)
-            return []
+        # Serialize the temporary permitted relation with writes and other scoped
+        # reads. executemany uses one host parameter regardless of vault size.
+        # Finish the temporary writes and read snapshot before releasing the lock.
+        with self._write_lock, self._con:
+            if note_paths is not None:
+                self._con.execute("DELETE FROM bm25_permitted_paths")
+                self._con.executemany(
+                    "INSERT OR IGNORE INTO bm25_permitted_paths(note_path) VALUES (?)",
+                    ((path,) for path in note_paths),
+                )
+            scope = (
+                " AND note_path IN (SELECT note_path FROM bm25_permitted_paths)"
+                if note_paths is not None
+                else ""
+            )
+            try:
+                rows = self._con.execute(
+                    "SELECT chunk_id, note_path, note_title, -rank AS bm25_score"
+                    " FROM fts_chunks WHERE fts_chunks MATCH ?"
+                    + scope
+                    + " ORDER BY rank, note_path, chunk_id LIMIT ?",
+                    (safe_query, n_results),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                logger.warning("BM25 search failed")
+                return []
+            finally:
+                if note_paths is not None:
+                    self._con.execute("DELETE FROM bm25_permitted_paths")
 
         return [
             {

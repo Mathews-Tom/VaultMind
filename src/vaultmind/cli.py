@@ -25,6 +25,10 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 from vaultmind import __version__
+from vaultmind.vault.security import (
+    validate_ordinary_output_path,
+    validate_ordinary_write_path,
+)
 from vaultmind.wiki.cli import wiki_group
 
 if TYPE_CHECKING:
@@ -76,7 +80,10 @@ def _create_bm25_index(settings: object) -> BM25Index | None:
     if not settings.search.hybrid_enabled:
         return None
 
-    bm25_path = Path(settings.search.bm25_db_path or str(VAULTMIND_HOME / "data" / "bm25.db"))
+    bm25_path = validate_ordinary_output_path(
+        Path(settings.search.bm25_db_path or str(VAULTMIND_HOME / "data" / "bm25.db")),
+        settings.vault.path,
+    )
     return BM25Index(bm25_path)
 
 
@@ -89,7 +96,9 @@ def _create_embedding_cache(settings: object) -> EmbeddingCache | None:
     if not settings.embedding.cache_enabled:
         return None
 
-    cache_path = VAULTMIND_HOME / "data" / "embedding_cache.db"
+    cache_path = validate_ordinary_output_path(
+        VAULTMIND_HOME / "data" / "embedding_cache.db", settings.vault.path
+    )
     return EmbeddingCache(cache_path)
 
 
@@ -150,7 +159,7 @@ def _build_review_queue(
     operations = tag_appliers(settings.vault.path, VAULTMIND_HOME / "data" / "tag_vocabulary.json")
     operations.update(appliers or {})
     return ReviewQueue(
-        queue_db,
+        validate_ordinary_output_path(queue_db, settings.vault.path),
         AutonomyThresholds(
             block_below=settings.autonomy.block_below,
             skim_below=settings.autonomy.skim_below,
@@ -264,7 +273,8 @@ def ask(ctx: click.Context, question: str, evidence_only: bool) -> None:
         settings = load_settings(ctx.obj.get("config_path"))
     except Exception as exc:
         raise click.ClickException(
-            f"Knowledge configuration failed ({type(exc).__name__})."
+            f"Knowledge configuration failed ({type(exc).__name__}). "
+            "Check selected values and include both wiki and _wiki in vault.excluded_folders."
         ) from None
     try:
         result = _query_approved_knowledge(settings, question, evidence_only=evidence_only)
@@ -275,6 +285,39 @@ def ask(ctx: click.Context, question: str, evidence_only: bool) -> None:
             f"Knowledge operation failed ({type(exc).__name__}); no automatic retry was attempted."
         ) from None
     click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+@cli.command("search-sources")
+@click.argument("query")
+@click.option("--limit", default=5, type=click.IntRange(1, 100), show_default=True)
+@click.pass_context
+def search_sources(ctx: click.Context, query: str, limit: int) -> None:
+    """Find unapproved current source material without generating an answer."""
+    import json
+
+    from vaultmind.config import load_settings
+    from vaultmind.knowledge.sources import SourceSearchError
+    from vaultmind.knowledge.sources import search_sources as discover_sources
+    from vaultmind.wiki.workspace import WikiError
+
+    try:
+        settings = load_settings(ctx.obj.get("config_path"))
+    except Exception as exc:
+        raise click.ClickException(
+            f"Source configuration failed ({type(exc).__name__}). "
+            "Check selected values and include both wiki and _wiki in vault.excluded_folders."
+        ) from None
+    try:
+        hits = discover_sources(settings, query, n_results=limit)
+    except (SourceSearchError, WikiError) as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(
+        json.dumps(
+            {"status": "source-only", "approved": False, "results": hits},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 @cli.command()
@@ -305,16 +348,21 @@ def init(ctx: click.Context) -> None:
         "_meta/indexes",
     ]
 
-    for folder in vault_folders:
-        (vault / folder).mkdir(parents=True, exist_ok=True)
+    destinations = [validate_ordinary_write_path(folder, vault) for folder in vault_folders]
+    for destination in destinations:
+        destination.mkdir(parents=True, exist_ok=True)
 
     console.print(f"[green]✓[/green] VaultMind initialized at {VAULTMIND_HOME}")
     console.print(f"  vault:  {vault} ({len(vault_folders)} folders)")
     console.print(f"  data:   {data_dir}")
 
     # Create ChromaDB and graph parent dirs
-    settings.chroma.persist_dir.mkdir(parents=True, exist_ok=True)
-    settings.graph.persist_path.parent.mkdir(parents=True, exist_ok=True)
+    validate_ordinary_output_path(settings.chroma.persist_dir, vault).mkdir(
+        parents=True, exist_ok=True
+    )
+    validate_ordinary_output_path(settings.graph.persist_path, vault).parent.mkdir(
+        parents=True, exist_ok=True
+    )
 
 
 @cli.command("suggest-links")
@@ -444,7 +492,10 @@ def digest(ctx: click.Context, days: int | None, save: bool | None) -> None:
             if settings.gaps.db_path
             else VAULTMIND_HOME / "data" / "gaps.db"
         )
-        gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
+        gap_store = GapStore(
+            validate_ordinary_output_path(gap_db, settings.vault.path),
+            stale_after_days=settings.gaps.stale_after_days,
+        )
 
     review_queue = _build_review_queue(settings) if settings.autonomy.enabled else None
 
@@ -673,7 +724,9 @@ def bot(ctx: click.Context) -> None:
     from vaultmind.config import VAULTMIND_HOME
 
     llm_client = _create_llm_client(settings)
-    session_store = SessionStore(VAULTMIND_HOME / "data" / "sessions.db")
+    session_store = SessionStore(
+        validate_ordinary_output_path(VAULTMIND_HOME / "data" / "sessions.db", settings.vault.path)
+    )
 
     # Knowledge gap ledger (constructed early — wired into both ThinkingPartner and CommandHandlers)
     from vaultmind.memory.gaps import GapStore
@@ -685,7 +738,10 @@ def bot(ctx: click.Context) -> None:
             if settings.gaps.db_path
             else VAULTMIND_HOME / "data" / "gaps.db"
         )
-        gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
+        gap_store = GapStore(
+            validate_ordinary_output_path(gap_db, settings.vault.path),
+            stale_after_days=settings.gaps.stale_after_days,
+        )
 
     # Graph context builder for thinking partner
     from vaultmind.graph.context import GraphContextBuilder
@@ -748,6 +804,10 @@ def bot(ctx: click.Context) -> None:
             confidence_drift_threshold=settings.evolution.confidence_drift_threshold,
             stale_days=settings.evolution.stale_days,
             min_confidence_for_stale=settings.evolution.min_confidence_for_stale,
+            store_path=validate_ordinary_output_path(
+                Path.home() / ".vaultmind" / "data" / "evolution_dismissed.json",
+                settings.vault.path,
+            ),
         )
 
     # Maturation pipeline
@@ -781,7 +841,7 @@ def bot(ctx: click.Context) -> None:
             if settings.episodic.db_path
             else VAULTMIND_HOME / "data" / "episodes.db"
         )
-        episode_store = EpisodeStore(episode_db)
+        episode_store = EpisodeStore(validate_ordinary_output_path(episode_db, settings.vault.path))
 
     # Procedural memory
     from vaultmind.memory.procedural import ProceduralMemory
@@ -793,7 +853,9 @@ def bot(ctx: click.Context) -> None:
             if settings.procedural.db_path
             else VAULTMIND_HOME / "data" / "procedural.db"
         )
-        procedural_memory = ProceduralMemory(procedural_db)
+        procedural_memory = ProceduralMemory(
+            validate_ordinary_output_path(procedural_db, settings.vault.path)
+        )
         console.print("[green]✓[/green] Procedural memory enabled")
 
     # Preference store (for insight loop + bot handlers)
@@ -805,7 +867,9 @@ def bot(ctx: click.Context) -> None:
         else VAULTMIND_HOME / "data" / "preferences.db"
     )
     preference_store: PreferenceStore | None = (
-        PreferenceStore(pref_db) if settings.tracking.enabled else None
+        PreferenceStore(validate_ordinary_output_path(pref_db, settings.vault.path))
+        if settings.tracking.enabled
+        else None
     )
 
     from vaultmind.graph.evolution import LineageStore
@@ -816,7 +880,9 @@ def bot(ctx: click.Context) -> None:
     # Note-level supersede lineage (M9) — always on, decoupled from
     # [evolution].enabled: recording that a bot-initiated delete/edit
     # happened is a safety/audit invariant, not an optional feature.
-    lineage_store = LineageStore(VAULTMIND_HOME / "data" / "lineage.json")
+    lineage_store = LineageStore(
+        validate_ordinary_output_path(VAULTMIND_HOME / "data" / "lineage.json", settings.vault.path)
+    )
 
     handlers = CommandHandlers(
         settings=settings,
@@ -930,6 +996,7 @@ def bot(ctx: click.Context) -> None:
         if settings.scheduler.state_path
         else Path.home() / ".vaultmind" / "data" / "scheduler_state.json"
     )
+    sched_state = validate_ordinary_output_path(sched_state, settings.vault.path)
     jobs: list[ScheduledJob] = []
 
     if maturation_pipeline is not None:
@@ -1029,7 +1096,7 @@ def bot(ctx: click.Context) -> None:
             if settings.sources.config_path
             else Path("config/sources.toml")
         )
-        source_store = SourceStore(sources_db)
+        source_store = SourceStore(validate_ordinary_output_path(sources_db, settings.vault.path))
         distill_model = settings.distill.model or settings.llm.thinking_model
         review_queue.register_applier(
             ProposalKind.SOURCE_INGESTION,
@@ -1266,9 +1333,11 @@ def auto_tag(
 
     model = settings.auto_tag.tagging_model or settings.llm.fast_model
     llm_client = _create_llm_client(settings)
-    tagger = AutoTagger(settings.auto_tag, llm_client, model)
+    tagger = AutoTagger(settings.auto_tag, llm_client, model, vault_root=settings.vault.path)
 
-    vocab_path = VAULTMIND_HOME / "data" / "tag_vocabulary.json"
+    vocab_path = validate_ordinary_output_path(
+        VAULTMIND_HOME / "data" / "tag_vocabulary.json", settings.vault.path
+    )
 
     queue = _build_review_queue(settings)
 
@@ -1347,13 +1416,19 @@ def auto_tag(
     proposals: dict[str, ReviewProposal] = {}
     # Keep the first snapshot: later duplicates increment occurrence_count.
     for s in suggestions:
+        note_path = (
+            validate_ordinary_write_path(s.note_path, settings.vault.path)
+            .relative_to(settings.vault.path)
+            .as_posix()
+        )
+        vocab_path = validate_ordinary_output_path(vocab_path, settings.vault.path)
         if s.suggested_tags:
             proposal = queue.propose(
                 ProposalKind.TAG_APPLICATION,
                 confidence=1.0,
                 impact=Impact.LOW,
                 summary=f"Apply {len(s.suggested_tags)} known tag(s) to '{s.note_title}'",
-                payload={"note_path": s.note_path, "tags": s.suggested_tags},
+                payload={"note_path": note_path, "tags": s.suggested_tags},
             )
             proposals.setdefault(proposal.proposal_id, proposal)
         for tag in s.new_tags:
@@ -1551,7 +1626,9 @@ def graph_report(ctx: click.Context) -> None:
     graph = KnowledgeGraph(settings.graph)
 
     report = graph.to_markdown_summary()
-    report_path = settings.vault.path / settings.vault.meta_folder / "graph-report.md"
+    report_path = validate_ordinary_write_path(
+        f"{settings.vault.meta_folder}/graph-report.md", settings.vault.path
+    )
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report, encoding="utf-8")
 
@@ -1606,7 +1683,10 @@ def research(ctx: click.Context, query: str, max_results: int | None) -> None:
             if settings.gaps.db_path
             else VAULTMIND_HOME / "data" / "gaps.db"
         )
-        gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
+        gap_store = GapStore(
+            validate_ordinary_output_path(gap_db, settings.vault.path),
+            stale_after_days=settings.gaps.stale_after_days,
+        )
 
     async def _run() -> None:
         with console.status(f"Researching: {query}..."):
@@ -1672,14 +1752,16 @@ def learn(ctx: click.Context, days: int, save_report: bool) -> None:
         return
 
     review_queue = _build_review_queue(settings) if settings.autonomy.enabled else None
-    store = PreferenceStore(db_path)
+    store = PreferenceStore(validate_ordinary_output_path(db_path, settings.vault.path))
     insights = analyze_preferences(store, days=days, review_queue=review_queue)
     report = generate_preference_report(insights)
 
     console.print(report)
 
     if save_report:
-        report_path = settings.vault.path / settings.vault.meta_folder / "usage-insights.md"
+        report_path = validate_ordinary_write_path(
+            f"{settings.vault.meta_folder}/usage-insights.md", settings.vault.path
+        )
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(report, encoding="utf-8")
         console.print(f"\n[green]✓[/green] Report saved to {report_path}")
@@ -1738,8 +1820,8 @@ def synthesize_workflows(ctx: click.Context, min_episodes: int) -> None:
 
     synthesis_model = settings.procedural.synthesis_model or settings.llm.fast_model
     llm_client = _create_llm_client(settings)
-    episode_store = EpisodeStore(episode_db)
-    procedural = ProceduralMemory(procedural_db)
+    episode_store = EpisodeStore(validate_ordinary_output_path(episode_db, settings.vault.path))
+    procedural = ProceduralMemory(validate_ordinary_output_path(procedural_db, settings.vault.path))
 
     resolved_count = len(episode_store.query_resolved())
     console.print(f"  Resolved episodes available: {resolved_count}")
@@ -1841,7 +1923,11 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
             handler.addFilter(scope_index_warning)
             ctx.call_on_close(partial(handler.removeFilter, scope_index_warning))
     enforcer = ProfileEnforcer(policy, settings.vault.path)
-    audit_log = AuditLogger(VAULTMIND_HOME / "data" / "mcp_audit.jsonl")
+    audit_log = AuditLogger(
+        validate_ordinary_output_path(
+            VAULTMIND_HOME / "data" / "mcp_audit.jsonl", settings.vault.path
+        )
+    )
 
     diagnostics = Console(stderr=True)
     diagnostics.print(f"  Profile: {profile_name} ({policy.description})")
@@ -1879,7 +1965,9 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
                 if settings.episodic.db_path
                 else VAULTMIND_HOME / "data" / "episodes.db"
             )
-            episode_store = EpisodeStore(episode_db)
+            episode_store = EpisodeStore(
+                validate_ordinary_output_path(episode_db, settings.vault.path)
+            )
             resources.callback(episode_store.close)
 
         procedural_memory = None
@@ -1891,7 +1979,9 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
                 if settings.procedural.db_path
                 else VAULTMIND_HOME / "data" / "procedural.db"
             )
-            procedural_memory = ProceduralMemory(procedural_db)
+            procedural_memory = ProceduralMemory(
+                validate_ordinary_output_path(procedural_db, settings.vault.path)
+            )
             resources.callback(procedural_memory.close)
 
         evolution_detector = None
@@ -1903,6 +1993,10 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
                 confidence_drift_threshold=settings.evolution.confidence_drift_threshold,
                 stale_days=settings.evolution.stale_days,
                 min_confidence_for_stale=settings.evolution.min_confidence_for_stale,
+                store_path=validate_ordinary_output_path(
+                    Path.home() / ".vaultmind" / "data" / "evolution_dismissed.json",
+                    settings.vault.path,
+                ),
             )
 
         preference_store = None
@@ -1914,7 +2008,9 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
                 if settings.tracking.db_path
                 else VAULTMIND_HOME / "data" / "preferences.db"
             )
-            preference_store = PreferenceStore(preference_db)
+            preference_store = PreferenceStore(
+                validate_ordinary_output_path(preference_db, settings.vault.path)
+            )
             resources.callback(preference_store.close)
 
         server = create_mcp_server(
@@ -1922,6 +2018,7 @@ def mcp_serve(ctx: click.Context, profile: str | None) -> None:
             store,
             graph,
             parser,
+            settings=settings,
             duplicate_detector=detector,
             note_suggester=suggester,
             enforcer=enforcer,
@@ -2071,7 +2168,9 @@ def export_okf(ctx: click.Context, output_path: Path, okf_version: str) -> None:
     with console.status("Parsing vault..."):
         notes = parser.iter_notes()
 
-    result = export_okf_bundle(notes, output_path, okf_version=okf_version)
+    result = export_okf_bundle(
+        notes, output_path, vault_root=settings.vault.path, okf_version=okf_version
+    )
 
     if result.concept_count == 0:
         console.print(
@@ -2146,7 +2245,12 @@ def bench(
 
     settings = load_settings(ctx.obj.get("config_path"))
     bench_cfg = settings.bench
-    hybrid_enabled = settings.search.hybrid_enabled
+    trend_path = (
+        Path(trend_path_override)
+        if trend_path_override
+        else (Path(bench_cfg.trend_path) if bench_cfg.trend_path else default_trend_path())
+    )
+    trend_path = validate_ordinary_output_path(trend_path, settings.vault.path)
 
     llm_model = ""
     decline_scorer = None
@@ -2168,6 +2272,11 @@ def bench(
                 console.print(f"[red]\u2717[/red] {exc}")
                 sys.exit(1)
             store = loaded_bundle.store
+            settings = settings.model_copy(
+                update={
+                    "vault": settings.vault.model_copy(update={"path": loaded_bundle.vault_path})
+                }
+            )
             golden_file = Path(golden_path) if golden_path else loaded_bundle.golden_path
         else:
             from vaultmind.indexer import Embedder, VaultStore
@@ -2197,12 +2306,11 @@ def bench(
         with console.status("Running bench..."):
             report = run_bench(
                 golden,
-                store,
+                settings,
                 k=k,
-                hybrid_enabled=hybrid_enabled,
+                store=store,
                 score_floor=bench_cfg.score_floor,
                 decline_scorer=decline_scorer,
-                ranking_config=settings.ranking,
             )
 
         passed = passes_thresholds(
@@ -2233,11 +2341,6 @@ def bench(
                 f"  LLM cite-or-decline accuracy: {report.llm_cite_or_decline_accuracy:.2f}"
             )
 
-        trend_path = (
-            Path(trend_path_override)
-            if trend_path_override
-            else (Path(bench_cfg.trend_path) if bench_cfg.trend_path else default_trend_path())
-        )
         append_trend_record(build_trend_record(report, passed), trend_path)
 
         if not passed:
@@ -2330,11 +2433,12 @@ def _sources_db_path(settings: object) -> Path:
     from vaultmind.config import VAULTMIND_HOME, Settings
 
     assert isinstance(settings, Settings)
-    return (
+    path = (
         Path(settings.sources.db_path)
         if settings.sources.db_path
         else VAULTMIND_HOME / "data" / "sources.db"
     )
+    return validate_ordinary_output_path(path, settings.vault.path)
 
 
 @source_group.command("list")
@@ -2469,7 +2573,10 @@ def source_run(ctx: click.Context, name: str) -> None:
             if settings.gaps.db_path
             else VAULTMIND_HOME / "data" / "gaps.db"
         )
-        gap_store = GapStore(gap_db, stale_after_days=settings.gaps.stale_after_days)
+        gap_store = GapStore(
+            validate_ordinary_output_path(gap_db, settings.vault.path),
+            stale_after_days=settings.gaps.stale_after_days,
+        )
 
     review_queue.register_applier(
         ProposalKind.SOURCE_INGESTION,

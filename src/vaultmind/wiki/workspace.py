@@ -19,7 +19,6 @@ import stat
 import tempfile
 import unicodedata
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
@@ -39,7 +38,7 @@ from vaultmind.services.review_queue import (
 from vaultmind.vault.security import validate_vault_path
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from vaultmind.config import Settings
     from vaultmind.llm.client import LLMClient
@@ -198,16 +197,25 @@ class WikiWorkspace:
     lazily, under the wiki lock, only when a command needs them.
     """
 
-    def __init__(self, settings: Settings, *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        read_only: bool = False,
+        allows_path: Callable[[str], bool] | None = None,
+    ) -> None:
         self.settings = settings
         self.root = settings.vault.path
-        if "_wiki" not in settings.vault.excluded_folders:
-            raise WikiError("Add _wiki to vault.excluded_folders before using wiki commands")
+        if not {"wiki", "_wiki"}.issubset(settings.vault.excluded_folders):
+            raise WikiError(
+                "Add wiki and _wiki to vault.excluded_folders before using wiki commands"
+            )
         _no_symlinks(self.root)
         self._queue: ReviewQueue | None = None
         self._active_id: str | None = None
         self._read_only = read_only
         self._closed = False
+        self._source_allows_path = allows_path
 
     def __enter__(self) -> WikiWorkspace:
         return self
@@ -427,42 +435,17 @@ class WikiWorkspace:
         source_id: str,
         uri: str | None = None,
     ) -> dict[str, str]:
+        from vaultmind.knowledge.intake import SourceIntake
+
         self._source_id(source_id)
         content = self._input(source_file, "Source")
-        original_name = _scalar(source_file.name, "source filename", 255)
-        origin = _scalar(str(source_file.absolute()), "source origin")
-        if uri is not None:
-            _scalar(uri, "source URI")
-        with self._locked():
-            source = self._path(f"_wiki/sources/{source_id}.md")
-            metadata_path = self._path(f"_wiki/sources/{source_id}.json")
-            digest = _sha(content)
-            if source.exists() or metadata_path.exists():
-                existing, _ = self._source(source_id)
-                if existing["sha256"] != digest:
-                    raise WikiError("Source ID already contains different bytes; choose a new ID")
-                return {
-                    "id": source_id,
-                    "path": f"_wiki/sources/{source_id}.md",
-                    "sha256": digest,
-                    "status": "unchanged",
-                }
-            metadata = {
-                "id": source_id,
-                "original_name": original_name,
-                "origin": origin,
-                "uri": uri,
-                "captured_at": datetime.now(UTC).isoformat(),
-                "sha256": digest,
-            }
-            self._atomic_bytes(source, content)
-            self._json(metadata_path, metadata)
-            return {
-                "id": source_id,
-                "path": f"_wiki/sources/{source_id}.md",
-                "sha256": digest,
-                "status": "added",
-            }
+        return SourceIntake.from_workspace(self).add_local(
+            content,
+            source_id=source_id,
+            original_name=source_file.name,
+            origin=str(source_file.absolute()),
+            uri=uri,
+        )
 
     @staticmethod
     def _source_id(source_id: str) -> None:
@@ -472,27 +455,14 @@ class WikiWorkspace:
             )
 
     def _source(self, source_id: str) -> tuple[dict[str, Any], str]:
-        self._source_id(source_id)
-        content = self._read(self._path(f"_wiki/sources/{source_id}.md"), "Preserved source")
-        _metadata(content.decode("utf-8"))
-        meta, raw_meta = self._load_json(
-            self._path(f"_wiki/sources/{source_id}.json"),
-            "Source metadata",
+        from vaultmind.knowledge.intake import SourceIntake
+
+        source = SourceIntake.from_workspace(self, allows_path=self._source_allows_path).read(
+            source_id
         )
-        if set(meta) != {"id", "original_name", "origin", "uri", "captured_at", "sha256"}:
-            raise WikiError("Source metadata identity is invalid")
-        if meta["id"] != source_id or meta["sha256"] != _sha(content):
-            raise WikiError("Source bytes or metadata hash changed")
-        for key in ("original_name", "origin", "captured_at", "sha256"):
-            _scalar(meta[key], "source metadata")
-        if meta["uri"] is not None:
-            _scalar(meta["uri"], "source URI")
-        return {
-            "id": source_id,
-            "sha256": _sha(content),
-            "metadata_sha256": _sha(raw_meta),
-            "metadata": meta,
-        }, content.decode("utf-8")
+        if source.text is None:
+            raise WikiError("Binary attachments require a retained text derivative for curation")
+        return source.snapshot, source.text
 
     def _page_path(self, page: str) -> Path:
         if not isinstance(page, str) or not _PAGE.fullmatch(page):

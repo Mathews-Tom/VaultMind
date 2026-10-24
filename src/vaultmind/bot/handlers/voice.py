@@ -1,15 +1,15 @@
-"""Voice handler — transcribe voice messages and route to capture or question."""
+"""Bounded, memory-only voice transcription and explicit transcript capture."""
 
 from __future__ import annotations
 
 import asyncio
-import logging
-import os
-import tempfile
-from pathlib import Path
+import hashlib
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
+from vaultmind.bot.handlers.capture import BoundedDownload, telegram_identity
 from vaultmind.bot.handlers.utils import _is_authorized
+from vaultmind.knowledge.intake import SourceIntake
 
 if TYPE_CHECKING:
     from aiogram.types import Message
@@ -17,7 +17,22 @@ if TYPE_CHECKING:
     from vaultmind.bot.handlers.context import HandlerContext
     from vaultmind.bot.transcribe import Transcriber
 
-logger = logging.getLogger(__name__)
+# Transient transport deduplication, not a durable question/source journal.
+_voice_events: OrderedDict[tuple[str, str, str, str], None] = OrderedDict()
+_MAX_VOICE_BYTES = 20 * 1024 * 1024
+
+
+def _captured_transcript(
+    ctx: HandlerContext, event: str, adapter: str, revision: str
+) -> str | None:
+    with SourceIntake(ctx.settings) as intake:
+        record = intake.find_event(
+            event_id=event,
+            adapter=adapter,
+            role="voice-transcript",
+            revision=revision,
+        )
+        return record.text if record is not None else None
 
 
 async def handle_voice(
@@ -25,64 +40,68 @@ async def handle_voice(
     message: Message,
     transcriber: Transcriber | None = None,
 ) -> None:
-    """Handle voice messages — transcribe and route to capture or question flow."""
     if not _is_authorized(ctx, message):
         return
-
     if transcriber is None:
         await message.answer(
-            "Voice transcription is not configured.\nSet VAULTMIND_OPENAI_API_KEY to enable.",
+            "Voice transcription is not configured.\nSet VAULTMIND_OPENAI_API_KEY to enable."
         )
         return
-
-    if not message.voice:
+    if not message.voice or message.bot is None:
         return
-
-    bot = message.bot
-    if bot is None:
+    if message.voice.file_size is not None and message.voice.file_size > _MAX_VOICE_BYTES:
+        await message.answer("Voice file exceeds its byte limit; nothing captured.")
         return
-
-    await message.answer("Transcribing voice message...")
-
-    # Download the voice file from Telegram
+    identity = telegram_identity(message)
+    adapter = f"transcriber:openai:{ctx.settings.voice.whisper_model}"
+    event = identity["event_id"]
     try:
-        file = await bot.get_file(message.voice.file_id)
+        file = await message.bot.get_file(message.voice.file_id)
         if not file.file_path:
-            await message.answer("Failed to retrieve voice file.")
-            return
-
-        fd, tmp_name = tempfile.mkstemp(suffix=".ogg")
-        os.close(fd)
-        tmp_path = Path(tmp_name)
-        await bot.download_file(file.file_path, destination=str(tmp_path))
+            raise ValueError("Voice file unavailable")
+        with BoundedDownload(_MAX_VOICE_BYTES) as stream:
+            stream.name = "voice.ogg"
+            await message.bot.download_file(file.file_path, destination=stream)
+            revision = hashlib.sha256(stream.getvalue()).hexdigest()
+            key = (str(ctx.vault_root), str(event), adapter, revision)
+            if event is not None and key in _voice_events:
+                await message.answer(
+                    "Voice event already handled; no transcription or capture repeated."
+                )
+                return
+            transcript = None
+            if event is not None:
+                # Reserve before any lookup/provider await so concurrent copies
+                # cannot pass the check together, including on failure.
+                _voice_events[key] = None
+                if len(_voice_events) > 256:
+                    _voice_events.popitem(last=False)
+                transcript = await asyncio.to_thread(
+                    _captured_transcript, ctx, event, adapter, revision
+                )
+            if transcript is None:
+                stream.seek(0)
+                transcript = await asyncio.to_thread(transcriber.transcribe, stream)
     except Exception:
-        logger.exception("Failed to download voice file")
-        await message.answer("Failed to download voice file.")
+        await message.answer("Transcription failed or voice input refused; nothing captured.")
         return
-
-    # Transcribe (sync call, offload to thread)
-    try:
-        transcript = await asyncio.to_thread(transcriber.transcribe, tmp_path)
-    except RuntimeError as e:
-        await message.answer(f"Transcription failed: {e}")
-        return
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-    if not transcript:
+    if not transcript.strip():
         await message.answer("No speech detected in voice message.")
         return
-
-    # Route: if ends with '?' treat as question, otherwise capture
-    is_question = transcript.rstrip().endswith("?")
-
-    if is_question:
+    if transcript.rstrip().endswith("?"):
         from vaultmind.bot.handlers.routing import handle_smart_response
 
-        await message.answer(f"Transcript: _{transcript}_", parse_mode="Markdown")
         await handle_smart_response(ctx, message, transcript, is_question=True)
-    else:
-        from vaultmind.bot.handlers.capture import handle_capture
+        return
+    from vaultmind.bot.handlers.capture import handle_capture
 
-        await handle_capture(ctx, message, transcript)
-        await message.answer(f"Transcript: _{transcript}_", parse_mode="Markdown")
+    await handle_capture(
+        ctx,
+        message,
+        transcript,
+        raw_original=transcript,
+        adapter=adapter,
+        role="voice-transcript",
+        original_retained=False,
+        revision=revision,
+    )

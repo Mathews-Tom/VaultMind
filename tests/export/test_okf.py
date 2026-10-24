@@ -79,7 +79,7 @@ def _read_frontmatter(text: str) -> tuple[dict, str]:
 class TestExportOkfBundle:
     def test_exports_only_permanent_and_concept_notes(self, notes: list, tmp_path: Path) -> None:
         output_dir = tmp_path / "bundle"
-        result = export_okf_bundle(notes, output_dir)
+        result = export_okf_bundle(notes, output_dir, vault_root=tmp_path)
 
         assert isinstance(result, OkfExportResult)
         assert result.concept_count == 3
@@ -92,7 +92,7 @@ class TestExportOkfBundle:
         self, notes: list, tmp_path: Path
     ) -> None:
         output_dir = tmp_path / "bundle"
-        export_okf_bundle(notes, output_dir)
+        export_okf_bundle(notes, output_dir, vault_root=tmp_path)
 
         text = (output_dir / "permanent" / "entropy.md").read_text(encoding="utf-8")
         fm, _ = _read_frontmatter(text)
@@ -104,7 +104,7 @@ class TestExportOkfBundle:
 
     def test_unstamped_authority_exports_as_zero(self, notes: list, tmp_path: Path) -> None:
         output_dir = tmp_path / "bundle"
-        export_okf_bundle(notes, output_dir)
+        export_okf_bundle(notes, output_dir, vault_root=tmp_path)
 
         text = (output_dir / "permanent" / "physics" / "thermo.md").read_text(encoding="utf-8")
         fm, _ = _read_frontmatter(text)
@@ -114,7 +114,7 @@ class TestExportOkfBundle:
         self, notes: list, tmp_path: Path
     ) -> None:
         output_dir = tmp_path / "bundle"
-        export_okf_bundle(notes, output_dir)
+        export_okf_bundle(notes, output_dir, vault_root=tmp_path)
 
         text = (output_dir / "permanent" / "entropy.md").read_text(encoding="utf-8")
         _, body = _read_frontmatter(text)
@@ -125,7 +125,7 @@ class TestExportOkfBundle:
         self, notes: list, tmp_path: Path
     ) -> None:
         output_dir = tmp_path / "bundle"
-        export_okf_bundle(notes, output_dir)
+        export_okf_bundle(notes, output_dir, vault_root=tmp_path)
 
         text = (output_dir / "permanent" / "entropy.md").read_text(encoding="utf-8")
         assert "[[Randomness]]" not in text
@@ -135,7 +135,7 @@ class TestExportOkfBundle:
 
     def test_root_index_carries_only_okf_version(self, notes: list, tmp_path: Path) -> None:
         output_dir = tmp_path / "bundle"
-        export_okf_bundle(notes, output_dir, okf_version="0.1")
+        export_okf_bundle(notes, output_dir, vault_root=tmp_path, okf_version="0.1")
 
         text = (output_dir / "index.md").read_text(encoding="utf-8")
         fm, body = _read_frontmatter(text)
@@ -146,7 +146,7 @@ class TestExportOkfBundle:
 
     def test_non_root_index_has_no_frontmatter(self, notes: list, tmp_path: Path) -> None:
         output_dir = tmp_path / "bundle"
-        export_okf_bundle(notes, output_dir)
+        export_okf_bundle(notes, output_dir, vault_root=tmp_path)
 
         text = (output_dir / "permanent" / "index.md").read_text(encoding="utf-8")
         assert not text.startswith("---")
@@ -155,7 +155,7 @@ class TestExportOkfBundle:
 
     def test_nested_index_lists_only_direct_children(self, notes: list, tmp_path: Path) -> None:
         output_dir = tmp_path / "bundle"
-        export_okf_bundle(notes, output_dir)
+        export_okf_bundle(notes, output_dir, vault_root=tmp_path)
 
         text = (output_dir / "permanent" / "physics" / "index.md").read_text(encoding="utf-8")
         assert not text.startswith("---")
@@ -164,7 +164,7 @@ class TestExportOkfBundle:
 
     def test_log_md_has_one_dated_heading(self, notes: list, tmp_path: Path) -> None:
         output_dir = tmp_path / "bundle"
-        export_okf_bundle(notes, output_dir)
+        export_okf_bundle(notes, output_dir, vault_root=tmp_path)
 
         text = (output_dir / "log.md").read_text(encoding="utf-8")
         headings = [line for line in text.splitlines() if line.startswith("## ")]
@@ -174,10 +174,46 @@ class TestExportOkfBundle:
 
     def test_empty_vault_produces_empty_but_valid_bundle(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "bundle"
-        result = export_okf_bundle([], output_dir)
+        result = export_okf_bundle([], output_dir, vault_root=tmp_path)
 
         assert result.concept_count == 0
         assert (output_dir / "index.md").is_file()
         assert (output_dir / "log.md").is_file()
         text = (output_dir / "log.md").read_text(encoding="utf-8")
         assert "0 concepts exported" in text
+
+
+@pytest.mark.parametrize("reserved", ["wiki", "_wiki"])
+def test_export_rejects_reserved_output_alias_before_any_write(
+    tmp_path: Path, notes: list, reserved: str
+) -> None:
+    from vaultmind.vault.security import ReservedNamespaceError
+
+    protected = tmp_path / reserved
+    protected.mkdir()
+    original = protected / "existing.md"
+    original.write_bytes(b"retained current bytes")
+    alias = tmp_path / "export-alias"
+    alias.symlink_to(protected, target_is_directory=True)
+    with pytest.raises(ReservedNamespaceError):
+        export_okf_bundle(notes, alias, vault_root=tmp_path)
+    assert {path.name for path in protected.iterdir()} == {"existing.md"}
+    assert original.read_bytes() == b"retained current bytes"
+
+
+def test_external_export_rejects_nested_alias_into_reserved_storage(
+    tmp_path: Path, notes: list
+) -> None:
+    from vaultmind.vault.security import ReservedNamespaceError
+
+    vault = tmp_path / "selected-vault"
+    protected = vault / "_wiki"
+    protected.mkdir(parents=True)
+    outside = tmp_path / "external-export"
+    outside.mkdir()
+    (outside / "permanent").symlink_to(protected, target_is_directory=True)
+    with pytest.raises(ReservedNamespaceError):
+        export_okf_bundle(notes, outside, vault_root=vault)
+    assert list(protected.iterdir()) == []
+    assert not (outside / "index.md").exists()
+    assert not (outside / "log.md").exists()

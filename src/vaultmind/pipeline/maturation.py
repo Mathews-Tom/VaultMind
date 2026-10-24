@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from vaultmind.errors import VaultMindError
 from vaultmind.pipeline.clustering import NoteCluster, discover_clusters
+from vaultmind.vault.security import validate_ordinary_output_path
 
 if TYPE_CHECKING:
     from chromadb.api.models.Collection import Collection
@@ -76,7 +77,9 @@ class MaturationPipeline:
         self._llm = llm
         self._vault_root = vault_root
         default_state = Path.home() / ".vaultmind" / "data" / "maturation_state.json"
-        self._state_path = state_path or default_state
+        self._state_path = validate_ordinary_output_path(
+            state_path or default_state, self._vault_root
+        )
         self._state = load_state(self._state_path)
 
     def discover(self) -> list[NoteCluster]:
