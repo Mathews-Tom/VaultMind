@@ -260,24 +260,27 @@ Reviewed assets resolve relative to the verifier, not the caller's working direc
 For a noneditable local-wheel check, build once into a fresh external directory and install the frozen runtime dependencies plus `mcp`. From the repository root, with Python 3.12 and `uv` available:
 
 ```bash
-REPO="$PWD"
-T="$(mktemp -d)"
-mkdir -p "$T/home"
-uv export --frozen --no-dev --extra mcp --no-emit-project --format requirements-txt --output-file "$T/dependencies.txt"
-uv build --wheel --out-dir "$T/dist"
-uv venv --python 3.12 "$T/installed"
-uv pip install --python "$T/installed/bin/python" --requirement "$T/dependencies.txt" "$T"/dist/*.whl
-cd "$T"
-vm() { env -i PATH="$PATH" HOME="$T/home" ANONYMIZED_TELEMETRY=False "$T/installed/bin/vaultmind" "$@"; }
-vm --version
-vm --help
-env -i PATH="$PATH" HOME="$T/home" ANONYMIZED_TELEMETRY=False "$T/installed/bin/python" -I -c 'import vaultmind; print(vaultmind.__file__)'
-for CASE in retrieval mcp approval config wiki wiki-query; do
-  env -i PATH="$PATH" HOME="$T/home" ANONYMIZED_TELEMETRY=False "$T/installed/bin/python" -I "$REPO/scripts/verify_acceptance.py" --case "$CASE" --offline --receipt-out "$T/$CASE.json" || exit
-done
+(
+  set -e
+  REPO="$PWD"
+  T="$(mktemp -d)"
+  mkdir -p "$T/home"
+  uv export --frozen --no-dev --extra mcp --no-emit-project --format requirements-txt --output-file "$T/dependencies.txt"
+  uv build --wheel --out-dir "$T/dist"
+  uv venv --python 3.12 "$T/installed"
+  uv pip install --python "$T/installed/bin/python" --requirement "$T/dependencies.txt" "$T"/dist/*.whl
+  cd "$T"
+  vm() { env -i PATH="$PATH" HOME="$T/home" ANONYMIZED_TELEMETRY=False "$T/installed/bin/vaultmind" "$@"; }
+  vm --version
+  vm --help
+  env -i PATH="$PATH" HOME="$T/home" ANONYMIZED_TELEMETRY=False "$T/installed/bin/python" -I -c 'import vaultmind; print(vaultmind.__file__)'
+  for CASE in retrieval mcp approval config wiki wiki-query; do
+    env -i PATH="$PATH" HOME="$T/home" ANONYMIZED_TELEMETRY=False "$T/installed/bin/python" -I "$REPO/scripts/verify_acceptance.py" --case "$CASE" --offline --receipt-out "$T/$CASE.json"
+  done
+)
 ```
 
-The fresh `dist` directory must contain only the newly built wheel; record its full SHA-256 and source revision rather than selecting an old artifact. The printed import must be under the new environment's `site-packages`, not `src/`; receipts must show matching reviewed/runtime package hashes and the sibling installed console where used. The public verifier still needs the checkout's reviewed scripts/assets and committed migration history: this is not a claim that those verification assets ship inside the wheel. Repeat the README's source/create/update/query and reviewed-restore procedure with `vm --config /absolute/synthetic/config.toml wiki ...`, outside the checkout on fresh synthetic state. Scripted generator/query consumers establish engineering behavior, not live-model quality, native-watcher repair, private-vault readiness or release publication.
+The subshell stops at the first failed command without changing the caller's directory, variables, functions or shell options. The fresh `dist` directory must contain only the newly built wheel; record its full SHA-256 and source revision rather than selecting an old artifact. The printed import must be under the new environment's `site-packages`, not `src/`; receipts must show matching reviewed/runtime package hashes and the sibling installed console where used. The public verifier still needs the checkout's reviewed scripts/assets and committed migration history: this is not a claim that those verification assets ship inside the wheel. For manual coverage, add the README's source/create/update/query and reviewed-restore commands inside the subshell before it exits, using `vm --config /absolute/synthetic/config.toml wiki ...` outside the checkout on fresh synthetic state. Scripted generator/query consumers establish engineering behavior, not live-model quality, native-watcher repair, private-vault readiness or release publication.
 
 CI retains lint, strict source typing, full pytest and formatting checks. A separate fail-fast matrix runs each of `retrieval`, `mcp`, `approval`, `config`, `wiki` and `wiki-query` offline on Python 3.12 and 3.13 with `dev+mcp`, explicit interpreter selection and a temporary HOME. The query case exercises actual Click list/query/lint, approved current-page/source validation and the configured generation boundary with a scripted client. These are synthetic source-consumer checks, not hosted-model qualification or installed-wheel evidence. Wheel verification must invoke this reviewed script with the wheel environment's Python from outside the checkout, without source-path injection or an editable install.
 
