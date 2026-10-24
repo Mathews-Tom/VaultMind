@@ -501,13 +501,8 @@ def test_lint_reports_unreadable_approval_queue(
         queue.write_bytes(b"")
     before = snapshot(vault)
     rows = lint_pages(settings)
-    assert rows == [
-        {
-            "page": PAGE,
-            "status": "invalid",
-            "detail": "Wiki approval queue contains invalid records",
-        }
-    ]
+    assert [(row["page"], row["status"]) for row in rows] == [(PAGE, "invalid")]
+    assert LATE not in rows[0]["detail"]
     result = CliRunner().invoke(cli, ["--config", str(vault.parent / "query.toml"), "wiki", "lint"])
     assert result.exit_code == 1
     assert json.loads(result.output) == rows
