@@ -77,23 +77,28 @@ This command:
 
 Additionally, `GraphMaintainer` subscribes to `NoteDeletedEvent` on the event bus. When a note is deleted (via bot or watch mode), its graph references are cleaned up automatically.
 
-## Graph-Grounded Thinking
+## Graph and Knowledge Answering
 
-The `/think` command uses the knowledge graph as context:
+The graph remains an independent extraction, traversal, maintenance and belief
+evolution domain. It is not evidence for normal knowledge answers. Root `ask`,
+selected `wiki query`, Telegram question/chat, `/think` (including sticky and
+voice questions) and MCP `knowledge_query` use approved current wiki sections
+with complete retained provenance through the shared query core.
 
-1. The user's topic is sent to the LLM for entity extraction
-2. Extracted entities are looked up in the graph
-3. An ego subgraph (configurable depth via `llm.graph_hop_depth`) is built around matched entities
-4. The subgraph's relationships are serialized and injected into the thinking prompt alongside ChromaDB search results
+No graph entity extraction, ego-subgraph context, episode context or Chroma
+search result is injected into those answers. Source-only `/recall`,
+`search-sources` and MCP `vault_search` are discovery tools, not approved answer
+evidence. Thinking modes change presentation only; prior user questions resolve
+intent without making assistant replies, summaries or graph facts evidence.
 
-This gives the thinking partner awareness of how concepts in your vault relate to each other — not just what's semantically similar, but what's structurally connected.
-
-Configuration in `[llm]`:
-
-- `graph_context_enabled` — toggle graph context (default: true)
-- `graph_hop_depth` — ego subgraph depth (default: 2)
-- `graph_min_confidence` — minimum confidence for context entities (default: 0.6)
-- `graph_max_relationships` — max relationships in context (default: 20)
+The former answer-only `[llm]` graph-context controls are removed. Keep `[graph]`
+settings for actual graph operations: `extraction_model` selects their model
+(empty uses `llm.thinking_model`), `min_confidence` filters extraction and
+`persist_path` selects the graph file. `/graph`, MCP `graph_query`/`graph_path`,
+graph maintenance and evolution retain their independent permissions and
+behavior. A query does not update graph or episode state, mint a gap, distill a
+session or create a proposal/page. See the [query policy](mcp-integration.md#knowledge_query)
+for current-page validation, conflict citations and refusal boundaries.
 
 ## Belief Evolution
 

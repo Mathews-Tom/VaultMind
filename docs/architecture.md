@@ -27,7 +27,9 @@ Content rollback in a consistent completed workspace is a new reviewed update, n
 Path checks reject traversal, unsafe IDs, nonregular files and user-controlled symlinks, including control storage. Explicit source/draft paths may expand administrator-owned ancestor aliases with protected root-owned parent directories, such as macOS's system temporary-directory spelling; leaf symlinks remain refused. Retention-marked inputs fail before source/proposal persistence. Wiki-owned locking serializes cooperating wiki commands and paths/identities are rechecked immediately before replacement. This is neither an all-writer lock nor global multi-file atomicity: an editor or script ignoring the lock can still race replacement. Keep edits quiescent while applying; a stale proposal must not overwrite an observed edit. These local guarantees do not repair held legacy reindex/watcher behavior or qualify native providers.
 
 `wiki/query.py` owns read-only list and lint; `knowledge/query.py` owns the shared
-answer/evidence operation used by root CLI `ask` and explicit `wiki query`.
+answer/evidence operation used by root CLI `ask`, explicit `wiki query`, Telegram
+question/chat and `/think` (including sticky and voice questions), and MCP
+`knowledge_query`. There is no alternate conversational evidence engine.
 Read-only workspace/queue access does not initialize control directories,
 migrate databases or write accepted state. Empty list/lint create no workspace.
 Approved inspection requires exact latest completed applied bytes and matching
@@ -49,10 +51,11 @@ without a provider; missed synonyms do not establish absence from the wiki.
 Explicit `wiki query --page` selects 1–8 unique current paths through the same
 core, bypassing ranking only.
 
-Neither route adds linked pages, raw-source bodies, pending/history content,
-Chroma or FTS. Questions are at most 4096 characters and the complete UTF-8
-question/evidence envelope at most 128 KiB; overflow fails without truncation
-or dropping a selected page. Complete sections become evidence rows with
+No answering route adds linked pages, raw-source bodies, pending/history content,
+Chroma or FTS. Questions and each selected prior user question are at most 4096
+characters; the complete UTF-8 question/intent/evidence envelope is at most
+128 KiB. Overflow fails without truncation or dropping a selected page.
+Complete sections become evidence rows with
 result-local page-order/section-order IDs (`p1-s1`, etc.), page path/hash,
 heading/text and preserved source ID/path/hash/metadata hash/URI citations.
 Evidence-only returns `status: evidence` for a nonempty selection and empty
@@ -60,17 +63,36 @@ answer/citations. Lazy provider construction occurs only after valid complete
 evidence is assembled; empty, no-match, invalid, denied and oversized requests
 construct no provider.
 
-Generated query calls the existing configured client once with structured question/evidence/conflict data, treated as untrusted content, and validates a strict `status`/`answer`/`citations` response. `supported` and `conflicting` require unique known section IDs; `unsupported` has no citations. A selected unresolved `Conflicting information` section without a reviewed `Resolution` requires conflicting (citing every unresolved conflict section) or unsupported output, not an implicit winner. Invalid schema/citations or provider failure raises a redacted error, without fallback/retry. Current/source/operation identities are revalidated after completion before returning. The returned object includes evidence and unresolved page paths.
+Generated queries invoke the per-query factory only after evidence validation,
+then call `[llm].thinking_model` with `[llm].max_tokens` once. The structured
+question/intent/evidence/conflict envelope is untrusted content. The core validates
+an exact `status`/`answer`/`citations` schema: `supported` and `conflicting` need
+unique known section IDs; `unsupported` has no citations. An unresolved
+`Conflicting information` section without a reviewed `Resolution` requires
+conflicting output citing every unresolved conflict section, or unsupported,
+never an implicit winner. Invalid schema/citations and provider failures are
+errors, without fallback or hidden retry. Selected page/source/operation identities
+are revalidated after completion. Results retain complete evidence, provenance,
+unresolved page paths and lexical-selection qualifications.
 
-Neither citation membership nor structural conflict checks prove factual truth
-or semantic entailment. Readers must inspect sections and preserved sources.
-Queries never promote answers, submit proposals or mutate accepted state. They
-never fall back to raw notes, graph, memory, web or previous answers. Existing
-Telegram and MCP normal answering remain on their existing policy; source
-discovery changes do not make root CLI `ask` a transport-wide answer cutover.
-The [README procedure](../README.md#manual-source-backed-wiki)
-gives real SOURCE commands; synthetic offline adapters do not establish
-installed-wheel, live-model, private-vault, Telegram or native qualification.
+Citation membership and structural conflict checks do not prove factual truth or
+semantic entailment. Readers must inspect sections and preserved sources.
+Querying creates no proposal, approval, page/history update, graph/episode record,
+gap, extraction or distillation and never falls back to raw notes, graph, memory,
+web or previous answers. Session and audit persistence are separate, permitted
+effects, not evidence. Async Telegram and MCP adapters offload the synchronous
+operation to a worker; they do not run a second answer stage.
+
+`knowledge/render.py` preserves the accepted answer and full citation,
+section-to-page/source mapping, selected revisions, source identities, unresolved
+conflicts and selection qualifications in plain text. Evidence-only rendering also
+includes complete section text. Telegram sends every character in ordered chunks
+of at most 4000 characters with Markdown parsing disabled; it does not clip answers,
+rewrite citations or strip boundary whitespace. CLI/MCP return the structured result.
+
+The [README procedure](../README.md#manual-source-backed-wiki) gives SOURCE
+commands; synthetic offline adapters do not establish live-model, private-vault,
+Telegram or native qualification.
 
 ### Source intake and discovery
 
@@ -94,11 +116,32 @@ Chroma, FTS and approval are not one atomic transaction.
 
 Authenticated replay lookup validates adjacent event identities before reading matching retained closures. Invalid provenance or a matching incomplete/unauthorized closure refuses replay rather than becoming a missing event; unrelated bodies do not consume the matching closure's byte budget.
 
+For a capture/replay refusal, malformed or orphan adjacent provenance can block a
+later event even when its source body is unrelated. Stop affected captures and
+preserve all files and state. An authorized operator can identify candidate IDs
+from adjacent `_wiki/sources/ID.intake.json` manifest filenames and diagnose each
+using the existing API: open `WikiWorkspace(settings, read_only=True,
+allows_path=allows_path)`, then call
+`SourceIntake.from_workspace(workspace, allows_path=allows_path).read(ID)` inside
+its reading context. Use the operator's actual permission predicate, not a
+permissive replacement; complete retained dependencies must remain authorized.
+Record only the ID and failure class privately, never source bodies, hidden paths
+or exception messages in responses/logs. This diagnoses, not repairs. Do not delete
+or quarantine records, rewrite hashes, skip provenance, mark success, reset
+reservations, or restart to force replay. Reconciliation requires separate
+authorization; preservation promises neither automatic retry nor index completion.
+
 Text capture preserves submitted text. URL submission and extracted text have
 separate parent-linked identities; extraction is not wire-response preservation.
 Photo-original retention follows `save_originals`; audio is transient and voice
 questions do not create captured sources. A provider-derived description or
 transcript does not establish original retention or factual accuracy.
+
+These preservation guarantees cover the named intake adapters, not every
+independent producer. Research, connectors, maturation, bookmarking and
+conversation distillation retain their existing domain paths and limits; their
+generated notes are neither automatically intake-preserved nor wiki-approved.
+Enabling such a producer never makes its output factual authority for answering.
 
 `knowledge/sources.py::search_sources(settings, query, *, store=None, n_results=5, note_type=None, allows_path=None)` serves CLI `search-sources`, Telegram `/recall`, MCP `vault_search` and benchmark queries. It enumerates authorized current ordinary Markdown and validated preserved text before ranking/limits/counts, independently of approval. Results carry `source-only`, `approved: false`, current-byte digests and provenance. Current wiki pages, history, queue/control files and unsafe aliases are excluded. Optional indexed paths assist ranking; displayed content always comes from current bytes. Raw distance is retained only for an exact current indexed chunk. The shared parser orders tags deterministically in chunk prefixes so unchanged tagged sources have the same indexed/current representation across processes; old differing prefix variants remain unknown rather than supplying stale confidence. Lexical-only or stale chunks remain unknown. Permissions apply before body reads, including the full retained-source dependency closure.
 
@@ -127,6 +170,18 @@ src/vaultmind/
 ├── config.py        # Pydantic Settings — TOML + env vars
 ├── errors.py        # VaultMindError base exception hierarchy
 │
+├── knowledge/       # Shared evidence policy and source preservation/discovery
+│   ├── query.py         # Approved-current answering/evidence; one completion boundary
+│   ├── discovery.py     # Authorized deterministic lexical page selection
+│   ├── intake.py        # Immutable source intake and retained-closure validation
+│   ├── sources.py       # Explicit unapproved source-only exploration
+│   └── render.py        # Lossless plain-text answer/provenance presentation
+│
+├── wiki/            # Explicit manual curation; never automatic query promotion
+│   ├── workspace.py     # Preservation, proposal, review and page application
+│   ├── query.py         # Read-only current-page list/lint
+│   └── cli.py           # CLI ask and wiki command adapters
+│
 ├── vault/           # Vault I/O layer
 │   ├── parser.py        # Markdown + YAML frontmatter parsing, heading-aware chunking
 │   ├── models.py        # Note, NoteChunk, NoteType data classes
@@ -153,7 +208,6 @@ src/vaultmind/
 ├── graph/           # Knowledge graph layer
 │   ├── knowledge_graph.py # NetworkX graph with JSON persistence
 │   ├── extractor.py       # LLM entity/relationship extraction from notes
-│   ├── context.py         # Graph context builder (ego subgraph, entity extraction from queries)
 │   ├── evolution.py       # Belief evolution (confidence drift, relationship shifts, stale claims)
 │   └── maintenance.py     # Orphan cleanup, stale source pruning, event-driven deletion
 │
@@ -169,7 +223,7 @@ src/vaultmind/
 │   ├── telegram.py      # Router, handler registration, callback queries
 │   ├── commands.py      # Thin facade delegating to handlers/ package
 │   ├── router.py        # Heuristic message classifier (Intent enum)
-│   ├── thinking.py      # Multi-turn thinking partner (RAG + graph context)
+│   ├── thinking.py      # Approved-current session intent + independent idle finalization
 │   ├── session_store.py # SQLite-backed thinking session persistence
 │   ├── sanitize.py      # Input sanitization (length, null bytes, injection detection)
 │   ├── transcribe.py    # OpenAI Whisper API voice transcription
@@ -256,8 +310,8 @@ src/vaultmind/
 │   ├── procedural.py    # Workflow synthesis from episodic patterns (experimental)
 │   └── gaps.py          # GapStore — deduplicated, lifecycle-tracked knowledge gaps
 │
-└── mcp/         # MCP server — 18 tools for vault CRUD, graph, memory introspection, traversal
-    ├── server.py        # MCP server with 18 vault tools
+└── mcp/         # MCP server — approved answering, vault CRUD, graph, memory and traversal
+    ├── server.py        # 19 registered tools with profile-scoped result policy
     ├── auth.py          # Profile enforcement + audit logging
     └── profiles.py      # Profile loading (researcher/planner/full)
 ```
@@ -299,18 +353,34 @@ Fusion and relevance are separate signals. `hybrid_search()` returns, per hit:
 | `rrf_score`    | Reciprocal Rank Fusion score — ordering only, never relevance evidence                        |
 | `authority_score` | Added by `apply_authority()` — `rrf_score` (or `1 - distance`) × the stamped-authority weight; ordering only |
 
-`retrieval_confidence(hits, score_floor)` (`indexer/ranking.py`) is the single classifier used by `/recall` gap minting, `vaultmind bench` decline scoring, and the thinking partner's gap minting. It looks only at raw `distance` and returns a `RetrievalConfidence` (`StrEnum`):
+`retrieval_confidence(hits, score_floor)` (`indexer/ranking.py`) classifies raw
+source-discovery relevance for `/recall` and `vaultmind bench` decline scoring.
+Approved-current answering does not use it or mint retrieval gaps. It looks only
+at raw `distance` and returns a `RetrievalConfidence` (`StrEnum`):
 
 1. empty result set → `weak`
 2. any raw distance `< score_floor` (`[bench].score_floor`, default `0.5`) → `strong`
 3. otherwise, any hit with a `None`/missing distance → `unknown`
 4. otherwise → `weak`
 
-`unknown` means "the results are non-empty, but no hit has vector evidence of relevance and at least one has no vector evidence at all" — typically lexical-only BM25 hits. It is deliberately not weak: no knowledge gap is minted (`GapKind.WEAK_RETRIEVAL` / `UNANSWERED_QUESTION`), `vaultmind bench` withholds deterministic decline credit and counts the question as unknown confidence, and `formatter.relevance_label()` renders `relevance unknown` rather than a fabricated percentage. Authority re-ranking can reorder hits but never rewrites `distance`, so it cannot change the confidence of a result set. Raw-vector consumers (duplicate detection, note suggestions, digest) are unchanged.
+`unknown` means no hit establishes vector relevance and at least one lacks vector
+evidence, typically a lexical-only BM25 hit. Bench withholds deterministic decline
+credit and `formatter.relevance_label()` renders `relevance unknown`, not a
+fabricated percentage. Authority ranking can reorder hits but never rewrites
+`distance`. Independent raw-vector consumers such as duplicate detection,
+suggestions and digest remain available; none supplies approved-answer evidence.
 
 Benchmark bundles pair `golden.yaml` with `retrieval.yaml` candidates and actual `vault/` Markdown. Candidate YAML supplies paths, optional chunk indices, raw distances and fusion scores only; content and authority come from real parsed files. Missing/null distance remains unknown. The loader snapshots indexed chunks once, and shared source queries independently hydrate current corpus bytes; stale chunk text cannot lend confidence to changed content.
 
-`scripts/verify_acceptance.py --case retrieval --offline` exercises parser → Chroma/BM25 → shared source discovery → real recall/benchmark consumers, plus the existing thinking-partner gap classifier, in synthetic HOME/state. Deterministic embeddings, scripted LLM/Telegram transport and labeled exact-threshold raw-hit substitutions are not live-quality evidence. Boundary hits use pre-created real Markdown chunks. A separate real lexical-only file is discoverable without vector evidence. The same case retains authority/distance invariants and tests authorized top-k against a larger truly closer forbidden population and current-byte hydration against stale indexed excerpts. Thinking remains vector-only; its unknown branch uses the labeled boundary store.
+`scripts/verify_acceptance.py --case retrieval --offline` exercises parser →
+Chroma/BM25 → shared source discovery → real recall/benchmark consumers in
+synthetic HOME/state. Deterministic embeddings, recorded Telegram transport and
+labeled exact-threshold substitutions are not live-quality evidence. Boundary
+hits use pre-created Markdown chunks; a separate lexical-only current file is
+discoverable without vectors. The case checks authority/distance invariants,
+authorized top-k and current-byte hydration against stale indexed excerpts.
+Approved-current answering has separate `wiki-query` and `mcp` scripted-provider
+coverage, not vector-based conversational gap coverage.
 
 ### Offline Acceptance and CI
 
@@ -384,37 +454,54 @@ Two-stage hash stability eliminates partial-write bugs from Obsidian's rapid sav
 ### Message Routing
 
 ```text
-User message → Sanitize → Intent classifier (heuristic-first)
-                              ↓
-                   ┌──────────┼──────────────┐
-                   ↓          ↓              ↓
-                Capture    Greeting      Question/Chat
-               (inbox)    (static)      (LLM + vault context)
+User message → capture_all? → source capture
+             → active /think session? → approved-current query
+             → heuristic classifier → capture / static greeting / approved query
 ```
 
-The router uses heuristics (regex, length, line count) before falling back to LLM classification. Greetings and explicit captures never invoke the LLM — zero cost for common operations.
+Routing uses local patterns, length and line count; question versus chat changes
+neither evidence nor model. Capture may independently invoke URL/vision providers;
+it must not be described as universally model-free. Static greetings make no
+completion. `/recall` explicitly selects raw exploration rather than answering.
 
 ### Thinking Partner
 
 ```text
-User topic → Identity memory (planned always-loaded tier)
-          → Entity extraction (LLM) → Ego subgraph (NetworkX)
-                                           ↓
-                                    Vault search (ChromaDB)
-                                           ↓
-                                    Context assembly → LLM response
-                                           ↓
-                            Session store (SQLite) → promotion pipeline (planned)
+Current question + last 3 complete user questions (intent only)
+    → fresh approved-current selection and complete sections
+    → one configured answer completion + validation and revalidation
+    → plain-text result → session history (SQLite)
+
+Existing scheduler, only when distill.enabled
+    → claim expired histories → independent distillation/index/episode/gap producer
 ```
 
-Multi-turn sessions persist to SQLite with `(user_id, session_name)` composite key. Follow-up messages within the TTL continue the same session automatically.
+Sessions persist full exchanges with `(user_id, session_name)` identities.
+Follow-ups within `[telegram].thinking_session_ttl` continue the active session.
+Only three complete recent user questions can supply intent and lexical selection
+terms; assistant text, historical summaries, graph facts and episodes never enter
+query evidence. Selected legacy questions are validated in full, not truncated or
+silently discarded. `explore:`, `critique:`, `synthesize:` and `plan:` are
+presentation prefixes, not prompts for alternate evidence engines. The former
+answer-only graph-context builder and XML response-extraction parser are removed;
+independent graph extraction and memory domains remain.
 
-The architectural boundary is now explicit:
+Query expiry leaves the original record untouched and starts a fresh generation;
+it does not summarize, archive, finalize or dispatch a producer. When
+`[distill].enabled` is true, the bot registers a separate one-minute job on its
+existing scheduler. It archives full expired histories and existing summaries,
+claims pending work before generation, then attempts distillation for records
+meeting `min_turns`. Its ordinary note/index/episode/gap effects do not approve a
+wiki page. Completed, skipped, failed and interrupted claimed records remain
+retained; failed or claimed work is not automatically retried after polling or
+restart. Partial producer effects may already exist, so retention is not atomic
+index completion. Explicit `/distill` and bookmarking remain separate actions.
 
-- identity memory: a small curated vault-backed context tier
-- retrieval memory: search and graph-derived context assembled per request
-- episodic memory: decision and outcome ledger
-- promoted memory: distilled durable facts and priorities derived from raw interactions
+The per-query factory is lazy, but the bot's general domain client is still
+assembled at startup for other commands/producers. `[routing].chat_model` remains
+for real edit/date consumers, not answering; `fast_model` remains for independent
+domain work. Old RAG/graph-answer, XML-extraction and session-summary controls
+have been removed rather than left as alternate engines.
 
 ### Zettelkasten Maturation
 
@@ -489,7 +576,9 @@ Zero infrastructure. The graph runs in-process with JSON serialization. No Neo4j
 
 ### Why heuristic-first routing?
 
-Most messages are obvious: capture prefixes, greetings, long pastes. Using regex and simple rules first means zero LLM calls for ~60% of messages. The LLM classifier only activates for ambiguous cases (questions vs. conversational).
+Capture patterns, greetings and question/chat distinctions are handled locally.
+No model classifier chooses a different answering policy; ambiguous question/chat
+messages use the same approved-current core.
 
 ### Why Protocol-based LLM abstraction?
 

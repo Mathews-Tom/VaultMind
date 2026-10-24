@@ -1,20 +1,15 @@
-"""Thinking partner — RAG + knowledge graph augmented ideation.
-
-Supports multi-turn sessions with vault context retrieval.
-Provider-agnostic via the LLMClient abstraction.
-"""
+"""Session intent for approved-current queries; independent idle distillation."""
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
-from vaultmind.indexer.ranking import RetrievalConfidence, retrieval_confidence
-from vaultmind.llm.client import LLMError, Message
-from vaultmind.memory.gaps import GapKind
+from vaultmind.knowledge.query import MAX_INTENT_QUESTIONS, query_knowledge
+from vaultmind.knowledge.render import render_knowledge_result
 from vaultmind.pipeline.distill import (
     distill_conversation,
     extract_and_store_episodes,
@@ -22,670 +17,236 @@ from vaultmind.pipeline.distill import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable
 
     from vaultmind.bot.session_store import SessionStore
-    from vaultmind.config import DistillConfig, LLMConfig, TelegramConfig
-    from vaultmind.graph.context import GraphContextBuilder
-    from vaultmind.graph.knowledge_graph import KnowledgeGraph
+    from vaultmind.config import Settings
     from vaultmind.indexer.store import VaultStore
     from vaultmind.llm.client import LLMClient
     from vaultmind.memory.gaps import GapStore
-    from vaultmind.pipeline.distill import DistillResult
     from vaultmind.vault.parser import VaultParser
 
-logger = logging.getLogger(__name__)
-
-THINKING_SYSTEM_PROMPT = """\
-You are a thinking partner with access to the user's personal knowledge base (an Obsidian vault).
-You have context from their notes and knowledge graph provided below.
-
-Your role:
-1. Challenge assumptions with evidence from their own notes
-2. Surface connections they might have missed
-3. Play devil's advocate when appropriate
-4. Synthesize across different knowledge domains in their vault
-5. End with concrete next actions or open questions
-
-When referencing their notes, use [[Note Title]] format.
-When the Knowledge Graph Context section is present, use those entity relationships
-to inform your analysis — they represent explicit connections the user has established.
-Be direct, substantive, and avoid generic advice. You know this person's work — act like it.
-
----
-
-**OPTIONAL: Structured Extraction (for system processing only)**
-
-If your response mentions specific entities (people, projects, tools, concepts, organizations),
-you may optionally tag them using XML to help improve the knowledge graph. These tags are
-automatically parsed and removed before the response is shown to the user.
-
-Tagging guidelines:
-- Only tag entities you are confident about (confidence >= 0.75)
-- Entity types: person, project, concept, tool, organization, event, location
-- Relationship types: related_to, part_of, depends_on, created_by, \
-influences, mentioned_in, competes_with, preceded_by
-
-Tag formats:
-- <vm:entity name="..." type="..." confidence="0.X">brief description</vm:entity>
-- <vm:relationship from="entity1" to="entity2" type="..." confidence="0.X" />
-- <vm:episode decision="..." context="..." \
-status="pending|success|failure"><lesson>...</lesson>\
-<entity>...</entity></vm:episode>
-
-Do NOT overuse tags. Focus on the most significant entities and relationships.
-Incorrect or missing tags have no penalty — the user will never see them.
-"""
-
-THINKING_MODES = {
-    "explore": (
-        "Divergent ideation: generate multiple angles, unexpected connections, and novel framings."
-    ),
-    "critique": "Stress-test the idea: find weaknesses, blind spots, and failure modes.",
-    "synthesize": (
-        "Connect dots across domains: find patterns and unifying themes in the user's knowledge."
-    ),
-    "plan": (
-        "Break down into actionable steps: create a concrete execution plan with dependencies."
-    ),
-}
+THINKING_MODES = ("explore", "critique", "synthesize", "plan")
 
 
 class ThinkingPartner:
-    """Multi-turn thinking partner powered by LLM + vault context."""
+    """Keep conversational intent, never conversational factual authority.
+
+    Only complete recent user questions reach the shared query core. Assistant
+    text and historical summaries remain available to explicit producer tools.
+    Querying never finalizes sessions, summarizes, extracts or distills content.
+    """
 
     def __init__(
         self,
-        llm_config: LLMConfig,
-        telegram_config: TelegramConfig,
-        llm_client: LLMClient,
+        settings: Settings,
+        *,
+        llm_factory: Callable[[], LLMClient],
         session_store: SessionStore | None = None,
-        graph_context_builder: GraphContextBuilder | None = None,
-        vault_root: Path | None = None,
-        parser: VaultParser | None = None,
-        distill_config: DistillConfig | None = None,
-        gap_store: GapStore | None = None,
-        score_floor: float = 0.5,
     ) -> None:
-        self.llm_config = llm_config
-        self._telegram_config = telegram_config
-        self.session_ttl = telegram_config.thinking_session_ttl
-        self._client = llm_client
+        self._settings = settings
+        self._llm_factory = llm_factory
         self._store = session_store
-        self._graph_ctx = graph_context_builder
-        self._vault_root = vault_root
-        self._parser = parser
-        self._distill_config = distill_config
-        self._gap_store = gap_store
-        self._score_floor = score_floor
-        # In-memory hot cache over SQLite
+        self.session_ttl = settings.telegram.thinking_session_ttl
         self._sessions: dict[int, _ThinkingSession] = {}
-        # Sessions reaped by idle-timeout, awaiting distillation dispatch
-        self._pending_distill: list[tuple[int, _ThinkingSession]] = []
+        self._inflight: dict[int, int] = {}
+        self._histories: list[tuple[int, _ThinkingSession]] = []
 
     async def think(
         self,
         user_id: int,
         topic: str,
-        store: VaultStore,
-        graph: KnowledgeGraph,
-        episode_store: object | None = None,
-    ) -> str:
-        """Process a thinking request — retrieves context and generates response."""
+        *,
+        use_session: bool = True,
+        evidence_only: bool = False,
+    ) -> dict[str, Any]:
+        """Return the core outcome after fresh approved-current selection.
 
-        # Detect thinking mode from prefix (e.g., "/think explore: my topic")
-        mode = "explore"
-        for m in THINKING_MODES:
-            if topic.lower().startswith(f"{m}:"):
-                mode = m
-                topic = topic[len(m) + 1 :].strip()
-                break
-
-        # Get or create session
-        session = self._get_session(user_id)
-        self._trigger_pending_distillation(store, episode_store)
-
-        # Retrieve vault context (offload sync I/O to thread pool)
-        vault_context = await asyncio.to_thread(
-            self._build_vault_context, topic, store, graph, episode_store, user_id
-        )
-
-        # Build graph context via entity extraction (if available)
-        graph_context_str = ""
-        if self._graph_ctx is not None and self.llm_config.graph_context_enabled:
-            session_id = str(user_id)
-            try:
-                graph_block = await self._graph_ctx.build(
-                    query=topic,
-                    session_id=session_id,
-                    hop_depth=self.llm_config.graph_hop_depth,
-                    min_confidence=self.llm_config.graph_min_confidence,
-                    max_relationships=self.llm_config.graph_max_relationships,
-                )
-                if graph_block is not None:
-                    graph_context_str = graph_block.render(
-                        min_confidence=self.llm_config.graph_min_confidence
-                    )
-            except Exception:
-                logger.warning("Graph context building failed", exc_info=True)
-
-        full_context = vault_context
-        if graph_context_str:
-            full_context = f"{vault_context}\n\n{graph_context_str}"
-
-        # Build messages (includes summaries of older turns if available)
-        messages = self._build_messages(session, topic, full_context, mode, user_id)
-
-        try:
-            response = await asyncio.to_thread(
-                self._client.complete,
-                messages=messages,
-                model=self.llm_config.thinking_model,
-                max_tokens=self.llm_config.max_tokens,
-                system=THINKING_SYSTEM_PROMPT,
-            )
-
-            raw_reply = response.text
-
-            # Extract entities/relationships and strip tags from response
-            reply = await self._apply_extraction(raw_reply, graph)
-
-            # Update session history (with clean response, tags stripped)
-            session.add_turn(topic, reply)
-
-            if self._store is not None:
-                self._store.save(user_id, session.history)
-
-                # Trigger async summarization if enabled
-                if self._telegram_config.thinking_summarization_enabled:
-                    asyncio.ensure_future(self._summarize_if_needed(user_id))
-
-            return reply
-
-        except LLMError as e:
-            logger.error("LLM error in thinking mode (%s): %s", e.provider, e)
-            return f"API error ({e.provider}): {e}"
-
-    def _build_vault_context(
-        self,
-        topic: str,
-        store: VaultStore,
-        graph: KnowledgeGraph,
-        episode_store: object | None = None,
-        user_id: int | None = None,
-    ) -> str:
-        """Retrieve relevant context from vault, knowledge graph, and episodic memory."""
-        parts: list[str] = []
-
-        # Semantic search for relevant notes
-        results = store.search(topic, n_results=self.llm_config.max_context_notes)
-        if results:
-            parts.append("## Relevant Notes from Vault\n")
-            for hit in results:
-                meta = hit["metadata"]
-                title = meta.get("note_title", "Untitled")
-                path = meta.get("note_path", "")
-                content = hit["content"][:500]  # Cap per-chunk context
-                parts.append(f"### [[{title}]] (`{path}`)\n{content}\n")
-        self._maybe_mint_weak_context_gap(topic, results, user_id)
-
-        # Knowledge graph context — try to find entities mentioned in the topic
-        words = topic.split()
-        graph_context_added = False
-        for word in words:
-            if len(word) < 3:
-                continue
-            neighbors = graph.get_neighbors(word, depth=1)
-            if neighbors["entity"]:
-                if not graph_context_added:
-                    parts.append("\n## Knowledge Graph Context\n")
-                    graph_context_added = True
-
-                ent = neighbors["entity"]
-                parts.append(f"**{ent.get('label', word)}** ({ent.get('type', 'unknown')})")
-                if neighbors["outgoing"]:
-                    rels = [f"{r['relation']} → {r['target']}" for r in neighbors["outgoing"][:5]]
-                    parts.append(f"  Connections: {', '.join(rels)}")
-                parts.append("")
-
-        # Also try multi-word entity lookup for the full topic
-        neighbors = graph.get_neighbors(topic.strip(), depth=1)
-        if neighbors["entity"] and not graph_context_added:
-            parts.append("\n## Knowledge Graph Context\n")
-            ent = neighbors["entity"]
-            parts.append(f"**{ent.get('label', topic)}** ({ent.get('type', 'unknown')})")
-            if neighbors["outgoing"]:
-                rels = [f"{r['relation']} → {r['target']}" for r in neighbors["outgoing"][:5]]
-                parts.append(f"  Connections: {', '.join(rels)}")
-
-        # Episodic memory context — surface relevant past decisions
-        if episode_store is not None:
-            self._add_episodic_context(parts, topic, episode_store)
-
-        return "\n".join(parts) if parts else "No specific vault context found for this topic."
-
-    def _maybe_mint_weak_context_gap(
-        self,
-        topic: str,
-        results: list[dict[str, Any]],
-        user_id: int | None,
-    ) -> None:
-        """Mint an `unanswered_question` gap when retrieval is confidently weak.
-
-        Zero-additional-LLM-cost signal: no vault evidence exists to answer
-        `topic` from or cite, so any reply is necessarily a decline or
-        uncited — uses the shared raw-distance confidence classifier `/recall`
-        and `bench` apply. Unknown evidence (no raw vector distance) never mints.
+        A mode prefix is a UI convention only. At most three complete previous
+        user questions supply intent; the core validates every selected scalar
+        without truncation and owns all completion/authority decisions.
         """
-        if self._gap_store is None:
-            return
-        confidence = retrieval_confidence(results, self._score_floor)
-        if confidence is not RetrievalConfidence.WEAK:
-            return
-        evidence_ref = (
-            f"telegram-thinking:{user_id}" if user_id is not None else "telegram-thinking"
-        )
+        if isinstance(topic, str):
+            for mode in THINKING_MODES:
+                if topic.lower().startswith(f"{mode}:"):
+                    topic = topic[len(mode) + 1 :].strip()
+                    break
+        session = self._get_session(user_id) if use_session else None
+        if session is not None:
+            self._inflight[user_id] = self._inflight.get(user_id, 0) + 1
         try:
-            self._gap_store.mint(topic, GapKind.UNANSWERED_QUESTION, evidence_ref=evidence_ref)
-        except Exception:
-            logger.exception("Gap minting failed for topic %r", topic)
-
-    def _add_episodic_context(
-        self,
-        parts: list[str],
-        topic: str,
-        episode_store: object,
-    ) -> None:
-        """Query episodic memory for relevant past decisions and inject into context."""
-        from vaultmind.memory.store import EpisodeStore
-
-        if not isinstance(episode_store, EpisodeStore):
-            return
-
-        topic_words = [w for w in topic.split() if len(w) >= 3]
-        seen: set[str] = set()
-        episodic_added = False
-
-        for word in topic_words[:5]:
-            try:
-                episodes = episode_store.search_by_entity(word, limit=3)
-            except Exception:
-                logger.debug("Episodic search failed for '%s'", word, exc_info=True)
-                continue
-
-            for ep in episodes:
-                if ep.episode_id in seen:
-                    continue
-                seen.add(ep.episode_id)
-
-                if not episodic_added:
-                    parts.append("\n## Past Decisions\n")
-                    episodic_added = True
-
-                status = ep.outcome_status.value
-                outcome = ep.outcome or "pending"
-                parts.append(f"- **{ep.decision}** -> {outcome} ({status})")
-                if ep.lessons:
-                    parts.append(f"  Lessons: {'; '.join(ep.lessons[:3])}")
-
-    async def _apply_extraction(
-        self,
-        raw_response: str,
-        graph: KnowledgeGraph,
-    ) -> str:
-        """Parse extraction tags from response, apply graph updates, return clean text."""
-        if not self.llm_config.single_pass_extraction_enabled:
-            return raw_response
-
-        from vaultmind.bot.extraction_parser import parse_extraction_tags
-
-        result = await asyncio.to_thread(parse_extraction_tags, raw_response)
-
-        threshold = self.llm_config.extraction_confidence_threshold
-
-        # Apply entity updates
-        for entity in result.entities:
-            if entity.confidence < threshold:
-                continue
-            try:
-                graph.add_entity(
-                    name=entity.name,
-                    entity_type=entity.type,
-                    confidence=entity.confidence,
-                )
-            except Exception:
-                logger.debug("Failed to add extracted entity: %s", entity.name, exc_info=True)
-
-        # Apply relationship updates
-        for rel in result.relationships:
-            if rel.confidence < threshold:
-                continue
-            try:
-                graph.add_relationship(
-                    source=rel.source,
-                    target=rel.target,
-                    relation=rel.relation_type,
-                    confidence=rel.confidence,
-                )
-            except Exception:
-                logger.debug(
-                    "Failed to add extracted relationship: %s -> %s",
-                    rel.source,
-                    rel.target,
-                    exc_info=True,
-                )
-
-        # Persist graph if anything was extracted
-        if result.entities or result.relationships:
-            try:
-                await asyncio.to_thread(graph.save)
-            except Exception:
-                logger.warning("Failed to save graph after extraction", exc_info=True)
-
-        if result.entities or result.relationships:
-            logger.info(
-                "Extracted %d entities, %d relationships from thinking response",
-                len(result.entities),
-                len(result.relationships),
+            intent = (
+                tuple(turn["user"] for turn in session.history[-MAX_INTENT_QUESTIONS:])
+                if session is not None
+                else ()
             )
-
-        return result.clean_response
-
-    def _build_messages(
-        self,
-        session: _ThinkingSession,
-        topic: str,
-        vault_context: str,
-        mode: str,
-        user_id: int = 0,
-    ) -> list[Message]:
-        """Build the message history with optional summaries of older turns."""
-        messages: list[Message] = []
-
-        # Include summaries of older turns (if available)
-        if self._store is not None and user_id:
-            summaries = self._store.get_summaries(user_id)
-            for summary in summaries:
-                summary_msg = (
-                    f"[Summary of earlier conversation — "
-                    f"turns {summary['start_turn']}-{summary['end_turn']}]\n"
-                    f"{summary['summary']}\n"
-                    f"Key topics: {', '.join(summary['topics'])}"
-                )
-                if summary["questions"]:
-                    summary_msg += f"\nOpen questions: {', '.join(summary['questions'])}"
-                messages.append(Message(role="assistant", content=summary_msg))
-
-        # Include recent turns in full
-        recent_n = self._telegram_config.thinking_recent_turns_to_keep
-        for turn in session.history[-recent_n:]:
-            messages.append(Message(role="user", content=turn["user"]))
-            messages.append(Message(role="assistant", content=turn["assistant"]))
-
-        # Current turn with context
-        mode_instruction = THINKING_MODES.get(mode, "")
-        user_message = (
-            f"**Mode:** {mode}\n{mode_instruction}\n\n"
-            f"**Context from vault:**\n{vault_context}\n\n"
-            f"**Topic:** {topic}"
-        )
-        messages.append(Message(role="user", content=user_message))
-
-        return messages
-
-    async def _summarize_if_needed(self, user_id: int, session_name: str = "default") -> None:
-        """Check if summarization is needed and run it asynchronously."""
-        if self._store is None:
-            return
-
-        turn_count = self._store.count_turns(user_id, session_name)
-        threshold = self._telegram_config.thinking_message_count_threshold // 2
-        if turn_count < threshold:
-            return
-
-        batch = self._store.get_unsummarized_batch(
-            user_id,
-            session_name,
-            self._telegram_config.thinking_recent_turns_to_keep,
-            self._telegram_config.thinking_batch_size,
-        )
-        if batch is None:
-            return
-
-        turns, start_idx, end_idx = batch
-        try:
-            summary_data = await asyncio.to_thread(self._generate_summary, turns)
-
-            existing = self._store.get_summaries(user_id, session_name)
-            next_batch = len(existing)
-
-            self._store.save_summary(
-                user_id=user_id,
-                session_name=session_name,
-                batch_number=next_batch,
-                start_turn_index=start_idx,
-                end_turn_index=end_idx,
-                summary_text=str(summary_data["summary"]),
-                key_topics=list(summary_data["topics"]),
-                open_questions=list(summary_data["questions"]),
+            result = await asyncio.to_thread(
+                query_knowledge,
+                self._settings,
+                topic,
+                evidence_only=evidence_only,
+                llm_factory=self._llm_factory,
+                intent_questions=intent,
             )
-            logger.info(
-                "Summarized turns %d-%d for user %d session %s",
-                start_idx,
-                end_idx,
-                user_id,
-                session_name,
-            )
-        except Exception:
-            logger.warning("Session summarization failed", exc_info=True)
-
-    def _generate_summary(self, turns: list[dict[str, str]]) -> dict[str, list[str] | str]:
-        """Generate an LLM summary of a batch of conversation turns."""
-        conversation_text = "\n".join(
-            f"User: {turn['user']}\nAssistant: {turn['assistant']}" for turn in turns
-        )
-
-        prompt = (
-            "Summarize this thinking partner conversation excerpt. "
-            "Extract the essential insights and open threads.\n\n"
-            f"Conversation:\n{conversation_text}\n\n"
-            "Format your response exactly as:\n"
-            "SUMMARY: [2-3 sentence summary]\n"
-            "TOPICS: [comma-separated list of main topics]\n"
-            'QUESTIONS: [comma-separated list of open questions, or "none"]'
-        )
-
-        response = self._client.complete(
-            messages=[Message(role="user", content=prompt)],
-            model=self.llm_config.fast_model,
-            max_tokens=self._telegram_config.thinking_summary_max_tokens,
-            system=(
-                "You are a conversation summarizer. "
-                "Be concise and extract only essential information."
-            ),
-        )
-
-        return self._parse_summary_response(response.text)
-
-    @staticmethod
-    def _parse_summary_response(text: str) -> dict[str, list[str] | str]:
-        """Parse structured summary from LLM response."""
-        summary = ""
-        topics: list[str] = []
-        questions: list[str] = []
-
-        for line in text.strip().splitlines():
-            line = line.strip()
-            if line.upper().startswith("SUMMARY:"):
-                summary = line[len("SUMMARY:") :].strip()
-            elif line.upper().startswith("TOPICS:"):
-                raw = line[len("TOPICS:") :].strip()
-                topics = [t.strip() for t in raw.split(",") if t.strip()]
-            elif line.upper().startswith("QUESTIONS:"):
-                raw = line[len("QUESTIONS:") :].strip()
-                if raw.lower() != "none":
-                    questions = [q.strip() for q in raw.split(",") if q.strip()]
-
-        return {
-            "summary": summary or "No summary generated.",
-            "topics": topics,
-            "questions": questions,
-        }
+            if session is not None and self._sessions.get(user_id) is session:
+                session.add_turn(topic, render_knowledge_result(result))
+                if self._store is not None:
+                    self._store.save(user_id, session.history, session.session_name)
+            return result
+        finally:
+            if session is not None:
+                remaining = self._inflight[user_id] - 1
+                if remaining:
+                    self._inflight[user_id] = remaining
+                else:
+                    del self._inflight[user_id]
 
     def _get_session(self, user_id: int) -> _ThinkingSession:
-        """Get or create a thinking session for a user."""
-        now = time.time()
-
-        # Clean expired sessions from cache
-        expired = [
-            uid for uid, s in self._sessions.items() if now - s.last_active > self.session_ttl
-        ]
-        for uid in expired:
-            self._pending_distill.append((uid, self._sessions[uid]))
-            del self._sessions[uid]
-
-        # Clean expired sessions from SQLite
-        if self._store is not None:
-            self._store.cleanup_expired(self.session_ttl)
-
-        # Check in-memory cache
-        if user_id in self._sessions:
-            session = self._sessions[user_id]
-            session.last_active = now
-            return session
-
-        # Check SQLite
-        if self._store is not None:
-            history = self._store.load(user_id)
-            if history is not None:
-                session = _ThinkingSession()
-                session.history = history
-                session.last_active = now
-                self._sessions[user_id] = session
-                return session
-
-        # Create new session
+        """Select active history without deleting an expired history's only copy."""
+        cached = self._sessions.get(user_id)
+        if cached is not None and (
+            user_id in self._inflight or time.time() - cached.last_active <= self.session_ttl
+        ):
+            return cached
+        stored = (
+            self._store.load_active(user_id, self.session_ttl) if self._store is not None else None
+        )
         session = _ThinkingSession()
+        if stored is not None:
+            session.history = stored["history"]
+            session.session_name = stored["session_name"]
+            session.last_active = stored["last_active"]
+        elif self._store is not None and self._store.has_session(user_id):
+            # Leave expired default history untouched for the non-query finalizer.
+            session.session_name = f"thinking:{uuid4().hex}"
+        if self._store is None:
+            self._histories.append((user_id, session))
         self._sessions[user_id] = session
         return session
 
-    def clear_session(self, user_id: int) -> None:
-        """Clear a user's thinking session."""
-        self._sessions.pop(user_id, None)
-        if self._store is not None:
-            self._store.delete(user_id)
-        if self._graph_ctx is not None:
-            self._graph_ctx.clear_session(str(user_id))
-
-    def _trigger_pending_distillation(
-        self, store: VaultStore, episode_store: object | None
-    ) -> None:
-        """Fire-and-forget distillation for sessions reaped by idle-timeout.
-
-        Drains the pending queue unconditionally (even when distillation is
-        disabled) so it never grows unbounded.
-        """
-        if not self._pending_distill:
-            return
-        pending, self._pending_distill = self._pending_distill, []
-        if self._distill_config is None or not self._distill_config.enabled:
-            return
-        for uid, session in pending:
-            if len(session.history) < self._distill_config.min_turns:
-                continue
-            asyncio.ensure_future(self._distill_and_index(uid, session, store, episode_store))
-
-    async def _distill_and_index(
-        self,
-        user_id: int,
-        session: _ThinkingSession,
-        store: VaultStore,
-        episode_store: object | None,
-    ) -> None:
-        """Distill one expired session into a qa-artifact note, then index it."""
-        config = self._distill_config
-        if config is None or self._vault_root is None or self._parser is None:
-            logger.warning(
-                "Distillation enabled but vault_root/parser not configured; skipping user %s",
-                user_id,
+    def has_active_session(self, user_id: int) -> bool:
+        """Check activity without reaping histories or invoking a producer."""
+        session = self._sessions.get(user_id)
+        if session is not None:
+            return (
+                user_id in self._inflight or time.time() - session.last_active <= self.session_ttl
             )
-            return
+        return self._store is not None and self._store.has_active_session(user_id, self.session_ttl)
 
-        source_ref = f"telegram-thinking:{user_id}:{int(session.last_active)}"
-        occurred_at = datetime.fromtimestamp(session.last_active, tz=UTC).strftime(
+    def clear_session(self, user_id: int) -> None:
+        """Explicitly clear the user's session, including retained idle records."""
+        self._sessions.pop(user_id, None)
+        self._histories = [(uid, s) for uid, s in self._histories if uid != user_id]
+        if self._store is not None:
+            self._store.delete_conversations(user_id)
+
+    async def finalize_idle_sessions(
+        self,
+        *,
+        store: VaultStore,
+        parser: VaultParser,
+        episode_store: object | None = None,
+        gap_store: GapStore | None = None,
+    ) -> dict[str, int]:
+        """Run the enabled idle producer from the bot scheduler, not a query.
+
+        Claim before any await/provider call. Failed or interrupted claims retain
+        their original history and summaries and are not retried on every poll.
+        Distillation/indexing is not atomic: a failed record may have partial
+        producer effects and must not be treated as successfully finalized.
+        """
+        counts = {"completed": 0, "failed": 0, "skipped": 0}
+        config = self._settings.distill
+        if not config.enabled:
+            return counts
+        now = time.time()
+        for uid, session in tuple(self._sessions.items()):
+            if uid not in self._inflight and now - session.last_active > self.session_ttl:
+                del self._sessions[uid]
+        records: list[dict[str, Any]]
+        if self._store is not None:
+            records = self._store.claim_expired(
+                self.session_ttl, excluded_user_ids=frozenset(self._inflight)
+            )
+        else:
+            records = []
+            for uid, session in self._histories:
+                if (
+                    session.finalization_state == "active"
+                    and uid not in self._inflight
+                    and now - session.last_active > self.session_ttl
+                ):
+                    session.finalization_state = "claimed"
+                    records.append(
+                        dict(
+                            user_id=uid,
+                            history=session.history,
+                            last_active=session.last_active,
+                            session=session,
+                        )
+                    )
+        for record in records:
+            state = "skipped"
+            error: str | None = None
+            if len(record["history"]) >= config.min_turns:
+                try:
+                    await asyncio.to_thread(
+                        self._finalize_record, record, store, parser, episode_store, gap_store
+                    )
+                    state = "completed"
+                except Exception as exc:
+                    state = "failed"
+                    error = f"{type(exc).__name__}: {exc}"
+            counts[state] += 1
+            if self._store is not None:
+                self._store.finish_finalization(record["id"], state, error)
+            else:
+                record["session"].finalization_state = state
+        return counts
+
+    def _finalize_record(
+        self,
+        record: dict[str, Any],
+        store: VaultStore,
+        parser: VaultParser,
+        episode_store: object | None,
+        gap_store: GapStore | None,
+    ) -> None:
+        config = self._settings.distill
+        client = self._llm_factory()
+        model = config.model or self._settings.llm.thinking_model
+        source_ref = f"telegram-thinking:{record['user_id']}:{record['last_active']}"
+        occurred_at = datetime.fromtimestamp(record["last_active"], tz=UTC).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
-        model = config.model or self.llm_config.thinking_model
-
-        try:
-            result = await asyncio.to_thread(
-                distill_conversation,
-                session.history,
-                self._client,
-                model,
-                self._vault_root,
-                config.output_folder,
-                source_ref,
-                occurred_at,
-                config.max_tokens,
-            )
-        except Exception:
-            logger.exception("Distillation failed for user %s", user_id)
-            return
-
-        if not result.success:
-            logger.warning(
-                "Distillation produced no qa-artifact for user %s: %s", user_id, result.error
-            )
-            return
-
-        await asyncio.to_thread(
-            self._index_distilled_note, result, model, store, episode_store, source_ref
+        result = distill_conversation(
+            record["history"],
+            client,
+            model,
+            self._settings.vault.path,
+            config.output_folder,
+            source_ref,
+            occurred_at,
+            config.max_tokens,
         )
-
-    def _index_distilled_note(
-        self,
-        result: DistillResult,
-        model: str,
-        store: VaultStore,
-        episode_store: object | None,
-        source_ref: str,
-    ) -> None:
-        """Parse, index, and run episodic extraction over a distilled note (thread-offloaded)."""
-        assert self._vault_root is not None
-        assert self._parser is not None
-        note = self._parser.parse_file(self._vault_root / result.output_path)
-        store.index_single_note(note, self._parser)
-
+        if not result.success:
+            raise RuntimeError(result.error or "Distillation produced no qa-artifact")
+        note = parser.parse_file(self._settings.vault.path / result.output_path)
+        store.index_single_note(note, parser)
         if episode_store is not None:
-            try:
-                extract_and_store_episodes(note, self._client, model, episode_store)
-            except Exception:
-                logger.exception(
-                    "Episodic extraction failed for distilled note %s", result.output_path
-                )
-
-        mint_gap_for_unresolved(result, self._gap_store, source_ref)
-
-    def has_active_session(self, user_id: int) -> bool:
-        """Check if a user has an active (non-expired) thinking session."""
-        now = time.time()
-        if user_id in self._sessions:
-            session = self._sessions[user_id]
-            if now - session.last_active <= self.session_ttl:
-                return True
-            del self._sessions[user_id]
-        if self._store is not None:
-            return self._store.has_session(user_id)
-        return False
+            extract_and_store_episodes(note, client, model, episode_store)
+        mint_gap_for_unresolved(result, gap_store, source_ref)
 
 
 class _ThinkingSession:
-    """Tracks a multi-turn thinking conversation."""
+    """Full exchange storage for explicit inspection/bookmark/distillation."""
 
     def __init__(self) -> None:
         self.history: list[dict[str, str]] = []
-        self.last_active: float = time.time()
+        self.last_active = time.time()
+        self.finalization_state = "active"
+        self.session_name = "default"
 
     def add_turn(self, user_msg: str, assistant_msg: str) -> None:
         self.history.append({"user": user_msg, "assistant": assistant_msg})
+        self.last_active = time.time()

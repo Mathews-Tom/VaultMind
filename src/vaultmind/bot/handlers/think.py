@@ -5,8 +5,9 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from vaultmind.bot.handlers.utils import _is_authorized, _split_message
-from vaultmind.bot.sanitize import MAX_LLM_INPUT_LENGTH, sanitize_text
+from vaultmind.bot.handlers.utils import _is_authorized
+from vaultmind.knowledge.render import render_knowledge_result, split_knowledge_text
+from vaultmind.wiki.workspace import WikiError
 
 if TYPE_CHECKING:
     from aiogram.types import Message
@@ -25,22 +26,15 @@ async def handle_think(
     if not _is_authorized(ctx, message):
         return
 
-    san = sanitize_text(topic, max_length=MAX_LLM_INPUT_LENGTH, operation="think")
-    topic = san.text
-    if not topic:
-        await message.answer("Empty topic after sanitization.")
-        return
-
     user_id = message.from_user.id if message.from_user else 0
     await message.answer("\U0001f9e0 Thinking...")
 
-    response = await ctx.thinking.think(
-        user_id=user_id,
-        topic=topic,
-        store=ctx.store,
-        graph=ctx.graph,
-        episode_store=ctx.episode_store,
-    )
+    try:
+        result = await ctx.thinking.think(user_id, topic)
+    except WikiError as exc:
+        await message.answer(f"Knowledge query refused: {exc}", parse_mode=None)
+        return
+    response = render_knowledge_result(result)
 
     if last_exchanges is not None:
         from vaultmind.bot.handlers.bookmark import LastExchange as _LastExchange
@@ -51,6 +45,5 @@ async def handle_think(
             timestamp=time.monotonic(),
         )
 
-    # Split long responses for Telegram's 4096 char limit
-    for chunk in _split_message(response, max_len=4000):
-        await message.answer(chunk, parse_mode="Markdown")
+    for chunk in split_knowledge_text(response):
+        await message.answer(chunk, parse_mode=None)

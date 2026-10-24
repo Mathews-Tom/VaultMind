@@ -17,7 +17,6 @@ def _make_handlers() -> object:
     settings.vault.excluded_folders = []
     settings.telegram.allowed_user_ids = []
     settings.routing.chat_model = ""
-    settings.routing.chat_max_tokens = 100
     settings.llm.fast_model = "test-model"
     settings.graph.persist_path = MagicMock()
 

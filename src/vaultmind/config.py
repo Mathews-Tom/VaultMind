@@ -178,15 +178,8 @@ class LLMConfig(BaseSettings):
     provider: Literal["anthropic", "openai", "gemini", "ollama"] = "anthropic"
     thinking_model: str = "claude-sonnet-4-20250514"
     fast_model: str = "claude-sonnet-4-20250514"
-    max_context_notes: int = 8
     max_tokens: int = 4096
     ollama_base_url: str = "http://localhost:11434"
-    graph_context_enabled: bool = True
-    graph_hop_depth: int = 2
-    graph_min_confidence: float = 0.6
-    graph_max_relationships: int = 20
-    single_pass_extraction_enabled: bool = True
-    extraction_confidence_threshold: float = 0.7
 
 
 class TelegramConfig(BaseSettings):
@@ -199,20 +192,12 @@ class TelegramConfig(BaseSettings):
     )
     thinking_session_ttl: int = 3600  # seconds
     notification_chat_id: int = 0  # chat ID for proactive notifications; 0 = disabled
-    thinking_summarization_enabled: bool = True
-    thinking_message_count_threshold: int = 20
-    thinking_recent_turns_to_keep: int = 6
-    thinking_batch_size: int = 4
-    thinking_summary_max_tokens: int = 400
 
 
 class RoutingConfig(BaseSettings):
     """Message routing configuration for the Telegram bot."""
 
-    chat_model: str = ""  # Empty = use llm.fast_model
-    chat_max_tokens: int = 1024
-    vault_context_enabled: bool = True
-    max_context_chunks: int = 4
+    chat_model: str = ""  # Empty = llm.fast_model for edit/date-resolution operations
     capture_all: bool = False  # Escape hatch: route all text to capture
 
 
