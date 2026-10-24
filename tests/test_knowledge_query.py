@@ -84,7 +84,7 @@ def corpus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Corpus:
     config = tmp_path / "query.toml"
     config.write_text(
         f"[vault]\npath = {json.dumps(str(vault))}\n"
-        'excluded_folders = ["_wiki"]\n'
+        'excluded_folders = ["wiki", "_wiki"]\n'
         '[llm]\nprovider = "ollama"\nthinking_model = "scripted-query"\n'
     )
     result = Corpus(load_settings(config), vault)
@@ -464,3 +464,30 @@ def test_invalid_automatic_authority_refuses_before_provider_and_restores_exactl
     )
     assert result["selection"]["selected_pages"] == [CACHE]
     assert any("31 days" in row["text"] for row in result["evidence"])
+
+
+@pytest.mark.parametrize("term", ["current", "understanding"])
+def test_structural_heading_alone_cannot_select_unrelated_evidence(
+    corpus: Corpus, term: str
+) -> None:
+    corpus.publish(CACHE, cache_body())
+    before = snapshot(corpus.vault)
+    result = query_knowledge(corpus.settings, f"{term} xylophone", llm_factory=forbidden_provider)
+    assert result["reason"] == "no_lexical_support"
+    assert result["selected_pages"] == []
+    assert snapshot(corpus.vault) == before
+
+
+@pytest.mark.parametrize("position", ["title", "body"])
+def test_structural_words_in_user_content_remain_discoverable(
+    corpus: Corpus, position: str
+) -> None:
+    title = "Current account" if position == "title" else "Account"
+    body = "The current account is active." if position == "body" else "The account is active."
+    corpus.publish(
+        CACHE,
+        f"# {title}\n\n## Current understanding\n\n{body} [[_wiki/sources/cache-source]]\n",
+    )
+    result = query_knowledge(corpus.settings, "current", evidence_only=True)
+    assert result["selection"]["selected_pages"] == [CACHE]
+    assert any(body in row["text"] for row in result["evidence"])
